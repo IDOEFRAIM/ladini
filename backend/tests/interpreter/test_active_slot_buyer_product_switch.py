@@ -192,6 +192,21 @@ class TestQuantityProvenance:
         for t in ("je veux acheter du lait", "je ne sais pas", "beaucoup", ""):
             assert not ok(t), t
 
+    def test_article_un_is_not_proof_in_a_non_quantitative_expression(self):
+        from ladini.domain.quantity_unit import text_states_a_quantity as ok
+
+        for t in ("je veux un peu de lait", "donne-moi un autre", "une petite quantite", "un max de lait"):
+            assert not ok(t, 1.0), t
+            assert not ok(t), t
+        # « un/une » réellement quantitatif, valeur proposée = 1
+        for t in ("je veux un poulet", "une tete de boeuf", "juste un"):
+            assert ok(t, 1.0), t
+        # « un » ne prouve JAMAIS une quantité différente de 1
+        assert not ok("je veux un poulet", 5.0)
+        # autres preuves : valeur non jugée (conversions légitimes)
+        assert ok("une demi tonne", 500.0)
+        assert ok("20 sacs", 20.0)
+
     def test_invented_quantity_without_any_number_is_not_an_answer(self):
         d = _dec("ANSWER", {"quantity": 1})
         ctx = ActiveSlotContext(
@@ -204,3 +219,8 @@ class TestQuantityProvenance:
             current_product="poulets", message_text="deux poulets",
         )
         assert buyer_slot_answer_conflict(_dec("ANSWER", {"quantity": 2}), ok_ctx) is None
+        peu = ActiveSlotContext(
+            category="QUANTITY", field_name="quantity", goal="BUYER_ADD_TO_CART",
+            current_product="poulets", message_text="je veux un peu de lait",
+        )
+        assert buyer_slot_answer_conflict(_dec("ANSWER", {"quantity": 1}), peu) == "no_slot_value"

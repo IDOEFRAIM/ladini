@@ -180,27 +180,46 @@ def _collapse_to_base_unit(
     return converted, base
 
 
-#: Numéraux français (lexique FERMÉ, pas une liste d'intentions) : sert uniquement à
-#: prouver qu'un message énonce un nombre, voir `text_states_a_quantity`.
+#: Numéraux français SANS ambiguïté d'article (lexique FERMÉ, pas une liste d'intentions) :
+#: chacun énonce un nombre ; voir `text_states_a_quantity`.
 _FRENCH_NUMERALS = frozenset(
-    "un une deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze "
+    "deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze "
     "quinze seize vingt trente quarante cinquante soixante cent cents mille douzaine "
     "dizaine vingtaine trentaine quinzaine centaine demi demie moitie".split()
 )
 
+#: « un/une » est aussi l'article indéfini : il ne vaut preuve de quantité que s'il n'ouvre
+#: pas une locution non quantitative (« un peu de », « un autre », « un petit »…).
+_NON_QUANTITATIVE_AFTER_UN = frozenset(
+    "peu petit petite grand grande autre max maximum minimum tas truc machin "
+    "bon bonne gros grosse bout brin".split()
+)
 
-def text_states_a_quantity(text: str) -> bool:
-    """Le message énonce-t-il un nombre (chiffre ou numéral français) ?
 
-    Garde de PROVENANCE : une quantité extraite par un LLM dont le message ne
-    contient aucun nombre est une invention (incident 2026-10-01 — « je veux
-    acheter du lait » devenu `quantity=1`), jamais une réponse. Ne juge PAS la
-    valeur extraite, seulement qu'elle a un appui textuel."""
+def text_states_a_quantity(text: str, proposed: Optional[float] = None) -> bool:
+    """Le message énonce-t-il VRAIMENT une quantité ?
+
+    Garde de PROVENANCE : une quantité extraite par un LLM sans appui textuel est une
+    invention (incident 2026-10-01 — « je veux acheter du lait » devenu `quantity=1`).
+    Preuves acceptées : un chiffre ; un numéral français non ambigu ; « un/une » seulement
+    s'il n'ouvre pas une locution non quantitative (« un peu de lait » n'énonce pas 1) ET
+    que la valeur proposée est 1 (ou inconnue). Ne juge PAS la valeur extraite pour les
+    autres preuves (conversions d'unité légitimes : « une demi-tonne » → 500 kg)."""
     folded = unicodedata.normalize("NFKD", str(text or "").lower())
     folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
     if re.search(r"\d", folded):
         return True
-    return any(tok in _FRENCH_NUMERALS for tok in re.findall(r"[a-z]+", folded))
+    tokens = re.findall(r"[a-z]+", folded)
+    if any(tok in _FRENCH_NUMERALS for tok in tokens):
+        return True
+    if proposed is not None and float(proposed) != 1.0:
+        return False
+    for i, tok in enumerate(tokens):
+        if tok in ("un", "une"):
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if nxt not in _NON_QUANTITATIVE_AFTER_UN:
+                return True
+    return False
 
 
 def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:

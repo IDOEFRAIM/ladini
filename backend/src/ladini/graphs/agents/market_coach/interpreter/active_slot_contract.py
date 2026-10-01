@@ -135,6 +135,13 @@ def build_active_slot_context(state: Dict[str, Any]) -> ActiveSlotContext:
 _VALUE_SLOT_CATEGORIES = frozenset({"QUANTITY", "UNIT", "PRICE"})
 
 
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _product_key(value: Any) -> str:
     """Clé de comparaison tolérante (casse, accents, article, pluriel) —
     « poulet »/« Poulets »/« des poulets » désignent le même produit."""
@@ -183,7 +190,9 @@ def buyer_slot_answer_conflict(
     if (
         entities.get("quantity") is not None
         and context.message_text is not None
-        and not text_states_a_quantity(context.message_text)
+        and not text_states_a_quantity(
+            context.message_text, _as_float(entities.get("quantity"))
+        )
     ):
         return "no_slot_value"
     said_product = entities.get("product")

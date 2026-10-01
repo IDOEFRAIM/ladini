@@ -238,6 +238,29 @@ class TestProdReplay:
         assert rt.stock_checks() == []
         assert state["active_cart"] == []
 
+    def test_un_peu_de_lait_does_not_certify_quantity_one(self):
+        llm = _SequencedLLM(
+            [
+                {
+                    "disposition": "ACTION",
+                    "action": "SET_QUANTITY",
+                    "quantity": 1,
+                    "unit": None,
+                    "confidence": 0.95,
+                }
+            ]
+        )
+        rt = _Rt(llm=llm)
+        interp = make_input_interpreter("BUYER")
+        state = _after_turn1(_Rt())
+        state = apply_patch(
+            state, {"normalized_text": "un peu de lait", "user_query": "un peu de lait"}
+        )
+        state = apply_patch(state, run(interp(state, rt)))
+        assert state["interpreted_event"] == "UNKNOWN", state.get("raw_analysis")
+        assert rt.stock_checks() == []
+        assert state["active_cart"] == []
+
     def test_new_purchase_deviation_on_structured_route_reclassifies(self):
         llm = _SequencedLLM(
             [

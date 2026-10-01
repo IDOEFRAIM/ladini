@@ -224,6 +224,13 @@ def _parse_and_validate(
     return decision, ""
 
 
+def _proposed_number(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _outcome_for_decision(
     decision: StructuredActionDecision,
     prompt_context: StructuredActionPromptContext,
@@ -281,7 +288,9 @@ def _outcome_for_decision(
     if (
         text is not None
         and raw["action"] in (ActionType.SET_QUANTITY, ActionType.SET_PACKAGE_COUNT)
-        and not text_states_a_quantity(text)
+        and not text_states_a_quantity(
+            text, _proposed_number(raw.get("quantity", raw.get("package_count")))
+        )
     ):
         logger.info(
             "BUYER_ACTIVE_SLOT_FASTPATH_REJECTED goal=%s expected_slot=%s "
