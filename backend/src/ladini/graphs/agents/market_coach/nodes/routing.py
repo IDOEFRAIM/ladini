@@ -116,6 +116,13 @@ def _route_after_session_bootstrap(state: MarketAgentState) -> str:
 # `goal_planner` (aucun goal ne doit être verrouillé avant le choix de
 # l'utilisateur) ni `memory_update`/`validator` (aucun `transaction_payload`
 # à toucher tant qu'aucun goal n'est choisi).
+# RESOLVE_INTENT_CLARIFICATION (Étape 9C) route aussi vers `response_strategy`,
+# mais pour la raison OPPOSÉE : `cognitive_guard` a DÉJÀ rejoué `validator`
+# lui-même (`_resolve_intent_clarification`) et posé le patch complet
+# (`current_goal`/`transaction_payload`/`pending_interaction` pour le
+# prochain slot, ou l'annulation propre) — le reste du pipeline générique
+# (`goal_planner`/`memory_update`/`validator`) ne doit PAS rejouer une
+# deuxième fois par-dessus un état déjà résolu.
 _COGNITIVE_ACTION_ROUTES = {
     ConversationAction.START_OR_PLAN_GOAL: "to_planner",
     ConversationAction.CONTINUE_ACTIVE_GOAL: "to_planner",
@@ -124,6 +131,7 @@ _COGNITIVE_ACTION_ROUTES = {
     ConversationAction.CLARIFY: "to_clarification",
     ConversationAction.ASK_SWITCH_CONFIRMATION: "to_strategy",
     ConversationAction.ASK_INTENT_SELECTION: "to_strategy",
+    ConversationAction.RESOLVE_INTENT_CLARIFICATION: "to_strategy",
     ConversationAction.RECOVER_ACTIVE_GOAL: "to_strategy",
     ConversationAction.ABANDON_ACTIVE_GOAL: "to_clarification",
 }
