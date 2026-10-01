@@ -298,6 +298,37 @@ def _merge_clarification_facts(
         and str(current_product).strip().lower() != str(pending_product).strip().lower()
     ):
         return current_clean
+    # (2026-10-01, Étape 9D, §12 — "je veux les vendre à 700 FCFA par litre")
+    # : le repli déterministe d'extraction quantité+unité de l'interpréteur
+    # (`interpreter/routing.py`) lit tout motif "NOMBRE UNITÉ" en fin de
+    # phrase comme un candidat quantité — y compris quand ce même nombre a
+    # DÉJÀ été correctement attribué à `price` par le LLM (prouvé en
+    # construisant ce fichier : `extracted_entities` contenait simultanément
+    # `price=700` ET `quantity=700` pour ce texte). Sans ce garde,
+    # `merged.update(current_clean)` écrasait la quantité déjà connue
+    # (90 L) par ce doublon du prix — perte silencieuse exactement du type
+    # que le mandat §12 interdit. Heuristique volontairement étroite : ne
+    # s'applique QUE si `pending_facts` a déjà sa propre quantité (une
+    # correction légitime de quantité coïncidant numériquement avec le prix
+    # reste un faux-négatif résiduel assumé, documenté au rapport final —
+    # bien plus rare qu'une réponse de prix pendant une clarification).
+    def _as_float(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    current_price_f = _as_float(current_clean.get("price"))
+    current_quantity_f = _as_float(current_clean.get("quantity"))
+    _price_equals_quantity = (
+        current_price_f is not None and current_price_f == current_quantity_f
+    )
+    if _price_equals_quantity and pending_facts.get("quantity") not in (None, ""):
+        current_clean = dict(current_clean)
+        current_clean.pop("quantity", None)
+        current_clean.pop("unit", None)
     merged = dict(pending_facts)
     merged.update(current_clean)
     return merged
