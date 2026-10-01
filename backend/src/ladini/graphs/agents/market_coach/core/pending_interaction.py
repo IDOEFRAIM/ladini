@@ -104,6 +104,11 @@ SUBFLOW_OWNED_KINDS = frozenset(
         InteractionKind.PROVIDE_LOCATION,
         InteractionKind.VERIFY_OTP,
         InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
+        # (2026-10-01, Étape 9A/9B) : posé par `cognitive_guard` quand une
+        # déclaration hors tunnel est AMBIGUOUS entre plusieurs intentions —
+        # `target` porte les faits+candidats, résolue par un flow dédié
+        # (Étape 9C), jamais par le classifieur générique ENTER_FIELD.
+        InteractionKind.CLARIFY_INTENT,
     }
 )
 

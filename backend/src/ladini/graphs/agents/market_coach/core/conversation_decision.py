@@ -38,6 +38,15 @@ class ConversationAction:
     # voir la condition d'exclusion de ce dernier). Ne bascule JAMAIS automatiquement (mandat
     # §A3) : pose une question fermée oui/non, voir `nodes/cognitive.py`.
     ASK_SWITCH_CONFIRMATION = "ASK_SWITCH_CONFIRMATION"
+    # (2026-10-01, Étape 9A/9B — ambiguïté hors tunnel) : des FAITS métier
+    # clairs (produit/quantité) mais AUCUN tunnel actif et AUCUN signal
+    # d'action qui départage plusieurs intentions du catalogue également
+    # plausibles (ex: "j'ai 90 L de miel" — vendre ? enregistrer en stock ?).
+    # Jamais un goal choisi au hasard (mandat §9) : pose une clarification
+    # ciblée, préserve les faits+candidats dans `pending_interaction`
+    # (`InteractionKind.CLARIFY_INTENT`), sans jamais verrouiller `current_
+    # goal` ni créer de draft (voir `nodes/cognitive.py`).
+    ASK_INTENT_SELECTION = "ASK_INTENT_SELECTION"
     # Legacy literal maintained for downstream compatibility (see module docstring).
     RECOVER_ACTIVE_GOAL = "recover_active_tunnel"
     ABANDON_ACTIVE_GOAL = "abandon_tunnel_max_retries"
@@ -50,6 +59,7 @@ class ConversationAction:
             DISAMBIGUATE,
             CLARIFY,
             ASK_SWITCH_CONFIRMATION,
+            ASK_INTENT_SELECTION,
             RECOVER_ACTIVE_GOAL,
             ABANDON_ACTIVE_GOAL,
         }

@@ -24,7 +24,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # À incrémenter à CHAQUE changement comportemental — composante de la clé de
 # cache LLM ET dimension Langfuse (`prompt_version`), même discipline que
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
-NEW_TASK_PROMPT_VERSION = "new_task_v9"
+NEW_TASK_PROMPT_VERSION = "new_task_v10"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -35,7 +35,7 @@ libre.
 
 Ta tâche :
 1. choisir EXACTEMENT une disposition parmi NEW_TASK, CONFIRM, REJECT, \
-OUT_OF_SCOPE, UNKNOWN ;
+OUT_OF_SCOPE, UNKNOWN, AMBIGUOUS ;
 2. si NEW_TASK, choisir exactement une intention parmi le catalogue \
 fourni ci-dessous ;
 3. extraire uniquement les informations EXPLICITEMENT présentes dans CE \
@@ -66,10 +66,19 @@ restriction que CONFIRM ci-dessus.
 sport, salutation vide sans but...).
 - UNKNOWN : impossible de comprendre ou message incohérent — sortie VALIDE, \
 ne force jamais une intention juste pour répondre quelque chose.
+- AMBIGUOUS : les FAITS sont clairs (ex: produit+quantité) mais AUCUN \
+verbe d'action (vendre, enregistrer en stock, déclarer une récolte...) ne \
+départage ≥2 intentions du catalogue également compatibles ("j'ai X", "il \
+me reste X" sans verbe = AMBIGUOUS ; "vendre"/"enregistrer"/"récolté... je \
+veux l'enregistrer" = NEW_TASK normal). Jamais une devinette au confidence \
+le plus haut — l'absence de signal d'action rend le choix structurellement \
+indécidable, pas juste incertain.
 
-Si NEW_TASK : le champ `intent` est OBLIGATOIRE (une valeur du catalogue). \
-Sinon (CONFIRM/REJECT/OUT_OF_SCOPE/UNKNOWN) : `intent` reste `null` et \
-`entities` reste entièrement vide — rien de fiable à en tirer.
+Si NEW_TASK : `intent` obligatoire, `candidate_goals` vide.
+Si AMBIGUOUS : `intent` null, `candidate_goals` obligatoire (≥2 valeurs \
+EXACTES du catalogue), `entities` REMPLI des faits compris (jamais vidés).
+Sinon (CONFIRM/REJECT/OUT_OF_SCOPE/UNKNOWN) : `intent` null, \
+`candidate_goals` vide, `entities` entièrement vide.
 
 RÈGLES D'EXTRACTION DES ENTITÉS :
 - `product` : le premier produit/culture mentionné (ex: "tomates"), \
@@ -137,12 +146,22 @@ litre, et 1 bidon de 5 L coûte 10000 FCFA, 1 bidon de 20 litres coûte \
 3000.0, "price_unit": "LITRE", "pricing_tiers": [{"quantity": 5.0, "unit": \
 "L", "price": 10000.0, "packaging": "bidon"}, {"quantity": 20.0, "unit": \
 "L", "price": 50000.0, "packaging": "bidon"}]}.
+
+EXEMPLE AMBIGUOUS vs NEW_TASK (frontière à généraliser, pas une phrase à \
+mémoriser) : "j'ai 90 L de miel" (aucun verbe d'action) → \
+disposition=AMBIGUOUS, candidate_goals=["SALES_PUBLISH_PRODUCT", \
+"STOCK_REGISTER_HARVEST"], entities={"product": "miel", "quantity": 90.0, \
+"unit": "LITRE"} — alors que "je veux VENDRE 90 L de miel" ou "je veux \
+ENREGISTRER 90 L de miel dans mon stock" (verbe d'action explicite) → \
+disposition=NEW_TASK, intent respectivement SALES_PUBLISH_PRODUCT ou \
+STOCK_REGISTER_HARVEST, mêmes entities.
 """
 
 _JSON_SCHEMA_BLOCK = """\
 Réponds strictement avec cet objet JSON, sans aucun autre texte :
-{"disposition": "NEW_TASK|CONFIRM|REJECT|OUT_OF_SCOPE|UNKNOWN", \
+{"disposition": "NEW_TASK|CONFIRM|REJECT|OUT_OF_SCOPE|UNKNOWN|AMBIGUOUS", \
 "intent": "<intention du catalogue|null>", "confidence": <0.0 à 1.0>, \
+"candidate_goals": ["<intention du catalogue>", ...], \
 "entities": {"product": "<str|null>", "additional_products": ["<str>", ...], \
 "quantity": <float|null>, "unit": "<str|null>", "price": <float|null>, \
 "price_unit": "<str|null>", "pricing_tiers": \

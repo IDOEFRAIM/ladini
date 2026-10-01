@@ -97,6 +97,10 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec(
         "extracted_entities", FieldLifecycle.EPHEMERAL, reset_value={"__reset__": True}
     ),
+    # (2026-10-01, Étape 9A/9B) : mono-tour comme `extracted_entities` ci-dessus
+    # — `cognitive_guard` les recopie dans `pending_interaction.target`
+    # (DURABLE) avant la fin du tour ; ce champ-ci ne survit jamais seul.
+    FieldSpec("candidate_goals", FieldLifecycle.EPHEMERAL, reset_value=[]),
     FieldSpec(
         "raw_analysis", FieldLifecycle.EPHEMERAL, reset_value={"__reset__": True}
     ),

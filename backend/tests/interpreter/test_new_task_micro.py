@@ -93,7 +93,9 @@ def _ctx(**overrides: Any) -> NewTaskPromptContext:
 class TestSpecializedContractHasNoTechnicalIds:
     def test_contract_has_no_agent_action_or_ids(self):
         fields = set(NewTaskInterpretation.model_fields.keys())
-        assert fields == {"disposition", "intent", "confidence", "entities"}
+        assert fields == {
+            "disposition", "intent", "confidence", "entities", "candidate_goals",
+        }
 
     def test_entities_reject_a_smuggled_technical_id(self):
         import pytest
@@ -364,10 +366,21 @@ class TestPromptSizeGuard:
     # phases B1/B2c.3/B2c.5). +~20 tokens pour fermer cette ambiguïté reste
     # très loin de l'ancien prompt à 5000 tokens que cette garde vise
     # réellement à empêcher (spec §50).
+    # Seuils relevés de 2460 à 2650 (2026-10-01, Étape 9A/9B) : nouvelle
+    # disposition AMBIGUOUS + champ `candidate_goals` — "j'ai 90 L de miel"
+    # (aucun tunnel actif) forçait jusqu'ici le LLM à choisir UNE intention
+    # arbitraire (SALES_PUBLISH_PRODUCT ou STOCK_REGISTER_HARVEST — "max
+    # confidence wins" explicitement interdit par le mandat §9) alors que le
+    # texte ne contient structurellement aucun signal d'action qui tranche
+    # entre les deux. Pas un champ optionnel de plus : la différence entre
+    # exécuter une action métier arbitraire et demander une clarification
+    # honnête. +~190 tokens (prose condensée au maximum, un seul exemple
+    # contrastif) reste très loin de l'ancien prompt à 5000 tokens que cette
+    # garde vise réellement à empêcher (spec §50).
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2460, (
+        assert estimated_tokens < 2650, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -378,7 +391,7 @@ class TestPromptSizeGuard:
             _ctx(), "je veux vendre 20 sacs de mais a 250 le kilo"
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
-        assert 800 <= total_tokens <= 2460
+        assert 800 <= total_tokens <= 2650
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

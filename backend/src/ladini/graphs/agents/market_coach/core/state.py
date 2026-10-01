@@ -294,6 +294,15 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     extracted_entities: Annotated[Dict[str, Any], merge_dict]
 
+    # (2026-10-01, Étape 9A/9B — ambiguïté hors tunnel) : ≥2 intentions du
+    # catalogue également plausibles, posées par le micro-prompt NEW_TASK
+    # (`NewTaskDisposition.AMBIGUOUS`) et lues UNE fois par `cognitive_guard`
+    # (source unique) pour construire la clarification ciblée — jamais lu
+    # ailleurs. EPHEMERAL, mono-tour : `cognitive_guard` les recopie dans
+    # `pending_interaction.target` (DURABLE) avant la fin du tour ; ce champ
+    # lui-même ne doit jamais survivre au tour qui l'a produit.
+    candidate_goals: Annotated[List[str], replace_list]
+
     raw_analysis: Annotated[Dict[str, Any], merge_dict]
 
     # (2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §9) :
