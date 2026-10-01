@@ -340,19 +340,156 @@ class TestActiveTunnelNonRegression:
 
 class TestExplicitIntentsStayDirect:
     def test_explicit_new_task_intent_is_unaffected(self):
-        """Un NEW_TASK normal (disposition NEW_TASK, pas AMBIGUOUS) ne passe
-        JAMAIS par le nouveau garde — celui-ci ne regarde que
-        `event == "AMBIGUOUS"`."""
+        """Un NEW_TASK normal pour une intention HORS du groupe backstop
+        (ici une intention sans rapport, pas SALES/STOCK) ne passe JAMAIS
+        par le garde d'ambiguïté — celui-ci ne regarde que
+        `event == "AMBIGUOUS"` ou un intent du groupe backstop. Voir
+        `TestExplicitActionSignalResolvesDirectly` ci-dessous pour le cas
+        SALES/STOCK avec un verbe d'action explicite (lui aussi direct,
+        mais via le garde-fou du backstop plutôt que par absence totale de
+        correspondance)."""
         state = make_state(
             current_goal=None,
             interpreted_event="NEW_TASK",
-            detected_intent="SALES_PUBLISH_PRODUCT",
+            detected_intent="SALES_LIST_ORDERS",
             interpreter_confidence=0.95,
             expected_input="NONE",
-            extracted_entities={"product": "miel", "quantity": 90.0, "unit": "LITRE"},
+            extracted_entities={},
         )
         result = run(cognitive_guard(state, None))
         assert result["cognitive_decision"]["action"] != ConversationAction.ASK_INTENT_SELECTION
         assert "pending_interaction" not in result or (
             result["pending_interaction"].get("kind") != InteractionKind.CLARIFY_INTENT.value
         )
+
+
+# =====================================================================
+# Clôture Étape 9A/9B — backstop déterministe (2026-10-01).
+#
+# Le LLM sait désormais rapporter AMBIGUOUS lui-même (voir les classes
+# ci-dessus), mais rien ne le GARANTIT : un LLM peut rester confiant (même
+# à 0.99) sur UNE intention pour une déclaration pourtant structurellement
+# ambiguë. Ce bloc verrouille le FILET DE SÉCURITÉ déterministe qui
+# reclassifie localement en AMBIGUOUS même dans ce cas — jamais une
+# question de jugement LLM, une question de FAITS + signal d'action.
+# =====================================================================
+
+
+def _false_confident_new_task_state(*, text, detected_intent, confidence=0.99):
+    return make_state(
+        normalized_text=text,
+        current_goal=None,
+        interpreted_event="NEW_TASK",
+        detected_intent=detected_intent,
+        interpreter_confidence=confidence,
+        expected_input="NONE",
+        extracted_entities={"product": "miel", "quantity": 90.0, "unit": "LITRE"},
+    )
+
+
+class TestBackstopOverridesHighConfidenceFalseResolution:
+    def test_10_llm_false_stock_at_0_99_is_still_overridden_to_ambiguous(self):
+        """Test critique du mandat de clôture : LLM renvoie NEW_TASK/
+        STOCK_REGISTER_HARVEST à confiance 0.99 pour une déclaration nue —
+        le backstop doit quand même produire AMBIGUOUS."""
+        state = _false_confident_new_task_state(
+            text="j'ai 90 L de miel", detected_intent="STOCK_REGISTER_HARVEST"
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] == ConversationAction.ASK_INTENT_SELECTION
+        assert result["cognitive_decision"]["reason"] == "out_of_tunnel_ambiguity_backstop"
+        assert "current_goal" not in result
+        assert "sales_publish_draft" not in result
+        assert "transaction_payload" not in result
+        pending = result["pending_interaction"]
+        assert pending["kind"] == InteractionKind.CLARIFY_INTENT.value
+        assert pending["target"]["facts"]["product"] == "miel"
+        assert pending["target"]["facts"]["quantity"] == 90.0
+        assert pending["target"]["facts"]["unit"] == "LITRE"
+        assert set(pending["target"]["candidate_goals"]) == {
+            "SALES_PUBLISH_PRODUCT",
+            "STOCK_REGISTER_HARVEST",
+        }
+
+    def test_11_llm_false_sales_at_0_99_is_symmetrically_overridden(self):
+        """Le système ne favorise pas arbitrairement SALES non plus — même
+        résultat pour le cas symétrique."""
+        state = _false_confident_new_task_state(
+            text="j'ai 90 L de miel", detected_intent="SALES_PUBLISH_PRODUCT"
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] == ConversationAction.ASK_INTENT_SELECTION
+        assert set(result["pending_interaction"]["target"]["candidate_goals"]) == {
+            "SALES_PUBLISH_PRODUCT",
+            "STOCK_REGISTER_HARVEST",
+        }
+
+    def test_confidence_alone_never_bypasses_the_backstop(self):
+        """Invariant explicite du mandat : confidence=0.99 ne doit jamais
+        suffire à contourner une ambiguïté métier structurelle — vérifié à
+        plusieurs valeurs de confiance, toutes bloquées identiquement."""
+        for confidence in (0.5, 0.85, 0.95, 0.99, 1.0):
+            state = _false_confident_new_task_state(
+                text="j'ai 90 L de miel",
+                detected_intent="STOCK_REGISTER_HARVEST",
+                confidence=confidence,
+            )
+            result = run(cognitive_guard(state, None))
+            assert result["cognitive_decision"]["action"] == ConversationAction.ASK_INTENT_SELECTION, (
+                f"confidence={confidence} a contourné le backstop"
+            )
+
+
+class TestExplicitActionSignalResolvesDirectly:
+    def test_12_explicit_sell_verb_stays_resolved_sales(self):
+        state = _false_confident_new_task_state(
+            text="je veux vendre 90 L de miel", detected_intent="SALES_PUBLISH_PRODUCT"
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] != ConversationAction.ASK_INTENT_SELECTION
+
+    def test_mets_en_vente_stays_resolved_sales(self):
+        state = _false_confident_new_task_state(
+            text="mets 90 L de miel en vente", detected_intent="SALES_PUBLISH_PRODUCT"
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] != ConversationAction.ASK_INTENT_SELECTION
+
+    def test_13_explicit_register_stock_verb_stays_resolved_stock(self):
+        state = _false_confident_new_task_state(
+            text="je veux enregistrer 90 L de miel dans mon stock",
+            detected_intent="STOCK_REGISTER_HARVEST",
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] != ConversationAction.ASK_INTENT_SELECTION
+
+
+class TestBackstopObservability:
+    def test_backstop_trace_fields_present_in_cognitive_decision(self):
+        state = _false_confident_new_task_state(
+            text="j'ai 90 L de miel", detected_intent="STOCK_REGISTER_HARVEST"
+        )
+        result = run(cognitive_guard(state, None))
+        decision = result["cognitive_decision"]
+        assert decision["intent"] == "STOCK_REGISTER_HARVEST"
+        assert decision["confidence"] == 0.99
+        assert decision["candidate_goals"] == ["SALES_PUBLISH_PRODUCT", "STOCK_REGISTER_HARVEST"]
+        assert decision["reason"] == "out_of_tunnel_ambiguity_backstop"
+
+
+class TestBackstopDoesNotApplyWithoutFacts:
+    def test_stock_intent_without_quantity_is_not_overridden(self):
+        """Pas de produit+quantité => rien à préserver/clarifier — le
+        backstop ne s'applique PAS (évite une clarification creuse sur un
+        message qui n'a structurellement rien d'une déclaration de stock)."""
+        state = make_state(
+            current_goal=None,
+            normalized_text="je gère mon stock",
+            interpreted_event="NEW_TASK",
+            detected_intent="STOCK_REGISTER_HARVEST",
+            interpreter_confidence=0.99,
+            expected_input="NONE",
+            extracted_entities={},
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] != ConversationAction.ASK_INTENT_SELECTION

@@ -55,6 +55,35 @@ class _AmbiguousDeclarationLLM:
         return _Completion(json.dumps(payload), model=kwargs.get("model"))
 
 
+class _FalseConfidentStockLLM:
+    """Scripte le PIRE CAS du mandat de clôture : le micro-prompt NEW_TASK
+    NE rapporte PAS AMBIGUOUS lui-même — il reste confiant (0.99) sur UNE
+    intention (STOCK_REGISTER_HARVEST) pour une déclaration nue. Le
+    backstop déterministe de `cognitive_guard` doit rattraper ce cas SANS
+    aucune aide du LLM."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        self.calls += 1
+        payload: Dict[str, Any] = {
+            "disposition": "NEW_TASK",
+            "intent": "STOCK_REGISTER_HARVEST",
+            "confidence": 0.99,
+            "entities": {"product": "miel", "quantity": 90.0, "unit": "LITRE"},
+        }
+        return _Completion(json.dumps(payload), model=kwargs.get("model"))
+
+
 def _reducer_for(field: str):
     ann = _HINTS.get(field)
     if ann is None:
@@ -144,3 +173,52 @@ class TestMielAmbiguousDeclarationNeverAutoSelectsAGoal:
         # event="AMBIGUOUS" (aucune RÈGLE ne le reconnaît — repli par
         # défaut, current_goal reste None).
         assert state_if_planner_ran.get("current_goal") is None
+
+
+class TestBackstopRescuesAFalseConfidentNewTaskOnTheRealNodeChain:
+    """Clôture Étape 9A/9B — preuve E2E que le backstop déterministe
+    fonctionne MÊME quand le LLM lui-même ne coopère pas (ne rapporte
+    jamais AMBIGUOUS), sur la chaîne de nœuds réelle."""
+
+    def test_stock_at_0_99_confidence_still_triggers_clarification(self):
+        state: Dict[str, Any] = {
+            "user_phone": "+22670000099",
+            "user_role": "PRODUCER",
+            "extracted_entities": {},
+            "working_memory": {},
+            "current_goal": None,
+            "transaction_payload": {},
+        }
+        runtime = StubRuntime()
+        interpreter = make_input_interpreter("PRODUCER")
+        runtime.llm = _FalseConfidentStockLLM()
+
+        state_after_cognitive_guard, _ = run(
+            _run_turn(state, interpreter, runtime, text="j'ai 90 L de miel")
+        )
+
+        # Preuve que le LLM a bien répondu NEW_TASK (pas AMBIGUOUS) — le
+        # backstop, pas le LLM, est responsable du résultat final.
+        assert state_after_cognitive_guard["cognitive_decision"]["intent"] == "STOCK_REGISTER_HARVEST"
+        assert state_after_cognitive_guard["cognitive_decision"]["confidence"] == 0.99
+
+        assert state_after_cognitive_guard.get("current_goal") is None
+        assert state_after_cognitive_guard.get("transaction_payload") == {}
+        assert state_after_cognitive_guard.get("sales_publish_draft") is None
+        pending = state_after_cognitive_guard.get("pending_interaction") or {}
+        assert pending.get("kind") == "CLARIFY_INTENT"
+        facts = pending.get("target", {}).get("facts", {})
+        assert facts.get("product") == "miel"
+        assert facts.get("quantity") == 90.0
+        assert set(pending.get("target", {}).get("candidate_goals", [])) == {
+            "SALES_PUBLISH_PRODUCT",
+            "STOCK_REGISTER_HARVEST",
+        }
+        assert (
+            state_after_cognitive_guard["cognitive_decision"]["action"]
+            == "ASK_INTENT_SELECTION"
+        )
+        assert (
+            state_after_cognitive_guard["cognitive_decision"]["reason"]
+            == "out_of_tunnel_ambiguity_backstop"
+        )

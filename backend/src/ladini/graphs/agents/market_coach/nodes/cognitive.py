@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import unicodedata
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from ladini.core.formatting import fmt_num
 from ladini.graphs.agents.market_coach.core.base import get_node_logger
@@ -161,6 +162,69 @@ def _out_of_tunnel_ambiguity_response(
             },
         },
     }
+
+
+# (2026-10-01, Étape 9A/9B clôture — backstop déterministe) : le micro-prompt
+# NEW_TASK sait désormais rapporter `AMBIGUOUS` lui-même, mais rien ne
+# GARANTIT qu'il le fasse — un LLM peut rester confiant (même à 0.99) sur
+# UNE intention pour une déclaration pourtant structurellement ambiguë
+# ("j'ai 90 L de miel" sans aucun verbe d'action). Ce garde est un FILET DE
+# SÉCURITÉ qui s'exécute APRÈS le jugement du LLM, jamais à sa place :
+# uniquement quand (a) aucun tunnel n'est actif, (b) l'intention choisie
+# appartient à un groupe connu d'intentions mutuellement compatibles avec
+# la MÊME déclaration de faits nus, (c) les faits eux-mêmes sont présents
+# (produit+quantité — sans ça, rien à préserver, rien à clarifier), et (d)
+# AUCUN signal d'action explicite n'est détecté dans le texte — auquel cas
+# il reclassifie localement en AMBIGUOUS, quelle que soit la confiance
+# rapportée (mandat : "confidence=0.99 ne doit jamais suffire à contourner
+# une ambiguïté métier structurelle"). Délibérément PAS une whitelist de
+# phrases complètes (mandat Étape 9A/9B §11) : seulement quelques RADICAUX
+# verbaux distinctifs, un filet de sécurité conservateur qui peut au pire
+# demander une clarification de trop, jamais exécuter la mauvaise action.
+_BACKSTOP_AMBIGUOUS_GOAL_GROUPS: Tuple[FrozenSet[str], ...] = (
+    frozenset({"SALES_PUBLISH_PRODUCT", "STOCK_REGISTER_HARVEST"}),
+)
+
+#: Radicaux (jamais des phrases entières) prouvant un verbe d'action
+#: explicite — repli sur substring après normalisation NFKD, pas un
+#: tokenizer : ces radicaux sont assez distinctifs pour ne pas produire de
+#: faux positif plausible en français courant du domaine.
+_SALES_ACTION_SIGNAL_STEMS: FrozenSet[str] = frozenset(
+    {"vendre", "vends", "vendu", "vente"}
+)
+_STOCK_ACTION_SIGNAL_STEMS: FrozenSet[str] = frozenset(
+    {"enregistr", "declar", "stock"}
+)
+_ACTION_SIGNAL_STEMS: FrozenSet[str] = _SALES_ACTION_SIGNAL_STEMS | _STOCK_ACTION_SIGNAL_STEMS
+
+
+def _fold_text(text: str) -> str:
+    clean = unicodedata.normalize("NFKD", (text or "").strip().lower())
+    return "".join(ch for ch in clean if not unicodedata.combining(ch))
+
+
+def _has_explicit_action_signal(text: str) -> bool:
+    folded = _fold_text(text)
+    return any(stem in folded for stem in _ACTION_SIGNAL_STEMS)
+
+
+def _backstop_ambiguous_group(
+    *, current_goal: Optional[str], event: str, detected_intent: str, facts: Dict[str, Any], text: str
+) -> Optional[FrozenSet[str]]:
+    """Retourne le groupe d'intentions mutuellement compatibles si le
+    backstop doit reclassifier CE tour en AMBIGUOUS, sinon `None` — jamais
+    appliqué si un tunnel est actif (Étape 7 reste seule autorité dans ce
+    cas) ni si l'événement n'est pas un NEW_TASK à intention unique."""
+    if current_goal or event != "NEW_TASK":
+        return None
+    group = next((g for g in _BACKSTOP_AMBIGUOUS_GOAL_GROUPS if detected_intent in g), None)
+    if group is None:
+        return None
+    if not facts.get("product") or facts.get("quantity") is None:
+        return None
+    if _has_explicit_action_signal(text):
+        return None
+    return group
 
 
 def _active_confirmation_switch_candidate(
@@ -572,23 +636,56 @@ async def cognitive_guard(
     # dans `SUBFLOW_OWNED_KINDS` — jamais résolu par le classifieur
     # générique ENTER_FIELD) : l'Étape 9C lira ce `target` pour reprendre
     # sans redemander produit/quantité/unité.
+    _out_of_tunnel_facts = {
+        k: v
+        for k, v in (state.get("extracted_entities") or {}).items()
+        if v not in (None, "", [], {})
+    }
+    # (2026-10-01, Étape 9A/9B clôture — backstop déterministe) : s'exécute
+    # même si le LLM a répondu NEW_TASK à très haute confiance — voir
+    # `_backstop_ambiguous_group` pour les 4 conditions exactes. Reclassifie
+    # localement (jamais `state` directement) pour réutiliser TEL QUEL le
+    # bloc AMBIGUOUS ci-dessous, seule source de construction de cette
+    # clarification (aucune logique dupliquée).
+    _backstop_group = _backstop_ambiguous_group(
+        current_goal=current_goal,
+        event=event,
+        detected_intent=detected_intent,
+        facts=_out_of_tunnel_facts,
+        text=text_lower,
+    )
+    _backstop_triggered = _backstop_group is not None
+    _backstop_candidate_goals: Optional[List[str]] = None
+    if _backstop_group is not None:
+        _backstop_candidate_goals = sorted(_backstop_group)
+        logger.info(
+            "OUT_OF_TUNNEL_AMBIGUITY_BACKSTOP | llm_intent=%s | llm_confidence=%.2f | "
+            "candidate_goals=%s | explicit_action_signal=false | "
+            "override_to_ambiguous=true",
+            detected_intent,
+            confidence,
+            _backstop_candidate_goals,
+        )
+        event = "AMBIGUOUS"
+
     if not current_goal and event == "AMBIGUOUS":
-        candidate_goals = [
-            g for g in (state.get("candidate_goals") or []) if isinstance(g, str) and g
-        ]
-        facts = {
-            k: v
-            for k, v in (state.get("extracted_entities") or {}).items()
-            if v not in (None, "", [], {})
-        }
+        candidate_goals = (
+            _backstop_candidate_goals
+            if _backstop_candidate_goals is not None
+            else [
+                g for g in (state.get("candidate_goals") or []) if isinstance(g, str) and g
+            ]
+        )
+        facts = _out_of_tunnel_facts
         if len(candidate_goals) >= 2:
-            logger.info(
-                "OUT_OF_TUNNEL_INTENT_AMBIGUOUS | extracted_fact_keys=%s | "
-                "candidate_goals=%s | resolution=AMBIGUOUS | "
-                "explicit_action_signal=false",
-                sorted(facts.keys()),
-                candidate_goals,
-            )
+            if not _backstop_triggered:
+                logger.info(
+                    "OUT_OF_TUNNEL_INTENT_AMBIGUOUS | extracted_fact_keys=%s | "
+                    "candidate_goals=%s | resolution=AMBIGUOUS | "
+                    "explicit_action_signal=false",
+                    sorted(facts.keys()),
+                    candidate_goals,
+                )
             response = _out_of_tunnel_ambiguity_response(
                 facts=facts, candidate_goals=candidate_goals
             )
@@ -600,7 +697,11 @@ async def cognitive_guard(
                     "cognitive_decision": {
                         **decision,
                         "action": ConversationAction.ASK_INTENT_SELECTION,
-                        "reason": "out_of_tunnel_intent_ambiguous",
+                        "reason": (
+                            "out_of_tunnel_ambiguity_backstop"
+                            if _backstop_triggered
+                            else "out_of_tunnel_intent_ambiguous"
+                        ),
                         "candidate_goals": candidate_goals,
                     },
                     **response,
