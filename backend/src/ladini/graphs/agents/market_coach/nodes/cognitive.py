@@ -21,6 +21,10 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     set_pending_interaction,
     to_tunnel_category,
 )
+from ladini.graphs.agents.market_coach.core.slots import (
+    SLOT_FILLING_INPUTS,
+    entities_satisfy_expected_input,
+)
 from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
 from ladini.graphs.agents.market_coach.core.tunnel_manager import (
     INTERRUPTION_CONFIDENCE_THRESHOLD,
@@ -475,6 +479,67 @@ async def cognitive_guard(
                     context_ref="confirmation_switch",
                     target=target,
                 ),
+            }
+        )
+        return updates
+
+    # (2026-09-30, Étape 7 — continuité conversationnelle ANSWER vs NEW_TASK,
+    # incident-type "je veux vendre mon miel" -> "Quelle quantité ?" -> "j'ai
+    # 90 L") : un tunnel actif qui attend explicitement un slot (QUANTITY/
+    # PRICE/UNIT/...) doit donner PRIORITÉ à une réponse compatible avec ce
+    # slot, même si l'interpréteur a étiqueté le tour `NEW_TASK` avec une
+    # intention concurrente à confiance élevée ("j'ai 90 L" ressemble
+    # lexicalement à une déclaration de stock indépendante — voir mandat
+    # §10). Jugé UNIQUEMENT sur les ENTITÉS EXTRAITES (quantity/unit/price/
+    # ...), jamais sur une liste de formulations de texte codées en dur
+    # (mandat §11) — `entities_satisfy_expected_input` (core/slots.py) est
+    # la même table canonique que `to_tunnel_category`/`expected_input_for_
+    # field`, pas un second registre.
+    #
+    # Exclut délibérément les deux cas juste en dessous (breakout de
+    # navigation, signal récurrent complet) : ce sont des intentions
+    # EXPLICITES et structurellement plus fortes qu'une simple compatibilité
+    # de slot (mandat §3, priorité 2 avant priorité 3) — une quantité
+    # accidentellement présente dans "voir mon panier" (improbable) ne doit
+    # jamais empêcher la navigation. Le relabellage ANSWER/`current_goal`
+    # réutilise EXACTEMENT le contrat déjà posé par `interpreter/
+    # active_slot_contract.py::adapt_active_slot_to_canonical` pour la route
+    # ACTIVE_SLOT — jamais une 2e convention : `goal_planner::RÈGLE 1bis`
+    # (event in {CONFIRM,SELECTION,ANSWER,UPDATE}) reverrouille alors le
+    # tunnel par un simple relock, SANS jamais passer par RÈGLE 1quater (qui
+    # purgerait `transaction_payload` — correct pour une VRAIE nouvelle
+    # instance du même goal, incorrect ici : ce n'est pas une nouvelle
+    # instance, c'est la suite de celle déjà ouverte).
+    slot_answer_compatible = (
+        current_goal
+        and event == "NEW_TASK"
+        and detected_intent not in {"UNKNOWN", str(current_goal).upper()}
+        and detected_intent not in NAVIGATION_BREAKOUT_GOALS
+        and not (detected_intent == "CREATE_RECURRING_NEED" and has_complete_recurring_signal)
+        and expected_input in SLOT_FILLING_INPUTS
+        and entities_satisfy_expected_input(
+            expected_input, state.get("extracted_entities") or {}
+        )
+    )
+    if slot_answer_compatible:
+        logger.info(
+            "ACTIVE_SLOT_ANSWER_RESOLVED | current_goal=%s | expected_slot=%s | "
+            "source=COGNITIVE_GUARD_PRIORITY | new_task_candidate_suppressed=%s",
+            current_goal,
+            expected_input,
+            detected_intent,
+        )
+        updates.update(
+            {
+                "interpreted_event": "ANSWER",
+                "detected_intent": str(current_goal).upper(),
+                "intent_competition": competition,
+                "cognitive_decision": {
+                    **decision,
+                    "action": ConversationAction.CONTINUE_ACTIVE_GOAL,
+                    "reason": "slot_answer_priority_over_new_task",
+                    "suppressed_new_task_candidate": detected_intent,
+                },
             }
         )
         return updates
