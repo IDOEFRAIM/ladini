@@ -47,6 +47,20 @@ class ConversationAction:
     # (`InteractionKind.CLARIFY_INTENT`), sans jamais verrouiller `current_
     # goal` ni créer de draft (voir `nodes/cognitive.py`).
     ASK_INTENT_SELECTION = "ASK_INTENT_SELECTION"
+    # (2026-10-01, Étape 9C — résolution de clarification d'intention) :
+    # réponse à une `InteractionKind.CLARIFY_INTENT` déjà posée — résolue
+    # (un `candidate_goal` choisi, bootstrap effectué, `validator` rejoué
+    # avec les faits déjà connus + corrections du tour courant) ou annulée
+    # explicitement ("annuler"). Les deux cas routent DIRECTEMENT vers
+    # `response_strategy` (comme `ASK_SWITCH_CONFIRMATION`) : `cognitive_
+    # guard` a déjà fait tout le travail (goal_planner/memory_update ne
+    # tournent pas ce tour-ci) — voir `nodes/cognitive.py::
+    # _resolve_intent_clarification`. Une réponse trop ambiguë pour choisir
+    # reste `ASK_INTENT_SELECTION` (reclarification, même structure que la
+    # création initiale) ; une vraie nouvelle tâche hors des candidats
+    # n'emprunte AUCUNE de ces deux actions (elle efface juste la
+    # clarification et continue normalement).
+    RESOLVE_INTENT_CLARIFICATION = "RESOLVE_INTENT_CLARIFICATION"
     # Legacy literal maintained for downstream compatibility (see module docstring).
     RECOVER_ACTIVE_GOAL = "recover_active_tunnel"
     ABANDON_ACTIVE_GOAL = "abandon_tunnel_max_retries"
@@ -60,6 +74,7 @@ class ConversationAction:
             CLARIFY,
             ASK_SWITCH_CONFIRMATION,
             ASK_INTENT_SELECTION,
+            RESOLVE_INTENT_CLARIFICATION,
             RECOVER_ACTIVE_GOAL,
             ABANDON_ACTIVE_GOAL,
         }

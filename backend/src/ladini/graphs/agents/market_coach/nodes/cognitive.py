@@ -19,6 +19,7 @@ from ladini.graphs.agents.market_coach.core.goals import (
 )
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
+    clear_pending_interaction,
     get_pending_interaction,
     set_pending_interaction,
     to_tunnel_category,
@@ -225,6 +226,244 @@ def _backstop_ambiguous_group(
     if _has_explicit_action_signal(text):
         return None
     return group
+
+
+# =====================================================================
+# (2026-10-01, Étape 9C) — RÉSOLUTION de `InteractionKind.CLARIFY_INTENT`.
+#
+# Même philosophie que le backstop ci-dessus (petite primitive lexicale
+# contextuelle, jamais un second moteur NLU) : réutilise TEL QUEL
+# `_GOAL_ACTION_STEMS` dérivé des mêmes radicaux que
+# `_backstop_ambiguous_group` (une seule vérité "quel radical signale quel
+# goal"), fonctionne même SANS LLM (mandat §18), et ne choisit JAMAIS un
+# goal hors de `candidate_goals` (invariants I3/I4 — intersection stricte).
+# =====================================================================
+
+_GOAL_ACTION_STEMS: Dict[str, FrozenSet[str]] = {
+    "SALES_PUBLISH_PRODUCT": _SALES_ACTION_SIGNAL_STEMS,
+    "STOCK_REGISTER_HARVEST": _STOCK_ACTION_SIGNAL_STEMS,
+}
+
+
+def _select_clarified_goal(
+    *,
+    text: str,
+    candidate_goals: List[str],
+    interpreter_event: str,
+    interpreter_intent: str,
+) -> Optional[str]:
+    """Détermine QUEL candidat la réponse résout, ou `None` si aucun choix
+    ne peut être retenu de façon sûre. Priorité : (1) radical lexical
+    DISTINCTIF et SANS AMBIGUÏTÉ pointant vers un seul candidat — ne
+    dépend d'aucun appel LLM, fonctionne à l'identique si le LLM est
+    indisponible (mandat §18/§19) ; (2) à défaut, l'intention RÉELLE déjà
+    classifiée par l'interpréteur normal, mais UNIQUEMENT si elle
+    appartient déjà à `candidate_goals` (jamais un goal injecté hors de la
+    liste proposée à l'utilisateur — invariants I3/I4)."""
+    folded = _fold_text(text)
+    lexical_matches = [
+        goal
+        for goal in candidate_goals
+        if goal in _GOAL_ACTION_STEMS
+        and any(stem in folded for stem in _GOAL_ACTION_STEMS[goal])
+    ]
+    if len(lexical_matches) == 1:
+        return lexical_matches[0]
+    if len(lexical_matches) > 1:
+        return None  # plusieurs signaux à la fois : rester conservateur
+    if interpreter_event == "NEW_TASK" and interpreter_intent in candidate_goals:
+        return interpreter_intent
+    return None
+
+
+def _merge_clarification_facts(
+    *, pending_facts: Dict[str, Any], current_entities: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Fusionne les faits préservés (`pending_interaction.target.facts`) et
+    les entités dites CE tour — priorité au tour courant (mandat §14), SAUF
+    garde-fou produit (mandat §9/§21) : un produit explicitement DIFFÉRENT
+    ce tour ne doit jamais hériter la quantité/unité de l'ANCIEN produit
+    (incident-type "90 L de miel" ne devient jamais "90 L de lait").
+    Réimplémentation MINIMALE et scopée du garde déjà établi par
+    `nodes/memory.py::_apply_slot` (branche "product") — celui-ci est une
+    fermeture interne non exportée, voir le rapport pour la limite assumée."""
+    current_clean = {
+        k: v for k, v in current_entities.items() if v not in (None, "", [], {})
+    }
+    current_product = current_clean.get("product")
+    pending_product = pending_facts.get("product")
+    if (
+        current_product
+        and pending_product
+        and str(current_product).strip().lower() != str(pending_product).strip().lower()
+    ):
+        return current_clean
+    merged = dict(pending_facts)
+    merged.update(current_clean)
+    return merged
+
+
+def _resolve_intent_clarification(
+    state: Dict[str, Any],
+    *,
+    pending: Any,
+    event: str,
+    detected_intent: str,
+    text: str,
+    decision: Dict[str, Any],
+    competition: List[Dict[str, Any]],
+) -> Tuple[bool, Dict[str, Any]]:
+    """Résout une réponse à `InteractionKind.CLARIFY_INTENT` (Étape 9C).
+
+    Ne verrouille JAMAIS `current_goal` lui-même (voir `tests/architecture/
+    test_canonical_goal_api.py` : `cognitive_guard` ne DÉCIDE jamais du
+    goal, seul `goal_planner` en est l'UNIQUE propriétaire déclaré) — une
+    résolution réussie pose seulement `interpreted_event`/`detected_intent`/
+    `extracted_entities`, EXACTEMENT ce qu'un tour normal "je veux vendre 90
+    L de miel" aurait posé, et route vers `goal_planner`
+    (`START_OR_PLAN_GOAL`) pour que celui-ci verrouille le goal via son API
+    canonique — jamais un bypass.
+
+    Retourne `(return_early, patch)` :
+    - `return_early=True` : l'appelant (`cognitive_guard`) renvoie `patch`
+      IMMÉDIATEMENT — `patch` porte déjà son propre `cognitive_decision`
+      complet (construit à partir de `decision`, comme tous les autres
+      blocs à retour anticipé de ce nœud) — résolution réussie (route vers
+      `goal_planner`), annulation, ou reclarification (réponse trop
+      ambiguë pour choisir).
+    - `return_early=False` : `patch` ne fait qu'effacer `pending_interaction`
+      — le tour continue NORMALEMENT avec le `event`/`detected_intent` déjà
+      classifiés par l'interpréteur (invariant I1 : une vraie NOUVELLE tâche,
+      explicite et hors `candidate_goals`, ne doit jamais rester bloquée
+      derrière une clarification en attente — mandat §10)."""
+    target = pending.target or {}
+    facts = dict(target.get("facts") or {})
+    candidate_goals = [
+        g for g in (target.get("candidate_goals") or []) if isinstance(g, str) and g
+    ]
+    current_entities = dict(state.get("extracted_entities") or {})
+
+    if event == "REJECT":
+        logger.info(
+            "INTENT_CLARIFICATION_UNRESOLVED | candidate_goals=%s | "
+            "resolution_source=cancel",
+            candidate_goals,
+        )
+        return True, {
+            **clear_pending_interaction("intent_clarification_cancelled"),
+            "status": "WAITING_INPUT",
+            "response_strategy": "SUCCESS",
+            "final_response": "D'accord, on laisse tomber.",
+            "ag_ui_component": None,
+            "intent_competition": competition,
+            "cognitive_decision": {
+                **decision,
+                "action": ConversationAction.RESOLVE_INTENT_CLARIFICATION,
+                "reason": "intent_clarification_cancelled",
+            },
+        }
+
+    selected_goal = _select_clarified_goal(
+        text=text,
+        candidate_goals=candidate_goals,
+        interpreter_event=event,
+        interpreter_intent=detected_intent,
+    )
+
+    if selected_goal is None:
+        if (
+            event == "NEW_TASK"
+            and detected_intent not in ("", "UNKNOWN")
+            and detected_intent not in candidate_goals
+        ):
+            # Nouvelle tâche RÉELLE hors des candidats proposés (mandat §10)
+            # — ne bloque pas l'utilisateur : efface la clarification et
+            # laisse le tour continuer normalement (RULE 5 du goal_planner
+            # promouvra `detected_intent` comme n'importe quel NEW_TASK).
+            logger.info(
+                "INTENT_CLARIFICATION_UNRESOLVED | candidate_goals=%s | "
+                "resolution_source=breakout | breakout_intent=%s",
+                candidate_goals,
+                detected_intent,
+            )
+            return False, clear_pending_interaction("intent_clarification_breakout")
+
+        # Réponse trop ambiguë ("oui", "d'accord"...) : ne choisit rien,
+        # repose la MÊME clarification telle quelle (mandat §11).
+        logger.info(
+            "INTENT_CLARIFICATION_UNRESOLVED | candidate_goals=%s | "
+            "resolution_source=ambiguous",
+            candidate_goals,
+        )
+        response = _out_of_tunnel_ambiguity_response(
+            facts=facts, candidate_goals=candidate_goals
+        )
+        return True, {
+            "status": "WAITING_INPUT",
+            "response_strategy": "SUCCESS",
+            **response,
+            **set_pending_interaction(
+                InteractionKind.CLARIFY_INTENT,
+                context_ref="out_of_tunnel_intent_ambiguity",
+                target={"facts": facts, "candidate_goals": candidate_goals},
+            ),
+            "intent_competition": competition,
+            "cognitive_decision": {
+                **decision,
+                "action": ConversationAction.ASK_INTENT_SELECTION,
+                "reason": "intent_clarification_unresolved_reask",
+            },
+        }
+
+    merged_facts = _merge_clarification_facts(
+        pending_facts=facts, current_entities=current_entities
+    )
+    resolution_source = (
+        "lexical"
+        if selected_goal in _GOAL_ACTION_STEMS
+        and any(stem in _fold_text(text) for stem in _GOAL_ACTION_STEMS[selected_goal])
+        else "interpreter"
+    )
+    logger.info(
+        "INTENT_CLARIFICATION_RESOLVED | selected_goal=%s | candidate_goals=%s | "
+        "fact_keys_reused=%s | fact_keys_overridden=%s | resolution_source=%s",
+        selected_goal,
+        candidate_goals,
+        sorted(facts.keys()),
+        sorted(
+            k for k, v in current_entities.items() if v not in (None, "", [], {})
+        ),
+        resolution_source,
+    )
+
+    # (mandat §15) Jamais un chemin spécial "if SALES: ask PRICE" — et
+    # surtout (revue architecturale, `tests/architecture/
+    # test_canonical_goal_api.py`) : `cognitive_guard` NE DOIT JAMAIS décider
+    # lui-même de `current_goal` — il ne fait que RÉAFFIRMER une valeur déjà
+    # résolue (cas RECOVER_ACTIVE_GOAL), jamais en INVENTER une nouvelle
+    # (`goal_planner` reste l'UNIQUE propriétaire déclaré). On pose donc ici
+    # EXACTEMENT ce qu'un `input_interpreter` normal aurait posé pour "je
+    # veux vendre 90 L de miel" tapé directement — `interpreted_event`/
+    # `detected_intent`/`extracted_entities` — et on route vers
+    # `goal_planner` (`START_OR_PLAN_GOAL`, déjà câblé "to_planner") : RULE 5
+    # verrouille `current_goal` lui-même, `memory_update` fusionne les faits
+    # dans un `transaction_payload` fraîchement purgé, `validator` calcule le
+    # prochain slot manquant — le MÊME pipeline, sans AUCUNE duplication ni
+    # bypass de l'API canonique du goal.
+    return True, {
+        **clear_pending_interaction("intent_clarification_resolved"),
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": selected_goal,
+        "extracted_entities": merged_facts,
+        "intent_competition": competition,
+        "cognitive_decision": {
+            **decision,
+            "action": ConversationAction.START_OR_PLAN_GOAL,
+            "reason": "intent_clarification_resolved",
+            "selected_goal": selected_goal,
+            "resolution_source": resolution_source,
+        },
+    }
 
 
 def _active_confirmation_switch_candidate(
@@ -472,6 +711,27 @@ async def cognitive_guard(
         "bounded": True,
     }
     competition: List[Dict[str, Any]] = []
+
+    # (2026-10-01, Étape 9C — résolution de clarification d'intention) :
+    # vérifié en TOUT PREMIER, avant toute autre logique de ce nœud — une
+    # réponse à `CLARIFY_INTENT` ne doit JAMAIS retomber dans la
+    # classification NEW_TASK normale "comme si elle était hors contexte"
+    # (invariant I1, mandat §2). `pending.kind` suffit seul à déclencher ce
+    # chemin : `CLARIFY_INTENT` n'est posé QUE par ce nœud lui-même
+    # (`_out_of_tunnel_ambiguity_response`/le backstop), jamais ailleurs.
+    if pending.kind == InteractionKind.CLARIFY_INTENT:
+        _return_early, _patch = _resolve_intent_clarification(
+            state,
+            pending=pending,
+            event=event,
+            detected_intent=detected_intent,
+            text=text_lower,
+            decision=decision,
+            competition=competition,
+        )
+        if _return_early:
+            return _patch
+        updates.update(_patch)
 
     # (2026-09-08, mandat §9 : "une seule décision, un seul propriétaire")
     # `cognitive_guard` calcule le candidat de désambiguïsation UNE fois ;
