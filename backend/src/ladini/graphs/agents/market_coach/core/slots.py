@@ -313,6 +313,25 @@ def fields_for_expected_input(category: str) -> FrozenSet[str]:
     `_EXPECTED_INPUT_MAP` ci-dessus."""
     return _EXPECTED_INPUT_TO_FIELDS.get(str(category or "").upper().strip(), frozenset())
 
+
+def entities_satisfy_expected_input(category: str, entities: Dict[str, Any]) -> bool:
+    """True si `entities` porte une valeur non vide pour au moins un des
+    champs légitimement attendus par cette catégorie `expected_input`
+    (`fields_for_expected_input`, source unique) — jamais un second registre.
+
+    (2026-09-30, Étape 7 — continuité conversationnelle ANSWER vs NEW_TASK) :
+    primitive GÉNÉRIQUE consommée par `nodes/cognitive.py::cognitive_guard`
+    pour décider si un message, même classé `NEW_TASK` par erreur avec une
+    intention concurrente, répond quand même au slot actuellement attendu
+    par le tunnel actif — sur les ENTITÉS EXTRAITES uniquement, jamais une
+    liste de formulations de texte codées en dur (mandat §11)."""
+    if not category or not entities:
+        return False
+    fields = fields_for_expected_input(category)
+    if not fields:
+        return False
+    return any(entities.get(f) not in (None, "", [], {}) for f in fields)
+
 # Ensemble CANONIQUE des `expected_input` qui représentent un CHAMP MÉTIER à
 # collecter auprès de l'utilisateur (« soft slots » : on peut y re-demander le
 # champ, et une nouvelle intention suffisamment confiante peut les interrompre).
@@ -406,6 +425,7 @@ __all__ = [
     "get_slot_hint",
     "expected_input_for_field",
     "fields_for_expected_input",
+    "entities_satisfy_expected_input",
     "field_priority",
     "build_remap_dict",
     "build_alias_mirrors",
