@@ -107,6 +107,9 @@ from ladini.graphs.agents.market_coach.interpreter.intent import (
 from ladini.graphs.agents.market_coach.interpreter.interpreter_result import (
     InterpreterResult,
 )
+from ladini.graphs.agents.market_coach.interpreter.product_switch import (
+    detect_buyer_product_switch,
+)
 from ladini.graphs.agents.market_coach.interpreter.prompts import (
     INTERPRETER_USER_PROMPT,
 )
@@ -3303,8 +3306,76 @@ def make_input_interpreter(role: str = "PRODUCER"):
         qui rend un `UNKNOWN` sans `UnknownReason` structurellement
         impossible, plutôt que dépendant de la discipline de chaque `return`
         interne (~15 points de sortie distincts dans l'implémentation)."""
-        raw = await _input_interpreter_impl(state, mc_runtime)
-        return InterpreterResult.from_legacy_dict(raw).to_state_patch()
+        text = str(state.get("normalized_text") or state.get("user_query") or "")
+        switch = (
+            None
+            if state.get("is_onboarding")
+            else detect_buyer_product_switch(state, text)
+        )
+        if switch is None:
+            raw = await _input_interpreter_impl(state, mc_runtime)
+            return InterpreterResult.from_legacy_dict(raw).to_state_patch()
+
+        # B4 (2026-10-02) — CHANGEMENT DE PRODUIT EXPLICITE pendant un tunnel quantité Buyer :
+        # le message n'est PAS une réponse au slot, donc le micro-parser du tunnel
+        # (STRUCTURED_ACTION/ACTIVE_SLOT, schéma d'actions fermé) n'a pas son mot à dire — sa
+        # sortie invalide/UNKNOWN/hallucinée produisait `recover_active_tunnel` + retry++ (voir
+        # `interpreter/product_switch.py`). On interprète le message sur une COPIE de l'état sans
+        # contexte de tunnel : il suit alors la route NEW_TASK normale (même classifieur qu'hors
+        # tunnel) ; `cognitive_guard`/`goal_planner` (état RÉEL) traitent ensuite l'interruption.
+        pending = get_pending_interaction(state)
+        logger.info(
+            "BUYER_PRODUCT_SWITCH_DETECTED current_goal=%s pending_kind=%s "
+            "previous_product_present=%s new_product_present=%s same_product=false "
+            "source=deterministic_guard",
+            resolve_current_goal(state),
+            pending.kind.value,
+            True,
+            True,
+        )
+        neutral = {
+            **state,
+            "pending_interaction": None,
+            "vendor_selection_context": {"__reset__": True},
+            "tier_selection_context": {"__reset__": True},
+        }
+        switched: Optional[Dict[str, Any]]
+        try:
+            switched = await _input_interpreter_impl(neutral, mc_runtime)
+        except Exception:
+            logger.exception(
+                "BUYER_PRODUCT_SWITCH classifieur NEW_TASK en échec — filet déterministe"
+            )
+            switched = None
+        if switched is None or str(switched.get("interpreted_event") or "").upper() in {
+            "UNKNOWN",
+            "ANSWER",
+            "UPDATE",
+            "SELECTION",
+        }:
+            entities: Dict[str, Any] = {"product": switch.new_product}
+            qty = parse_quantity_unit_from_text(text)
+            if qty.quantity is not None:
+                entities["quantity"] = qty.quantity
+                if qty.unit:
+                    entities["unit"] = qty.unit
+            switched = {
+                "interpreted_event": "NEW_TASK",
+                "detected_intent": "BUYER_REQUEST",
+                "interpreter_confidence": 0.9,
+                "extracted_entities": entities,
+                "raw_analysis": {"path": "deterministic_buyer_product_switch"},
+            }
+        logger.info(
+            "BUYER_PRODUCT_SWITCH_APPLIED tunnel_context_ignored_for_interpretation=true "
+            "path=%s event=%s",
+            (switched.get("raw_analysis") or {}).get("path"),
+            switched.get("interpreted_event"),
+        )
+        switched_patch: Dict[str, Any] = InterpreterResult.from_legacy_dict(
+            switched
+        ).to_state_patch()
+        return switched_patch
 
     return input_interpreter
 
