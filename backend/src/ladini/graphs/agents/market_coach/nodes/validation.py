@@ -353,6 +353,16 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     # COMPLETENESS + VALIDATION
     # -----------------------------------------------------------------
     missing = _missing_fields_for_goal(payload, required_for_goal)
+    # (B10, 2026-10-02) Une action structurée de CE tour (`SET_PACKAGE_COUNT` : « 3 » après le choix du
+    # palier ; `SET_QUANTITY`) PORTE la quantité (`action_package_count`/`action_quantity`) — la
+    # réclamer en plus via `payload.quantity` posait un `ENTER_FIELD(quantity)` + `missing_fields`
+    # PÉRIMÉS alors que `cart_management` ajoutait l'article : le panier s'affichait « prêt » mais le
+    # slot quantité restait vivant et absorbait le « okay » suivant.
+    if goal_upper == "BUYER_ADD_TO_CART" and str(payload.get("agent_action") or "").upper() in {
+        "SET_PACKAGE_COUNT",
+        "SET_QUANTITY",
+    }:
+        missing = [f for f in missing if f != "quantity"]
     missing = _apply_slot_defaults(payload, missing, goal_upper)
     completed = [f for f in required_for_goal if f not in missing]
 

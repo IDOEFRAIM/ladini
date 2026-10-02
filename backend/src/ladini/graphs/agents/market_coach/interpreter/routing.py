@@ -180,6 +180,57 @@ _PREORDER_COMMANDS = frozenset(
 )
 
 
+_CART_GOALS = frozenset({"BUYER_ADD_TO_CART", "BUYER_REQUEST"})
+
+
+def _live_ctx(ctx: Any) -> bool:
+    return isinstance(ctx, dict) and bool(ctx) and not ctx.get("__reset__")
+
+
+def _cart_ready_for_preorder(state: Dict[str, Any]) -> bool:
+    """PANIER PRÊT À PRÉCOMMANDER (B10) — état MÉTIER, jamais le texte affiché.
+
+    Prêt ⇔ panier non vide en phase CART (`_cart_pending_signal`) ET aucune ligne en cours de
+    construction. Une ligne est « en cours » quand un slot est RÉELLEMENT vivant : menu producteur /
+    palier, ou slot quantité / nombre de paquets adossé à un contexte vendeur/palier/produit encore
+    actif pour un article PAS encore ajouté. Un slot quantité qui survit SANS contexte (ou dont le
+    produit est déjà la dernière ligne du panier) est PÉRIMÉ — l'article est déjà ajouté — et ne doit
+    jamais absorber la confirmation."""
+    if not _cart_pending_signal(state):
+        return False
+    goal = str(resolve_current_goal(state) or "").upper()
+    pending = get_pending_interaction(state)
+    if goal and goal not in _CART_GOALS:
+        return False  # un AUTRE but est actif (suivi de commande, vente…)
+    if pending.kind == InteractionKind.NONE and not goal:
+        return True
+    if pending.kind == InteractionKind.SELECTION_MENU:
+        return False  # menu producteur/palier/disambiguation réellement affiché
+    quantity_slot = pending.kind in (
+        InteractionKind.ENTER_QUANTITY,
+        InteractionKind.ENTER_PACKAGE_COUNT,
+    ) or (
+        pending.kind == InteractionKind.ENTER_FIELD
+        and str(pending.field or "").lower() == "quantity"
+    )
+    if pending.kind != InteractionKind.NONE and not quantity_slot:
+        return False  # confirmation, GPS, produit demandé… : un vrai tunnel est actif
+    vctx = state.get("vendor_selection_context")
+    tctx = state.get("tier_selection_context")
+    payload = state.get("transaction_payload") or {}
+    if _live_ctx(tctx) and not (tctx or {}).get("resolved_tier_id"):
+        return False  # menu de paliers non résolu
+    if _live_ctx(vctx):
+        chosen = (vctx or {}).get("chosen_vendor") or {}
+        cart = state.get("active_cart") or []
+        last_pid = (cart[-1] or {}).get("product_id") if cart else None
+        # contexte vendeur vivant pour un article DÉJÀ ajouté (dernière ligne) = reliquat
+        return bool(last_pid and chosen.get("product_id") == last_pid)
+    if _live_ctx(payload) and payload.get("product"):
+        return False  # un article est en cours d'édition
+    return True
+
+
 def _cart_ready_confirmation_alias(state: Dict[str, Any], text: str) -> Optional[str]:
     """Alias de confirmation d'un PANIER PRÊT À VALIDER (B9), sinon `None`.
 
@@ -187,7 +238,7 @@ def _cart_ready_confirmation_alias(state: Dict[str, Any], text: str) -> Optional
     FERMÉ (`_CONFIRM_EXACT_PHRASES` + `_PREORDER_COMMANDS`), jamais une phrase libre (celles-ci
     restent à la charge du LLM, qui reçoit `cart_pending` comme contexte). Tous les alias mènent au
     MÊME chemin canonique (`BUYER_PREORDER_INIT`), jamais six handlers différents."""
-    if not _cart_pending_signal(state):
+    if not _cart_ready_for_preorder(state):
         return None
     alias = _fix_bare_confirmation_typo(str(text or "").strip().lower().strip(" .!?,;: "))
     if alias in _CONFIRM_EXACT_PHRASES or alias in _PREORDER_COMMANDS:
@@ -2281,13 +2332,12 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # `accept_match_proposal` + « ✅ C'est confirmé, vos commandes… » alors que le panier n'était
         # pas touché). Déterministe (aucun LLM) et UN seul chemin : `BUYER_PREORDER_INIT`, exactement
         # celui de « précommander » (récap -> confirmation -> exécution certifiée).
-        _cart_ready = bool(_cart_pending_signal(state)) and not locked_goal
-        _cart_alias = (
-            None
-            if (locked_goal or onboarding_active)
-            else _cart_ready_confirmation_alias(state, text)
-        )
+        _cart_ready = _cart_ready_for_preorder(state)
+        _cart_alias = None if onboarding_active else _cart_ready_confirmation_alias(state, text)
         if _cart_alias is not None:
+            _pending_before = get_pending_interaction(state)
+            _sel_before = build_selection_context(state)
+            _stale_slot = bool(locked_goal) or _pending_before.kind != InteractionKind.NONE
             logger.info(
                 "BUYER_PREORDER_CONFIRMATION_REQUESTED cart_item_count=%d source=%s "
                 "current_goal=%s preorder_phase=%s",
@@ -2296,13 +2346,38 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 resolve_current_goal(state),
                 (state.get("preorder_workflow") or {}).get("phase"),
             )
-            return {
+            logger.info(
+                "BUYER_CART_READY_CONFIRMATION_ROUTED source=%s cart_item_count=%d cart_ready=True "
+                "current_goal_before=%s pending_before=%s expected_action_before=%s "
+                "stale_slot_ignored=%s goal_after=BUYER_PREORDER_INIT",
+                _cart_alias,
+                len(state.get("active_cart") or []),
+                resolve_current_goal(state),
+                _pending_before.kind.value,
+                _sel_before.expected_action.value if _sel_before and _sel_before.expected_action else None,
+                _stale_slot,
+            )
+            _ready_result: Dict[str, Any] = {
                 "interpreted_event": "NEW_TASK",
                 "detected_intent": "BUYER_PREORDER_INIT",
                 "interpreter_confidence": 0.99,
                 "extracted_entities": {},
                 "raw_analysis": {"path": "cart_ready_confirmation", "source": _cart_alias},
             }
+            if _stale_slot:
+                # Reliquat de l'article DÉJÀ ajouté (but BUYER_ADD_TO_CART / pending quantité /
+                # `missing_fields`) : purgé ICI pour que ce tour suive exactement le chemin d'un panier
+                # propre — sinon `cognitive_guard` le lirait comme une « interruption » du but périmé.
+                _ready_result.update(
+                    {
+                        "current_goal": None,
+                        "pending_interaction": None,
+                        "missing_fields": [],
+                        "last_missing_field": None,
+                        "status": "PLANNING",
+                    }
+                )
+            return _ready_result
 
         if (
             not locked_goal
