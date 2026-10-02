@@ -1487,6 +1487,11 @@ def _interpret_fast_path(
                             or payload.get("original_unit")
                             or payload.get("unit")
                         )
+                        # (B8) une unité SUPPOSÉE par défaut (`unit_was_assumed`, ex. « KG » pour du
+                        # lait) n'est pas une unité de l'acheteur : un nombre nu ne l'hérite pas
+                        # (sinon « 5 » devient « 5 kg » puis est refusé/converti à tort).
+                        if payload.get("unit_was_assumed"):
+                            fallback_unit = None
                         if fallback_unit not in (None, "", [], {}):
                             entities["unit"] = canonical_unit_label(fallback_unit)
                 elif slot == "price" and mapped_unit:

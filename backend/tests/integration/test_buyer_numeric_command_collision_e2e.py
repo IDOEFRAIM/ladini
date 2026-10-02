@@ -223,9 +223,11 @@ class TestNumericProtocolUnit:
         menu = self._state(pending="SELECTION_MENU")
         del menu["vendor_selection_context"]["chosen_vendor"]  # menu producteur VIVANT : aucun choix fait
         assert interpret_buyer_numeric_protocol(menu, "2") is None
+        # (B8) palier résolu : le nombre nu est un NOMBRE DE PAQUETS (contrat SET_PACKAGE_COUNT).
         pack = self._state(pending="ENTER_PACKAGE_COUNT")
         pack["tier_selection_context"] = {"tiers": [{"tier_id": "t5", "quantity": 5.0, "unit": "L"}], "resolved_tier_id": "t5"}
-        assert interpret_buyer_numeric_protocol(pack, "2") is None
+        got = interpret_buyer_numeric_protocol(pack, "2")
+        assert got is not None and got["extracted_entities"]["action_package_count"] == 2.0
 
     def test_producer_command_needs_a_real_choice(self):
         from ladini.graphs.agents.market_coach.interpreter.numeric_protocol import (
