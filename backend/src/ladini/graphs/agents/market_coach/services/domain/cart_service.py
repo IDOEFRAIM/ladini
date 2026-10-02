@@ -21,6 +21,7 @@ from ladini.domain.pricing_tiers import (
 from ladini.domain.quantity_unit import convert_quantity, normalize_unit
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
+    clear_pending_interaction,
     set_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.domain.selection_actions import (
@@ -1005,6 +1006,14 @@ class CartDomainService:
             "transaction_payload": {"__reset__": True},
             "vendor_selection_context": None,
             "tier_selection_context": None,
+            # (B10) la ligne est AJOUTÉE : tout ce qui servait à la construire est consommé — un slot
+            # (pending/missing_fields/menu) laissé vivant reprendrait la main au tour suivant et
+            # absorberait « okay » (« Quelle quantité souhaitez-vous ? » alors que le panier est complet).
+            "missing_fields": [],
+            "last_missing_field": None,
+            "expected_candidates": [],
+            "available_mapping": {},
+            **clear_pending_interaction("cart_line_added"),
         }
         response.update(render)
         return response
