@@ -112,18 +112,59 @@ def entities_name_different_product(state: Dict[str, Any]) -> bool:
     return bool(said and current and not _same_product(said, current))
 
 
+#: Déictiques/ordinaux d'un menu (« celui du premier », « le dernier producteur ») : jamais un
+#: produit — ne servent qu'à ne PAS confondre une référence à une option avec un changement de produit.
+_MENU_DEICTIC = frozenset(
+    "premier premiere deuxieme troisieme quatrieme dernier derniere second seconde celui celle "
+    "ceux celles producteur producteurs vendeur vendeurs conditionnement paquet option choix".split()
+)
+
+
+def _option_haystack(state: Dict[str, Any]) -> str:
+    """Texte replié de TOUT ce qu'un menu du tunnel affiche (producteurs, offres, paliers) : un
+    nom cité dedans (« je veux celui de Gilbert ») désigne une OPTION, pas un nouveau produit."""
+    parts: list[str] = [str(c) for c in (state.get("expected_candidates") or [])]
+    for key in ("vendor_selection_context", "tier_selection_context"):
+        ctx = state.get(key)
+        if not isinstance(ctx, dict) or ctx.get("__reset__"):
+            continue
+        for v in ctx.get("vendors") or []:
+            if isinstance(v, dict):
+                parts += [str(v.get("vendor_name") or ""), str(v.get("name") or "")]
+        for t in ctx.get("tiers") or []:
+            if isinstance(t, dict):
+                parts += [str(t.get("packaging") or ""), str(t.get("unit") or "")]
+    return _fold(" ".join(parts))
+
+
+def _in_cart_tunnel(state: Dict[str, Any]) -> bool:
+    """Un tunnel panier Buyer attend une réponse précise : quantité/paquets, OU un menu
+    producteur/palier (`SelectionContext.expected_action`, même signal que la route
+    STRUCTURED_ACTION — jamais `SELECTION_MENU` générique, qui couvre aussi commandes/enchères)."""
+    from ladini.graphs.agents.market_coach.domain.selection_actions import (
+        build_selection_context,
+    )
+
+    if get_pending_interaction(state).kind in _SWITCHABLE_PENDING:
+        return True
+    ctx = build_selection_context(state)
+    return ctx is not None and ctx.expected_action is not None
+
+
 def detect_buyer_product_switch(state: Dict[str, Any], text: str) -> Optional[ProductSwitch]:
     """Le message est-il une NOUVELLE demande d'achat sur un produit différent, pendant un
     tunnel quantité Buyer ? `None` dans tous les autres cas (réponse de slot, même produit,
     annulation, message incompris…)."""
     from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
 
-    pending = get_pending_interaction(state)
     goal = str(resolve_current_goal(state) or "").upper()
-    if pending.kind not in _SWITCHABLE_PENDING or goal not in _BUYER_CART_GOALS:
+    if goal not in _BUYER_CART_GOALS or not _in_cart_tunnel(state):
         return None
     payload = state.get("transaction_payload")
     current = str(payload.get("product") or "").strip() if isinstance(payload, dict) else ""
+    if not current:
+        vctx = state.get("vendor_selection_context")
+        current = str(vctx.get("product") or "").strip() if isinstance(vctx, dict) else ""
     if not current:
         return None
     clean = str(text or "").strip().lower()
@@ -134,6 +175,12 @@ def detect_buyer_product_switch(state: Dict[str, Any], text: str) -> Optional[Pr
         return None
     requested = extract_requested_product(clean)
     if not requested or _same_product(requested, current):
+        return None
+    # Menu producteur/palier : une référence à une option (nom d'offre affiché, ordinal) n'est
+    # PAS un changement de produit.
+    if any(w in _MENU_DEICTIC for w in requested.split()):
+        return None
+    if _fold(requested) in _option_haystack(state):
         return None
     return ProductSwitch(new_product=requested, reason="explicit_buy_different_product")
 
