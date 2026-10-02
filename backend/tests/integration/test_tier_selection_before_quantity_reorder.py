@@ -454,8 +454,12 @@ class TestTierTunnelFsmLock:
         # instructs it to do when nothing in the active tier list matches
         # confidently — same behavioral contract as the old rule 4bis, new
         # dedicated micro-prompt.
-        state["normalized_text"] = "je voudrais des champignons"
-        state["user_query"] = "je voudrais des champignons"
+        # (B5, 2026-10-02) : « je voudrais des champignons » est désormais une NOUVELLE demande
+        # d'achat explicite sur un autre produit — elle quitte le menu de paliers (voir
+        # tests/integration/test_buyer_product_switch_during_vendor_selection_e2e.py). Ce test
+        # garde sa garantie d'origine avec une réponse libre qui ne nomme AUCUN autre produit.
+        state["normalized_text"] = "euh je ne sais pas trop lequel prendre"
+        state["user_query"] = "euh je ne sais pas trop lequel prendre"
 
         scripted_llm = ScriptedLLM(
             {
