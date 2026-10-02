@@ -107,6 +107,9 @@ from ladini.graphs.agents.market_coach.interpreter.intent import (
 from ladini.graphs.agents.market_coach.interpreter.interpreter_result import (
     InterpreterResult,
 )
+from ladini.graphs.agents.market_coach.interpreter.numeric_protocol import (
+    interpret_buyer_numeric_protocol,
+)
 from ladini.graphs.agents.market_coach.interpreter.product_switch import (
     detect_buyer_product_switch,
     detect_buyer_same_product_continuation,
@@ -2148,6 +2151,17 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "extracted_entities": {},
                 "raw_analysis": {"path": "bid_price_fast_path"},
             }
+
+        # 0.47 PROTOCOLE NUMÉRIQUE BUYER (B7, 2026-10-02) : pendant `ENTER_QUANTITY`, un nombre nu
+        # est TOUJOURS une quantité, et changer de producteur exige une commande explicite
+        # (« producteur 3 », « changer producteur »). Déterministe : ne dépend d'aucun LLM ni d'un
+        # ancien menu encore présent dans l'état. Voir `interpreter/numeric_protocol.py`.
+        if not onboarding_active:
+            _numeric = interpret_buyer_numeric_protocol(
+                state, text, llm_available=getattr(mc_runtime, "llm", None) is not None
+            )
+            if _numeric is not None:
+                return _numeric
 
         # 0.5 CONTRAT D'ACTION STRUCTURÉE (2026-09-01) : reconstruit à chaque
         # tour, JAMAIS depuis un canal générique périmé (voir
