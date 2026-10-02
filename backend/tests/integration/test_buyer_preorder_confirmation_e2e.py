@@ -129,6 +129,16 @@ class _PreorderRt(_Rt):
 
 
 @pytest.fixture(autouse=True)
+def _pin_cod_checkout(monkeypatch):
+    """Ces tests portent sur le chemin « paiement à la livraison » (`confirm_preorder_draft`). Le réglage
+    ESCROW_PAYMENT_ENABLED dépend de l'environnement (actif en CI : confirmation par lien de paiement,
+    autre chemin) — épinglé comme dans `test_buyer_direct_purchase_flow.py`."""
+    from ladini.core.settings import settings
+
+    monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
 def _role_hints(monkeypatch):
     """Le worker pose un indice de rôle PRODUCER (Redis) pour chaque producteur notifié : enregistré ici
     (aucun réseau) — c'est aussi la seule trace côté agent de la notification producteur."""
