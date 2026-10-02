@@ -65,13 +65,20 @@ def _change_producer_hint(n_vendors: int) -> str:
     return "🔁 _Pour changer de producteur, écrivez « changer producteur » ou « producteur 3 »._\n"
 
 
-def _declared_unit(payload: Dict[str, Any]) -> Any:
+def _declared_unit(payload: Dict[str, Any], state: Dict[str, Any]) -> Any:
     """Unité réellement DÉCLARÉE par l'acheteur, ou `None`.
 
-    (B7, 2026-10-02) `payload["unit"]` peut n'être qu'un DÉFAUT supposé (`unit_was_assumed`, ex.
-    « KG » pour « lait ») : le passer comme `buyer_unit` faisait refuser un nombre nu (« 5 ») avec
-    « vendu en LITRE, pas en kg » alors que l'acheteur n'a écrit aucune unité — l'unité de l'offre
-    fait alors foi."""
+    (B7/B8) `payload["unit"]` peut n'être qu'un DÉFAUT supposé (`unit_was_assumed`, ex. « KG » pour
+    « lait ») : le passer comme `buyer_unit` faisait refuser un nombre nu (« 5 ») avec « vendu en
+    LITRE, pas en kg » alors que l'acheteur n'a écrit aucune unité — l'unité de l'offre fait alors foi.
+
+    Mais une unité ÉCRITE dans le message de CE tour est toujours explicite, même si elle coïncide avec
+    le défaut supposé (« 10 kg » après un « KG » par défaut) : le drapeau `unit_was_assumed` est collant
+    (canal `merge_dict`) et ne doit jamais effacer une unité que l'acheteur vient d'écrire — sinon
+    « 10 kg » serait appliqué en silence à un produit vendu en LITRE (MASS ≠ VOLUME)."""
+    fresh = (state.get("extracted_entities") or {}).get("unit")
+    if fresh:
+        return fresh
     if payload.get("unit_was_assumed"):
         return None
     return payload.get("unit")
@@ -99,6 +106,11 @@ def _tier_menu_working_memory_patch(state: Dict[str, Any]) -> Dict[str, Any]:
     return wm
 
 
+def _tier_choice_hint(n_tiers: int) -> str:
+    """« Répondez 1 ou 2. » — l'étape « choisir le conditionnement » (jamais le nombre de paquets)."""
+    return "Répondez 1 ou 2." if n_tiers == 2 else f"Répondez par un numéro de 1 à {n_tiers}."
+
+
 def _build_tier_menu_response(
     state: Dict[str, Any],
     tiers: List[Dict[str, Any]],
@@ -106,6 +118,7 @@ def _build_tier_menu_response(
     product_id: Any,
     ctx_product_name: str,
     vendor_selection_context: Dict[str, Any],
+    note: str = "",
 ) -> Dict[str, Any]:
     """Construit le state patch complet d'un menu de paliers en attente —
     utilisé par les DEUX branches (multi-vendeurs et vendeur unique) de
@@ -128,11 +141,13 @@ def _build_tier_menu_response(
         "status": "WAITING_INPUT",
         **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "ASK_MISSING_FIELD",
+        # (B8) ÉTAPE 1 seulement : choisir le conditionnement. Le nombre de paquets est une question
+        # SÉPARÉE, posée après la sélection (jamais mélangée dans ce texte).
         "final_response": (
+            f"{note}"
             f"📦 *{display_name}* propose plusieurs conditionnements :\n"
-            f"{tier_lines}\n\nLequel voulez-vous ? "
-            "(le nombre que vous avez donné comptera comme le "
-            "nombre de paquets de ce conditionnement)"
+            f"{tier_lines}\n\nQuel conditionnement souhaitez-vous ? "
+            f"{_tier_choice_hint(len(tiers))}"
         ),
         "tier_selection_context": {
             "product_id": product_id,
@@ -639,6 +654,27 @@ async def cart_management(
         selection_idx = payload.get("selection_index")
         vendor_switched = False
 
+        # (B8) numéro de conditionnement HORS PLAGE (« 5 », « 50 » avec 2 paliers) : message explicite,
+        # menu inchangé, AUCUNE mutation (ni quantité, ni nombre de paquets, ni palier, ni vendeur).
+        _raw_chosen = vendor_ctx_payload.get("chosen_vendor")
+        _chosen_now: Dict[str, Any] = _raw_chosen if isinstance(_raw_chosen, dict) else {}
+        _tiers_now = [t for t in (_chosen_now.get("pricing_tiers") or []) if isinstance(t, dict)]
+        if (
+            (state.get("raw_analysis") or {}).get("path") == "deterministic_invalid_tier_index"
+            and len(_tiers_now) > 1
+        ):
+            return _with_base(
+                _build_tier_menu_response(
+                    state,
+                    _tiers_now,
+                    str(_chosen_now.get("name") or product_name or ""),
+                    _chosen_now.get("product_id"),
+                    str(_chosen_now.get("name") or ""),
+                    vendor_ctx_payload,
+                    note=f"⚠️ Je n'ai que {len(_tiers_now)} conditionnements disponibles." + chr(10) * 2,
+                )
+            )
+
         # (B7) « changer producteur » (sans numéro) pendant le slot quantité : on ré-affiche le menu
         # producteur VIVANT (mêmes candidats, aucun nouveau `search_products`).
         _vendors_live = [v for v in (vendor_ctx_payload.get("vendors") or []) if isinstance(v, dict)]
@@ -696,6 +732,16 @@ async def cart_management(
             and isinstance(chosen_vendor, dict)
         )
 
+        # (B8) une commande producteur EXPLICITE (« producteur 3 ») prime sur le menu de paliers en
+        # attente : son numéro désigne un PRODUCTEUR, jamais un conditionnement.
+        if (state.get("raw_analysis") or {}).get("path") == "deterministic_producer_command":
+            _tier_selection_pending = False
+            vendor_ctx_payload.pop("resolved_tier_id", None)
+            # L'index vient des entités de CE tour : après la résolution d'un palier, le drapeau de
+            # mapping de menu est volontairement effacé et `memory_update` ne le fusionne plus.
+            _cmd_idx = (state.get("extracted_entities") or {}).get("selection_index")
+            if _cmd_idx is not None:
+                selection_idx = _cmd_idx
         if selection_idx is not None and not _tier_selection_pending:
             vendors_list = vendor_ctx_payload.get("vendors") or []
             try:
@@ -824,6 +870,10 @@ async def cart_management(
         # d'ordonnancement entre deux recherches du MÊME produit) : ne faire
         # confiance à `tier_ctx` que s'il porte bien le nom DU PRODUIT
         # ACTUELLEMENT résolu.
+        # (B8) un CHANGEMENT DE PRODUCTEUR rend les paliers affichés périmés : ils appartiennent au
+        # producteur précédent (même nom de produit « lait », autre offre) — jamais réutilisés.
+        if tier_ctx_active and vendor_switched:
+            tier_ctx_active = False
         if tier_ctx_active and isinstance(tier_ctx, dict):
             ctx_product_name = str(tier_ctx.get("product_name") or "").strip().lower()
             chosen_product_name = (
@@ -948,18 +998,24 @@ async def cart_management(
             # dans ce même bloc, tombait hors de `vendor_ctx_active` et
             # relançait une recherche vendeur fraîche — ré-affichant le menu
             # PRODUCTEUR à la place du menu de paliers, en boucle.
-            return _with_base(
-                _build_tier_menu_response(
-                    state,
-                    vendor_tiers,
-                    display_name,
-                    chosen_vendor.get("product_id")
-                    if isinstance(chosen_vendor, dict)
-                    else None,
-                    chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else "",
-                    vendor_ctx_payload,
-                )
+            _tier_menu_patch = _build_tier_menu_response(
+                state,
+                vendor_tiers,
+                display_name,
+                chosen_vendor.get("product_id")
+                if isinstance(chosen_vendor, dict)
+                else None,
+                chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else "",
+                vendor_ctx_payload,
             )
+            # (B8) l'index producteur (« producteur 4 ») vient d'être CONSOMMÉ : `merge_dict` ne
+            # supprime pas une clé absente — sans cette mise à `None` explicite, il survit dans
+            # l'état et peut être re-lu comme sélection au tour suivant.
+            _tier_menu_patch["transaction_payload"] = {
+                "selection_index": None,
+                "selected_value": None,
+            }
+            return _with_base(_tier_menu_patch)
 
         # Vendor chosen + quantity available → add to cart directly
         if chosen_vendor is not None and product_name and quantity not in (None, "", 0):
@@ -973,7 +1029,7 @@ async def cart_management(
                 buyer_unit=(
                     _fresh_unit_this_turn(state)
                     if selected_tier_id
-                    else _declared_unit(payload)
+                    else _declared_unit(payload, state)
                 ),
                 tier_id=selected_tier_id,
             )
@@ -1393,7 +1449,7 @@ async def cart_management(
             buyer_unit=(
                 _fresh_unit_this_turn(state)
                 if single_selected_tier_id
-                else _declared_unit(payload)
+                else _declared_unit(payload, state)
             ),
             tier_id=single_selected_tier_id,
         )
