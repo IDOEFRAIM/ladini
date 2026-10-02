@@ -1233,6 +1233,13 @@ async def _respond_to_digest_flow(
 
     if action == "REJECT":
         message = "D'accord, rien ne sera livré demain — vos besoins habituels restent actifs."
+    elif confirmed_products and failed_products:
+        # (B9) succès PARTIEL : jamais « vos commandes sont en cours de préparation » si une partie
+        # seulement a été confirmée (un échec peut aussi être un double-tap déjà traité).
+        message = (
+            f"✅ Confirmé : {', '.join(confirmed_products)}.\n"
+            f"⚠️ Non confirmé (déjà traité ou indisponible) : {', '.join(failed_products)}."
+        )
     elif confirmed_products:
         message = "✅ C'est confirmé, vos commandes sont en cours de préparation."
     else:

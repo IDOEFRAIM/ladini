@@ -169,6 +169,32 @@ def _fix_bare_confirmation_typo(text: str) -> str:
     return close[0] if close else text
 
 
+#: Commandes de précommande reconnues SANS ambiguïté quand un panier est prêt (B9) — le mot affiché par
+#: l'UI (« Répondez *précommander* pour valider ») et ses graphies courantes. Les accords nus
+#: (« okay », « oui », « confirmer », « valider »…) viennent de `_CONFIRM_EXACT_PHRASES` (source unique).
+_PREORDER_COMMANDS = frozenset(
+    {
+        "précommander", "precommander", "pré-commander", "pre-commander", "précommande",
+        "precommande", "je précommande", "je precommande",
+    }
+)
+
+
+def _cart_ready_confirmation_alias(state: Dict[str, Any], text: str) -> Optional[str]:
+    """Alias de confirmation d'un PANIER PRÊT À VALIDER (B9), sinon `None`.
+
+    Contexte = état canonique `_cart_pending_signal` (phase CART + panier non vide) ; vocabulaire =
+    FERMÉ (`_CONFIRM_EXACT_PHRASES` + `_PREORDER_COMMANDS`), jamais une phrase libre (celles-ci
+    restent à la charge du LLM, qui reçoit `cart_pending` comme contexte). Tous les alias mènent au
+    MÊME chemin canonique (`BUYER_PREORDER_INIT`), jamais six handlers différents."""
+    if not _cart_pending_signal(state):
+        return None
+    alias = _fix_bare_confirmation_typo(str(text or "").strip().lower().strip(" .!?,;: "))
+    if alias in _CONFIRM_EXACT_PHRASES or alias in _PREORDER_COMMANDS:
+        return alias
+    return None
+
+
 def _cart_pending_signal(state: Dict[str, Any]) -> bool:
     """Panier acheteur en attente de précommande — signal d'ÉTAT (phase CART
     + panier non vide), jamais un mot-clé du texte. Source unique pour les
@@ -2247,10 +2273,43 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # déjà actif (sinon `_interpret_fast_path` ci-dessus a déjà traité
         # le cas, en échoant le goal verrouillé) et que le rôle est
         # PRODUCER.
-        if not locked_goal and role_up in ("PRODUCER", "BUYER") and not onboarding_active:
-            _bare_confirm_text = (
-                text.strip().lower().strip(" .!?,;: ")
+        _bare_confirm_text = text.strip().lower().strip(" .!?,;: ")
+
+        # 1.4 PANIER PRÊT À VALIDER (B9, 2026-10-02) : le contexte du PANIER gagne sur tout filet
+        # « mot nu » ci-dessous (vente producteur, digest récurrent, réception) — sinon un « okay »
+        # prononcé après « Répondez *précommander* pour valider » confirmait un AUTRE flux (digest :
+        # `accept_match_proposal` + « ✅ C'est confirmé, vos commandes… » alors que le panier n'était
+        # pas touché). Déterministe (aucun LLM) et UN seul chemin : `BUYER_PREORDER_INIT`, exactement
+        # celui de « précommander » (récap -> confirmation -> exécution certifiée).
+        _cart_ready = bool(_cart_pending_signal(state)) and not locked_goal
+        _cart_alias = (
+            None
+            if (locked_goal or onboarding_active)
+            else _cart_ready_confirmation_alias(state, text)
+        )
+        if _cart_alias is not None:
+            logger.info(
+                "BUYER_PREORDER_CONFIRMATION_REQUESTED cart_item_count=%d source=%s "
+                "current_goal=%s preorder_phase=%s",
+                len(state.get("active_cart") or []),
+                _cart_alias,
+                resolve_current_goal(state),
+                (state.get("preorder_workflow") or {}).get("phase"),
             )
+            return {
+                "interpreted_event": "NEW_TASK",
+                "detected_intent": "BUYER_PREORDER_INIT",
+                "interpreter_confidence": 0.99,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "cart_ready_confirmation", "source": _cart_alias},
+            }
+
+        if (
+            not locked_goal
+            and not _cart_ready
+            and role_up in ("PRODUCER", "BUYER")
+            and not onboarding_active
+        ):
             _pending_check = await _bare_confirmation_for_pending_producer_order(
                 mc_runtime,
                 str(state.get("user_phone") or ""),
@@ -2290,10 +2349,13 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # affecté). Voir le docstring de
         # `_bare_confirmation_for_recurring_supply_digest` pour le contexte
         # complet.
-        if not locked_goal and role_up in ("PRODUCER", "BUYER") and not onboarding_active:
-            # `_bare_confirm_text` a déjà été calculé ci-dessus : le bloc 1.5
-            # (`role_up in ("PRODUCER", "BUYER")`) couvre STRICTEMENT ce cas,
-            # donc la variable existe toujours ici.
+        if (
+            not locked_goal
+            and not _cart_ready
+            and role_up in ("PRODUCER", "BUYER")
+            and not onboarding_active
+        ):
+            # `_bare_confirm_text` est calculé plus haut, inconditionnellement.
             _digest_check = await _bare_confirmation_for_recurring_supply_digest(
                 mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
             )
@@ -2329,7 +2391,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # 1.8 RÉCEPTION ("tout est bon"/"il y a un problème"), SANS TUNNEL
         # ACTIF (VS5 pilote) — rôle BUYER uniquement. Voir le docstring de
         # `_bare_confirmation_for_order_reception`.
-        if not locked_goal and role_up == "BUYER" and not onboarding_active:
+        if not locked_goal and not _cart_ready and role_up == "BUYER" and not onboarding_active:
             _reception_check = await _bare_confirmation_for_order_reception(
                 mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
             )

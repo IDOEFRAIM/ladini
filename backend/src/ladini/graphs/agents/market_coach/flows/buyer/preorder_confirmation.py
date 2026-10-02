@@ -243,6 +243,20 @@ async def _execute_and_finalize(
         logger.error("PREORDER_FINALIZER_UNEXPECTED_STATUS | status=%s", finalized.status)
         outcome_kind = PreorderOutcomeKind.PREORDER_EXECUTION_UNKNOWN
 
+    # (B9) résultat de la confirmation RÉELLE — le message de succès est la conséquence de ce statut
+    # (jamais d'un simple « okay »). Pas de PII : seulement des booléens/compteurs/classes.
+    _confirmed = finalized.status == PreorderDraftStatus.EXECUTED
+    logger.info(
+        "BUYER_PREORDER_CONFIRMATION_RESULT success=%s preorder_created=%s preorder_id_present=%s "
+        "order_count=%d error_class=%s idempotent_replay=%s",
+        _confirmed,
+        bool(getattr(executing_draft, "order_id", None)),
+        bool(getattr(finalized, "order_id", None)),
+        1 if _confirmed else 0,
+        None if _confirmed else outcome_kind.value,
+        finalized is not finalized_candidate,
+    )
+
     record_procurement_transaction_event(
         event_id=uuid.uuid4().hex,
         conversation_id=buyer_phone or None,
