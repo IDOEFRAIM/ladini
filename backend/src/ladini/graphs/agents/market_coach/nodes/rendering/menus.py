@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 from ladini.graphs.agents.market_coach.nodes.rendering.common import (
@@ -11,6 +12,8 @@ from ladini.graphs.agents.market_coach.nodes.rendering.common import (
     list_menu_component,
 )
 from ladini.graphs.agents.market_coach.utils import llm_deviation_reply
+
+logger = logging.getLogger("Ladini.Market.Rendering")
 
 
 async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
@@ -41,6 +44,21 @@ async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
         or wm.get("generic_menu")
     )
     candidates: List[str] = state.get("expected_candidates") or []
+
+    # Invariant (B3) : un menu numéroté a TOUJOURS au moins une option visible. Sans menu
+    # préformaté ni candidat, il n'y a rien à choisir — jamais « Répondez par le numéro » dans le
+    # vide : on re-pose la question en attente (récupération) plutôt que d'inventer un menu.
+    if not preformatted and not candidates:
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
+
+        logger.warning(
+            "BUYER_SELECTION_DECISION candidate_count=0 decision=EMPTY_MENU_SUPPRESSED goal=%s",
+            ctx.goal,
+        )
+        recovered: Dict[str, Any] = apply_corrections(state, await render_recovery(ctx))
+        return recovered
 
     if preformatted:
         text_output = str(preformatted)

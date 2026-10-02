@@ -153,7 +153,19 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     # correction structurelle du bug réel "celui de 10 l" → "Que voulez-vous
     # confirmer exactement ?".
     pending = get_pending_interaction(state)
-    if pending.kind in CART_TUNNEL_KINDS:
+    # (2026-10-02, B3 — incident réel « poulets → lait ») : cette garde ne vaut QUE si le flow
+    # panier a effectivement produit quelque chose à montrer CE tour (`final_response`, menu,
+    # candidats). Sur un tour de RÉCUPÉRATION (`recover_active_tunnel` : message UNKNOWN pendant
+    # `ENTER_QUANTITY`, `cart_management` n'a PAS tourné), elle forçait SELECTION_MENU sans rien
+    # à lister → « Veuillez choisir une option : » + « Répondez par le numéro » sans aucune option.
+    # Ce cas retombe sur la branche `recover_active_tunnel` ci-dessous (re-demande du slot).
+    _nothing_to_show = (
+        cognitive_action == "recover_active_tunnel"
+        and not state.get("final_response")
+        and not state.get("pending_menu")
+        and not state.get("expected_candidates")
+    )
+    if pending.kind in CART_TUNNEL_KINDS and not _nothing_to_show:
         return {
             "response_strategy": "SELECTION_MENU",
             "status": "WAITING_INPUT",

@@ -168,9 +168,9 @@ def _outcome_for_decision(
             context.goal,
             context.category,
             _conflict,
-            _conflict == "product_switch",
+            _conflict in ("product_switch", "quantity_without_textual_support"),
         )
-        if _conflict == "product_switch":
+        if _conflict in ("product_switch", "quantity_without_textual_support"):
             return ActiveSlotOutcome.DEVIATION, None
         # `no_slot_value` : réponse inexploitable, PAS une nouvelle tâche
         # (« je ne sais pas », « beaucoup ») — jamais un ANSWER (la fast-path

@@ -213,7 +213,7 @@ class TestQuantityProvenance:
             category="QUANTITY", field_name="quantity", goal="BUYER_ADD_TO_CART",
             current_product="poulets", message_text="je veux acheter du lait",
         )
-        assert buyer_slot_answer_conflict(d, ctx) == "no_slot_value"
+        assert buyer_slot_answer_conflict(d, ctx) == "quantity_without_textual_support"
         ok_ctx = ActiveSlotContext(
             category="QUANTITY", field_name="quantity", goal="BUYER_ADD_TO_CART",
             current_product="poulets", message_text="deux poulets",
@@ -223,4 +223,4 @@ class TestQuantityProvenance:
             category="QUANTITY", field_name="quantity", goal="BUYER_ADD_TO_CART",
             current_product="poulets", message_text="je veux un peu de lait",
         )
-        assert buyer_slot_answer_conflict(_dec("ANSWER", {"quantity": 1}), peu) == "no_slot_value"
+        assert buyer_slot_answer_conflict(_dec("ANSWER", {"quantity": 1}), peu) == "quantity_without_textual_support"
