@@ -13,6 +13,7 @@ from ladini.graphs.agents.market_coach.core.conversation_reset import (
 )
 from ladini.graphs.agents.market_coach.core.field_registry import STRUCTURED_FIELDS
 from ladini.graphs.agents.market_coach.core.goals import (
+    ALL_BUYER_TUNNEL_GOALS,
     DRAFT_BASED_CONFIRMATION_GOALS,
     DRAFT_BASED_CONFIRMATION_STATE_KEY,
     NAVIGATION_BREAKOUT_GOALS,
@@ -33,6 +34,9 @@ from ladini.graphs.agents.market_coach.core.tunnel_manager import (
     INTERRUPTION_CONFIDENCE_THRESHOLD,
 )
 from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from ladini.graphs.agents.market_coach.interpreter.product_switch import (
+    entities_name_different_product,
+)
 from ladini.graphs.agents.market_coach.nodes.clarification import (
     has_out_of_tunnel_location_error,
 )
@@ -1063,6 +1067,13 @@ async def cognitive_guard(
         and expected_input in SLOT_FILLING_INPUTS
         and entities_satisfy_expected_input(
             expected_input, state.get("extracted_entities") or {}
+        )
+        # (B4, 2026-10-02) : jamais une réponse de slot si le message nomme un AUTRE produit
+        # que celui du tunnel (« je veux acheter 5 L de lait » pendant la quantité des poulets).
+        # BUYER uniquement : côté Producer, le conflit produit reste la responsabilité de memory.py.
+        and not (
+            str(current_goal).upper() in ALL_BUYER_TUNNEL_GOALS
+            and entities_name_different_product(state)
         )
     )
     if slot_answer_compatible:
