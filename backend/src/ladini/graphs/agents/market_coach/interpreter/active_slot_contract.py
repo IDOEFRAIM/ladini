@@ -167,6 +167,8 @@ def buyer_slot_answer_conflict(
 
     - ``product_switch`` : un produit DIFFÉRENT du produit suivi est extrait —
       une vraie réponse de quantité/unité/prix ne change jamais de produit ;
+    - ``quantity_without_textual_support`` : une quantité est proposée mais le message ne
+      contient aucun nombre — pas une réponse au slot → déviation (NEW_TASK reclassifie) ;
     - ``no_slot_value`` : aucune valeur extraite — ce n'est pas une réponse,
       rien ne peut remplir le slot (et en laisser passer un ANSWER vide revient
       à valider une quantité par défaut).
@@ -194,7 +196,7 @@ def buyer_slot_answer_conflict(
             context.message_text, _as_float(entities.get("quantity"))
         )
     ):
-        return "no_slot_value"
+        return "quantity_without_textual_support"
     said_product = entities.get("product")
     if (
         said_product

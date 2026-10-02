@@ -221,7 +221,13 @@ class TestProdReplay:
                     "quantity": 1,
                     "unit": "UNITE",
                     "confidence": 0.95,
-                }
+                },
+                {
+                    "disposition": "NEW_TASK",
+                    "intent": "BUYER_REQUEST",
+                    "confidence": 0.9,
+                    "entities": {"product": "lait"},
+                },
             ]
         )
         rt = _Rt(llm=llm)
@@ -232,7 +238,8 @@ class TestProdReplay:
             {"normalized_text": "je veux acheter du lait", "user_query": "je veux acheter du lait"},
         )
         state = apply_patch(state, run(interp(state, rt)))
-        assert state["interpreted_event"] == "UNKNOWN", state.get("raw_analysis")
+        # B3 : quantité sans appui textuel = déviation → reclassifié en nouvelle demande (jamais UNKNOWN).
+        assert state["interpreted_event"] == "NEW_TASK", state.get("raw_analysis")
         assert FastPathPolicy.for_buyer().should_skip_cognitive(state) is False
         assert not state["extracted_entities"].get("action_quantity")
         assert rt.stock_checks() == []
@@ -247,7 +254,13 @@ class TestProdReplay:
                     "quantity": 1,
                     "unit": None,
                     "confidence": 0.95,
-                }
+                },
+                {
+                    "disposition": "NEW_TASK",
+                    "intent": "BUYER_REQUEST",
+                    "confidence": 0.9,
+                    "entities": {"product": "lait"},
+                },
             ]
         )
         rt = _Rt(llm=llm)
@@ -257,7 +270,8 @@ class TestProdReplay:
             state, {"normalized_text": "un peu de lait", "user_query": "un peu de lait"}
         )
         state = apply_patch(state, run(interp(state, rt)))
-        assert state["interpreted_event"] == "UNKNOWN", state.get("raw_analysis")
+        assert state["interpreted_event"] != "ANSWER", state.get("raw_analysis")
+        assert not state["extracted_entities"].get("action_quantity")
         assert rt.stock_checks() == []
         assert state["active_cart"] == []
 

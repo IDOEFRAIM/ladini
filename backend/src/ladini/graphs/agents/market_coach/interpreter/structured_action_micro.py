@@ -298,9 +298,10 @@ def _outcome_for_decision(
             locked_goal,
             raw["action"].value,
         )
-        return StructuredActionOutcome.RESULT, _unknown_result(
-            "structured_action_micro_quantity_unsupported"
-        )
+        # DEVIATION (et non UNKNOWN) : le modèle a vu une « action » là où le message ne contient
+        # aucun nombre — ce n'est PAS une réponse au slot ; le classifieur NEW_TASK reclassifie
+        # (« je veux acheter du lait » = nouvelle demande, pas un « je n'ai pas compris »).
+        return StructuredActionOutcome.DEVIATION, None
 
     return StructuredActionOutcome.RESULT, adapt_structured_action_to_canonical(
         raw, locked_goal, "structured_action_micro"
