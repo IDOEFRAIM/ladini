@@ -33,6 +33,7 @@ from .helpers import (
     resolve_product,
     resolve_quantity,
     resolve_unit,
+    reusable_menu_vendors,
 )
 
 
@@ -549,9 +550,14 @@ async def buyer_request_resolver(
     # trompeur qu'au panier, puisque ce flux enchaînerait sur une proposition
     # d'appel d'offres pour un produit qui est peut-être bien en stock.
     try:
-        vendors, has_multiple = await cart_service.resolve_product_vendors(
-            phone, str(product_name)
-        )
+        # (B6) menu producteur vivant + même produit répété : candidats déjà montrés, valides.
+        _menu_vendors = reusable_menu_vendors(state)
+        if _menu_vendors is not None:
+            vendors, has_multiple = _menu_vendors, len(_menu_vendors) > 1
+        else:
+            vendors, has_multiple = await cart_service.resolve_product_vendors(
+                phone, str(product_name)
+            )
     except ProductLookupUnavailable:
         return {
             "status": "ERROR",

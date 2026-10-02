@@ -33,6 +33,7 @@ from .helpers import (
     logger,
     resolve_product,
     resolve_quantity,
+    reusable_menu_vendors,
 )
 from .preorder import create_preorder
 
@@ -1094,6 +1095,9 @@ async def cart_management(
     # identique. Clé transitoire posée sur l'état synthétique passé à ce nœud,
     # jamais persistée.
     _prefetched = state.get("_prefetched_vendors")
+    if not _prefetched:
+        # (B6) menu producteur vivant + même produit répété : pas de second `search_products`.
+        _prefetched = reusable_menu_vendors(state)
     if isinstance(_prefetched, list) and _prefetched:
         vendors = list(_prefetched)
         has_multiple = len(vendors) > 1
