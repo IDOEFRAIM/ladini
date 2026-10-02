@@ -55,6 +55,28 @@ def _fresh_unit_this_turn(state: Dict[str, Any]) -> Any:
     return (state.get("extracted_entities") or {}).get("unit")
 
 
+def _change_producer_hint(n_vendors: int) -> str:
+    """Rappel de la commande EXPLICITE de changement de producteur pendant le slot quantité.
+
+    (B7) Un nombre nu est ici une QUANTITÉ : ne JAMAIS demander à l'acheteur d'envoyer un numéro
+    seul pour changer de producteur."""
+    if n_vendors <= 1:
+        return ""
+    return "🔁 _Pour changer de producteur, écrivez « changer producteur » ou « producteur 3 »._\n"
+
+
+def _declared_unit(payload: Dict[str, Any]) -> Any:
+    """Unité réellement DÉCLARÉE par l'acheteur, ou `None`.
+
+    (B7, 2026-10-02) `payload["unit"]` peut n'être qu'un DÉFAUT supposé (`unit_was_assumed`, ex.
+    « KG » pour « lait ») : le passer comme `buyer_unit` faisait refuser un nombre nu (« 5 ») avec
+    « vendu en LITRE, pas en kg » alors que l'acheteur n'a écrit aucune unité — l'unité de l'offre
+    fait alors foi."""
+    if payload.get("unit_was_assumed"):
+        return None
+    return payload.get("unit")
+
+
 def _tier_menu_working_memory_patch(state: Dict[str, Any]) -> Dict[str, Any]:
     """`working_memory` patch to attach to every tier-menu WAITING_INPUT
     response — see `nodes/memory.py`'s `mapping_kind` protection.
@@ -301,10 +323,13 @@ async def _execute_selection_action(
             "final_response": (
                 f"👤 Vous avez choisi *{vendor_label}* pour *{display_name}*"
                 f"{price_info}.\n\n📦 Quelle quantité souhaitez-vous ?\n"
-                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
-            ),
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._\n"
+                f"{_change_producer_hint(len(vendors_list))}"
+            ).rstrip("\n"),
             "transaction_payload": payload,
             "vendor_selection_context": vendor_ctx,
+            # (B7) menu producteur RÉSOLU : sa liste ne survit plus comme `expected_candidates`.
+            "expected_candidates": [],
             "tier_selection_context": None,
             "ag_ui_component": None,
         }
@@ -613,6 +638,24 @@ async def cart_management(
                 payload["product"] = product_name
         selection_idx = payload.get("selection_index")
         vendor_switched = False
+
+        # (B7) « changer producteur » (sans numéro) pendant le slot quantité : on ré-affiche le menu
+        # producteur VIVANT (mêmes candidats, aucun nouveau `search_products`).
+        _vendors_live = [v for v in (vendor_ctx_payload.get("vendors") or []) if isinstance(v, dict)]
+        if (
+            (state.get("raw_analysis") or {}).get("path") == "deterministic_change_producer"
+            and len(_vendors_live) > 1
+        ):
+            _menu_patch, _menu = cart_service.build_product_selection_menu(
+                str(product_name or vendor_ctx_payload.get("product") or ""),
+                _vendors_live,
+                extra_context={
+                    "requested_quantity": vendor_ctx_payload.get("requested_quantity"),
+                    "requested_unit": vendor_ctx_payload.get("requested_unit"),
+                },
+                phone=phone,
+            )
+            return _with_base(_menu_patch)
 
         # (2026-08-30) Incident réel : une sélection de PALIER en cours
         # (`tier_selection_context` actif pour CE produit) se faisait
@@ -930,7 +973,7 @@ async def cart_management(
                 buyer_unit=(
                     _fresh_unit_this_turn(state)
                     if selected_tier_id
-                    else payload.get("unit")
+                    else _declared_unit(payload)
                 ),
                 tier_id=selected_tier_id,
             )
@@ -949,12 +992,7 @@ async def cart_management(
                 else (f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else "")
             )
             n_vendors = len(vendor_ctx_payload.get("vendors") or [])
-            switch_hint = (
-                f"🔁 _Pour changer de producteur, répondez avec le numéro correspondant "
-                f"(1 à {n_vendors} dans la liste ci-dessus)._\n"
-                if n_vendors > 1
-                else ""
-            )
+            switch_hint = _change_producer_hint(n_vendors)
             # (2026-08-30, refonte "palier avant quantité") : si un palier
             # est déjà résolu à ce stade, la question DOIT porter sur ce
             # conditionnement précis ("combien de bidons de 10L ?"), jamais
@@ -1022,6 +1060,9 @@ async def cart_management(
                     # "Numéro invalide" ou un changement de vendeur fantôme.
                     "transaction_payload": payload,
                     "vendor_selection_context": vendor_ctx_payload,
+                    # (B7) le menu producteur est RÉSOLU : sa liste ne doit plus survivre comme
+                    # `expected_candidates` (un chiffre ne désigne plus un producteur ici).
+                    "expected_candidates": [],
                     **_tier_resolved_patch(
                         state,
                         vendor_tiers,
@@ -1352,7 +1393,7 @@ async def cart_management(
             buyer_unit=(
                 _fresh_unit_this_turn(state)
                 if single_selected_tier_id
-                else payload.get("unit")
+                else _declared_unit(payload)
             ),
             tier_id=single_selected_tier_id,
         )
