@@ -109,6 +109,7 @@ from ladini.graphs.agents.market_coach.interpreter.interpreter_result import (
 )
 from ladini.graphs.agents.market_coach.interpreter.product_switch import (
     detect_buyer_product_switch,
+    detect_buyer_same_product_continuation,
 )
 from ladini.graphs.agents.market_coach.interpreter.prompts import (
     INTERPRETER_USER_PROMPT,
@@ -1550,7 +1551,13 @@ def _interpret_fast_path(
             ).lower()
             in {"intent_disambiguation", "order_list", "selection_menu"}
         )
-        if expected == "SELECTION" or len(candidates) > 0 or has_active_mapping:
+        # (B6, 2026-10-02) : un pending qui attend une VALEUR de slot (quantité/prix/unité…) n'est
+        # pas un menu — `expected_candidates`/`available_mapping_kind` survivent au menu producteur
+        # DÉJÀ résolu : sans ce garde, la quantité « 2 » après le choix du producteur était relue
+        # comme « producteur n°2 » (tout chiffre ≤ nombre de producteurs).
+        if expected not in SLOT_FILLING_INPUTS and (
+            expected == "SELECTION" or len(candidates) > 0 or has_active_mapping
+        ):
             return {
                 "interpreted_event": "SELECTION",
                 "detected_intent": "UNKNOWN",
@@ -3313,6 +3320,41 @@ def make_input_interpreter(role: str = "PRODUCER"):
             else detect_buyer_product_switch(state, text)
         )
         if switch is None:
+            # B6 — MÊME produit répété pendant un tunnel Buyer actif : le contexte déjà résolu
+            # (vendeur, prix, candidats, pending) est PRÉSERVÉ ; jamais un nouveau BUYER_REQUEST ni
+            # une recherche catalogue. Priorité : switch (ci-dessus) > même produit > slot > normal.
+            same = (
+                None
+                if state.get("is_onboarding")
+                else detect_buyer_same_product_continuation(state, text)
+            )
+            if same is not None:
+                logger.info(
+                    "BUYER_SAME_PRODUCT_CONTINUATION_DETECTED current_goal=%s pending_kind=%s "
+                    "product_present=True vendor_present=%s pricing_context_present=%s "
+                    "quantity_in_message=%s",
+                    resolve_current_goal(state),
+                    get_pending_interaction(state).kind.value,
+                    bool((state.get("vendor_selection_context") or {}).get("chosen_vendor")),
+                    bool(state.get("tier_selection_context")),
+                    same.quantity is not None,
+                )
+                same_entities: Dict[str, Any] = {}
+                if same.quantity is not None:
+                    same_entities["quantity"] = same.quantity
+                    if same.unit:
+                        same_entities["unit"] = same.unit
+                same_raw: Dict[str, Any] = {
+                    "interpreted_event": "ANSWER",
+                    "detected_intent": str(resolve_current_goal(state) or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.95,
+                    "extracted_entities": same_entities,
+                    "raw_analysis": {"path": "deterministic_same_product_continuation"},
+                }
+                same_patch: Dict[str, Any] = InterpreterResult.from_legacy_dict(
+                    same_raw
+                ).to_state_patch()
+                return same_patch
             raw = await _input_interpreter_impl(state, mc_runtime)
             return InterpreterResult.from_legacy_dict(raw).to_state_patch()
 

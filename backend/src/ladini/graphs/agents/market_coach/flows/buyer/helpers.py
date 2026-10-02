@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from ladini.graphs.agents.market_coach.core.goals import (
     BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
@@ -191,6 +191,23 @@ def additional_products_hint(payload: Dict[str, Any], state: Dict[str, Any]) -> 
         return ""
     joined = ", ".join(f"*{n}*" for n in names)
     return f"\n\n📝 _J'ai aussi noté {joined} — redites son nom une fois qu'on aura fini ici pour le chercher aussi._"
+
+
+def reusable_menu_vendors(state: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Candidats du menu producteur VIVANT, réutilisables sans `search_products` (B6, 2026-10-02).
+
+    Valable UNIQUEMENT pour une continuation « même produit » déterministe (le Buyer répète le
+    produit dont le menu est affiché : les candidats viennent d'être montrés, ils sont toujours
+    valides) ; `None` dans tous les autres cas — aucun autre tour ne court-circuite la recherche."""
+    if (state.get("raw_analysis") or {}).get("path") != "deterministic_same_product_continuation":
+        return None
+    ctx = state.get("vendor_selection_context")
+    if not isinstance(ctx, dict) or ctx.get("__reset__") or ctx.get("chosen_vendor"):
+        return None
+    vendors = ctx.get("vendors")
+    if isinstance(vendors, list) and vendors:
+        return [v for v in vendors if isinstance(v, dict)]
+    return None
 
 
 def resolve_quantity(

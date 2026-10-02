@@ -151,27 +151,43 @@ def _in_cart_tunnel(state: Dict[str, Any]) -> bool:
     return ctx is not None and ctx.expected_action is not None
 
 
-def detect_buyer_product_switch(state: Dict[str, Any], text: str) -> Optional[ProductSwitch]:
-    """Le message est-il une NOUVELLE demande d'achat sur un produit différent, pendant un
-    tunnel quantité Buyer ? `None` dans tous les autres cas (réponse de slot, même produit,
-    annulation, message incompris…)."""
-    from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
-
-    goal = str(resolve_current_goal(state) or "").upper()
-    if goal not in _BUYER_CART_GOALS or not _in_cart_tunnel(state):
-        return None
+def _tunnel_product(state: Dict[str, Any]) -> str:
     payload = state.get("transaction_payload")
     current = str(payload.get("product") or "").strip() if isinstance(payload, dict) else ""
     if not current:
         vctx = state.get("vendor_selection_context")
         current = str(vctx.get("product") or "").strip() if isinstance(vctx, dict) else ""
+    return current
+
+
+def _active_tunnel_product(state: Dict[str, Any]) -> Optional[str]:
+    """Produit du tunnel panier Buyer ACTIF (pending/menu qui attend une réponse), ou `None` :
+    un flow terminé (article déjà au panier, pending effacé) n'est PAS un contexte à préserver."""
+    from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
+
+    goal = str(resolve_current_goal(state) or "").upper()
+    if goal not in _BUYER_CART_GOALS or not _in_cart_tunnel(state):
+        return None
+    return _tunnel_product(state) or None
+
+
+def _is_explicit_buy(clean: str) -> bool:
+    return _looks_like_buyer_product_request(clean) or bool(_DIRECT_BUY_VERB.search(_fold(clean)))
+
+
+def detect_buyer_product_switch(state: Dict[str, Any], text: str) -> Optional[ProductSwitch]:
+    """Le message est-il une NOUVELLE demande d'achat sur un produit différent, pendant un
+    tunnel quantité Buyer ? `None` dans tous les autres cas (réponse de slot, même produit,
+    annulation, message incompris…).
+
+    PRIORITÉ pendant un tunnel Buyer actif (voir `routing.input_interpreter`) :
+    produit explicite DIFFÉRENT (switch, ici) > MÊME produit (`detect_buyer_same_product_
+    continuation`) > réponse de slot valide > texte ambigu (chaîne cognitive normale)."""
+    current = _active_tunnel_product(state)
     if not current:
         return None
     clean = str(text or "").strip().lower()
-    if not clean:
-        return None
-    explicit_buy = _looks_like_buyer_product_request(clean) or bool(_DIRECT_BUY_VERB.search(_fold(clean)))
-    if not explicit_buy:
+    if not clean or not _is_explicit_buy(clean):
         return None
     requested = extract_requested_product(clean)
     if not requested or _same_product(requested, current):
@@ -185,9 +201,89 @@ def detect_buyer_product_switch(state: Dict[str, Any], text: str) -> Optional[Pr
     return ProductSwitch(new_product=requested, reason="explicit_buy_different_product")
 
 
+@dataclass(frozen=True)
+class SameProductContinuation:
+    #: Quantité/unité énoncées dans le message (jamais devinées), applicables à CE slot.
+    quantity: Optional[float]
+    unit: Optional[str]
+
+
+#: Pendings dont la réponse « quantité » est une quantité en unité de base : « je veux 10 litres de
+#: lait » est une réponse de slot déterministe. Pour un palier/paquets la quantité est un NOMBRE DE
+#: PAQUETS (« 2 bidons ») : laissée au parser du tunnel, qui connaît les paliers affichés.
+_QUANTITY_BEARING_PENDING = frozenset({InteractionKind.ENTER_QUANTITY})
+
+
+def _base_unit_quantity_slot(state: Dict[str, Any]) -> bool:
+    """La quantité énoncée est-elle une quantité en UNITÉ DE BASE pour ce tunnel ? Oui pour un slot
+    quantité et pour le menu PRODUCTEUR (la quantité est mémorisée, le choix du producteur reste à
+    faire) ; non pour un menu de paliers / un nombre de paquets (« 2 bidons »)."""
+    from ladini.graphs.agents.market_coach.domain.selection_actions import (
+        ActionType,
+        build_selection_context,
+    )
+
+    if get_pending_interaction(state).kind in _QUANTITY_BEARING_PENDING:
+        return True
+    ctx = build_selection_context(state)
+    return ctx is not None and ctx.expected_action == ActionType.SELECT_PRODUCER
+
+
+def _bare_product_mention(clean: str) -> Optional[str]:
+    """« lait », « du lait », « encore du lait » : le message n'est QUE la mention d'un produit."""
+    words = re.findall(r"[a-z'\-]+", _fold(clean))
+    while words and _is_noise(words[0]):
+        words.pop(0)
+    while words and _is_noise(words[-1]):
+        words.pop()
+    if not words or len(words) > 2:
+        return None
+    return " ".join(words)
+
+
+def detect_buyer_same_product_continuation(
+    state: Dict[str, Any], text: str
+) -> Optional[SameProductContinuation]:
+    """B6 — le Buyer RÉPÈTE le produit qu'il est déjà en train d'acheter (tunnel actif : menu
+    producteur/palier ou quantité, contexte vendeur/prix déjà résolu).
+
+    Ce n'est PAS un changement de produit (primitive séparée : on ne détourne pas
+    `detect_buyer_product_switch`) : le contexte doit être PRÉSERVÉ — jamais une nouvelle recherche
+    catalogue, un nouveau `BUYER_REQUEST`, une purge du vendeur/prix/candidats, ni un retry.
+    Signal conservateur : verbe d'achat explicite + produit nommé identique, OU simple mention nue du
+    produit (« du lait », « encore du lait »). Un message qui énonce aussi un nombre n'est traité
+    ici que pour un slot quantité en unité de base ; sinon il retombe sur le parser du tunnel."""
+    from ladini.domain.quantity_unit import (
+        parse_quantity_unit_from_text,
+        text_states_a_quantity,
+    )
+
+    current = _active_tunnel_product(state)
+    if not current:
+        return None
+    clean = str(text or "").strip().lower()
+    if not clean:
+        return None
+    requested = extract_requested_product(clean) if _is_explicit_buy(clean) else _bare_product_mention(clean)
+    if not requested or not _same_product(requested, current):
+        return None
+    if not text_states_a_quantity(clean, 2.0):
+        return SameProductContinuation(quantity=None, unit=None)
+    # Un nombre accompagne le produit : réponse de slot déterministe seulement pour un slot
+    # quantité en unité de base (ENTER_QUANTITY) ; sinon, parser du tunnel (paliers/paquets).
+    if not _base_unit_quantity_slot(state):
+        return None
+    parsed = parse_quantity_unit_from_text(clean)
+    if parsed.quantity is None:
+        return None
+    return SameProductContinuation(quantity=parsed.quantity, unit=parsed.unit)
+
+
 __all__ = [
     "ProductSwitch",
+    "SameProductContinuation",
     "detect_buyer_product_switch",
+    "detect_buyer_same_product_continuation",
     "entities_name_different_product",
     "extract_requested_product",
 ]

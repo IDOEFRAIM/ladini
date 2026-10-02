@@ -15,6 +15,7 @@ from typing import Any, Dict
 
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     CART_TUNNEL_KINDS,
+    InteractionKind,
     get_pending_interaction,
     to_tunnel_category,
 )
@@ -163,7 +164,13 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         cognitive_action == "recover_active_tunnel"
         and not state.get("final_response")
         and not state.get("pending_menu")
-        and not state.get("expected_candidates")
+        # (B6) : `expected_candidates` survit au menu producteur DÉJÀ résolu — pendant un slot
+        # quantité/paquets ce n'est plus un menu à re-montrer (« Veuillez choisir une option : 1.
+        # Ferme0… » alors que le producteur est choisi), seulement une liste périmée.
+        and (
+            pending.kind in (InteractionKind.ENTER_QUANTITY, InteractionKind.ENTER_PACKAGE_COUNT)
+            or not state.get("expected_candidates")
+        )
     )
     if pending.kind in CART_TUNNEL_KINDS and not _nothing_to_show:
         return {
