@@ -49,6 +49,9 @@ from ladini.domain.commercial_offer import (
     unit_display,
     validate_offer,
 )
+from ladini.domain.commercial_offer import (
+    format_package_content as _format_content,
+)
 from ladini.domain.quantity_unit import (
     _TIER_PACKAGING_WORDS as PACKAGING_WORDS,
 )
@@ -105,6 +108,8 @@ _CURRENCY_RE = re.compile(r"\b(fcfa|cfa|francs?|f)\b")
 #: strictement inchangée pour ses 4 consommateurs existants dans ce fichier.
 _CONTENT_UNIT_TOKENS: Tuple[str, ...] = (
     "l", "litre", "litres", "ml", "cl", "dl",
+    "millilitre", "millilitres", "mililitre", "mililitres",
+    "centilitre", "centilitres", "decilitre", "decilitres",
     "kg", "kilo", "kilos", "g", "gramme", "grammes",
 )
 
@@ -151,6 +156,9 @@ class CommercialQuestion:
     package_type: Optional[str] = None  # `package_size`
     content_unit: Optional[str] = None  # `package_size` : unité attendue du contenu
     candidate_amount: Optional[float] = None  # `price_basis` : montant en attente de base
+    #: `price` : « PER_PACKAGE » quand la question demande le prix D'UN conditionnement de stock
+    #: (« Quel est le prix d'un sachet de 500 ml ? ») — le montant nu qui répond est alors PAR CONDITIONNEMENT.
+    expected_basis: Optional[str] = None
 
     def to_target(self) -> Dict[str, Any]:
         return {
@@ -160,6 +168,7 @@ class CommercialQuestion:
             "package_type": self.package_type,
             "content_unit": self.content_unit,
             "candidate_amount": self.candidate_amount,
+            "expected_basis": self.expected_basis,
         }
 
     @classmethod
@@ -180,6 +189,7 @@ class CommercialQuestion:
             package_type=target.get("package_type"),
             content_unit=target.get("content_unit"),
             candidate_amount=amount,
+            expected_basis=target.get("expected_basis"),
         )
 
     @property
@@ -444,6 +454,257 @@ def parse_generic_package_price_context(
         label = _singularize_label(match.group(1)).upper()
         return label, converted[0], converted[1]
     return None
+
+
+# ---------------------------------------------------------------------------
+# STOCK CONDITIONNÉ « N <conditionnement> [de <produit>] de M <unité> » — un OU PLUSIEURS groupes
+# (hotfix 2026-10-03, « PRODUCER PACKAGING PUBLICATION INTEGRITY »)
+# ---------------------------------------------------------------------------
+# Incidents réels : « 100 sachet de lait frais pasteurisé de 500ml » devenait 100 litres à « 500 FCFA par
+# millilitre » ; « 50 bidons de gapal de 500ml et 100 bidons de 330 mL » devenait « 250 litres » (arithmétique
+# du LLM). Causes : (1) `parse_generic_package_count_and_size` n'exige que « N label de M unité » — le NOM DU
+# PRODUIT entre le conditionnement et la taille (« sachet DE LAIT de 500ml ») la fait s'abstenir, et elle n'est
+# appelée qu'en slot QUANTITY ; (2) une unité écrite dans la phrase (« 500ml ») devenait l'unité de la QUANTITÉ
+# (100 ml) ; (3) la somme de plusieurs groupes était laissée au LLM.
+#
+# Ce parseur est DÉTERMINISTE et CONSERVATEUR : conditionnements d'un vocabulaire fermé (aucun « 30 poulets de
+# 2 kg » détourné en stock conditionné), tailles MASS/VOLUME convertibles uniquement (jamais « 20 cartons de 10
+# unités » multiplié), compte entier, un prix éventuel DIRECTEMENT attaché au groupe (« à 500 FCFA »). Il
+# s'abstient (`None`) au moindre doute : un prix non rattaché à un groupe, deux dimensions mélangées (L + kg),
+# un nombre inexpliqué, un groupe en double. La somme `count × size` se fait ICI, une fois, dans l'unité de base.
+_PACKAGED_LABELS = tuple(
+    sorted(
+        {
+            "bidon", "sac", "sachet", "carton", "casier", "bouteille", "seau", "cuvette", "panier",
+            "pot", "boite", "canette", "jerrican", "jerricane", "jerrycan", "bocal", "flacon", "fut", "tonneau",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+_PACKAGED_GROUP_RE = re.compile(
+    r"(?<![\d.,])(?P<count>\d+)\s*(?P<label>(?:" + "|".join(_PACKAGED_LABELS) + r")(?:s|x)?)\b\s*"
+    r"(?:de|d)\s+"
+    r"(?:(?P<product>[a-z][a-z ]{1,45}?)\s+(?:de|d)\s+)?"
+    r"(?P<size>\d+(?:[.,]\d+)?)\s*(?P<unit>" + _GENERIC_PACKAGE_UNIT_ALTERNATION + r")\b"
+    r"(?:\s*(?:a|au prix de|pour|:|=)\s*(?P<price>\d+(?:[ ]\d{3})*(?:[.,]\d+)?)\s*(?:fcfa|cfa|francs?|f)\b"
+    r"(?:\s*(?:le|la|par|/|chaque)\s+[a-z]+)?)?",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class PackagedGroup:
+    """UN groupe de stock conditionné : `count` conditionnements de `size` (unité de base `unit`)."""
+
+    count: int
+    label: str  # singulier, MAJUSCULES (« BIDON »)
+    size: float  # contenu d'UN conditionnement, en unité de base
+    unit: str  # unité de base canonique (LITRE / KG)
+    size_literal: float  # tel que dit (500)
+    unit_literal: str  # tel que dit, canonique (MILLILITRE)
+    price: Optional[float] = None  # prix D'UN conditionnement, s'il est attaché au groupe
+    product_hint: Optional[str] = None
+
+    @property
+    def base_quantity(self) -> float:
+        return round(self.count * self.size, 6)
+
+
+@dataclass(frozen=True)
+class PackagedStock:
+    groups: Tuple[PackagedGroup, ...]
+
+    @property
+    def base_unit(self) -> str:
+        return self.groups[0].unit
+
+    @property
+    def total_base_quantity(self) -> float:
+        return round(sum(g.base_quantity for g in self.groups), 6)
+
+    @property
+    def all_priced(self) -> bool:
+        return all(g.price is not None for g in self.groups)
+
+    @property
+    def any_priced(self) -> bool:
+        return any(g.price is not None for g in self.groups)
+
+
+def parse_packaged_stock_message(text: Any) -> Optional[PackagedStock]:
+    """« 100 sachets de lait de 500 ml » / « 50 bidons de 500ml et 100 bidons de 330 mL » -> `PackagedStock`.
+    `None` dès que la structure n'est pas CERTAINE (voir le commentaire de section)."""
+    ntext = normalize_text(text)
+    if not ntext:
+        return None
+    matches = list(_PACKAGED_GROUP_RE.finditer(ntext))
+    if not matches:
+        return None
+    groups: List[PackagedGroup] = []
+    seen: set = set()
+    explained: set = set()
+    for m in matches:
+        count_val = _to_float(m.group("count"))
+        size_val = _to_float(m.group("size"))
+        if count_val is None or size_val is None or count_val <= 0 or size_val <= 0 or count_val != int(count_val):
+            return None
+        converted = _convert_content(size_val, m.group("unit"))
+        if converted is None:
+            return None
+        literal = normalize_unit(m.group("unit"))
+        label = m.group("label")
+        label = label[:-1] if label.endswith(("s", "x")) and len(label) > 3 else label
+        price = None
+        if m.group("price"):
+            price = _to_float(m.group("price").replace(" ", ""))
+            if price is None or price <= 0:
+                return None
+            explained.add(price)
+        key = (label, round(converted[0], 6), converted[1])
+        if key in seen:
+            return None  # même conditionnement dit deux fois : ambigu, jamais fusionné silencieusement
+        seen.add(key)
+        explained.update({count_val, size_val})
+        product = (m.group("product") or "").strip() or None
+        groups.append(
+            PackagedGroup(
+                count=int(count_val), label=label.upper(), size=converted[0], unit=converted[1],
+                size_literal=size_val, unit_literal=str(literal or m.group("unit")).upper(),
+                price=price, product_hint=product,
+            )
+        )
+    if len({g.unit for g in groups}) != 1:
+        return None  # VOLUME + MASSE dans le même message : jamais additionnés
+    # Tout nombre du texte doit être expliqué par un groupe (compte, taille, prix attaché) : sinon un prix nu ou
+    # une autre quantité traîne -> abstention (le LLM / le moteur de paliers décident).
+    for token in _ANY_NUMBER_RE.finditer(ntext):
+        value = _to_float(token.group(0).strip().rstrip(".,"))
+        if value is not None and value not in explained:
+            return None
+    # Un montant en devise NON rattaché à un groupe (« … 3000 FCFA le litre ») : hors périmètre de ce parseur.
+    if _CURRENCY_RE.search(ntext) and not any(g.price is not None for g in groups):
+        return None
+    if any(g.price is None for g in groups) and any(g.price is not None for g in groups):
+        return None  # prix pour certains groupes seulement : on demandera, jamais deviné
+    return PackagedStock(groups=tuple(groups))
+
+
+_PRICE_FOR_QUANTITY_RE = re.compile(
+    r"^\s*(?:fcfa|cfa|francs?|f)?\s*(?:pour|les|=|:|/)\s*(?:un\s+|une\s+)?(\d+(?:[.,]\d+)?)\s*("
+    + _GENERIC_PACKAGE_UNIT_ALTERNATION
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def price_for_quantity_in_text(text: Any, amount: Optional[float]) -> Optional[Tuple[float, str]]:
+    """« 500f POUR 500ml », « 500 FCFA pour 0,5 litre » -> `(0.5, 'LITRE')` : la quantité (en unité de base) à
+    laquelle `amount` s'applique. `None` si le montant n'est pas suivi d'un « pour <quantité> <unité> »."""
+    if amount is None:
+        return None
+    ntext = normalize_text(text)
+    for token in _AMOUNT_TOKEN_RE.finditer(ntext):
+        value = _to_float(token.group(0).strip().rstrip(".,").replace(" ", ""))
+        if value is None or abs(value - amount) > 1e-9:
+            continue
+        match = _PRICE_FOR_QUANTITY_RE.match(ntext[token.end():])
+        if match is None:
+            continue
+        size = _to_float(match.group(1))
+        converted = _convert_content(size, match.group(2)) if size is not None and size > 0 else None
+        if converted is not None:
+            return converted
+    return None
+
+
+_PER_BASE_UNIT_MARKER_RE = re.compile(r"(?:\bpar|\ble|\bla|/)\s*(?:1\s*)?(?:litres?|l|kg|kilos?|kilogrammes?|ml|cl|dl|g|grammes?|mil{1,2}ilitres?|centilitres?|decilitres?)\b")
+_PACKAGE_PRICE_PAIR_RE = re.compile(
+    r"(?P<price>\d+(?:[ ]\d{3})*(?:[.,]\d+)?)\s*(?:fcfa|cfa|francs?|f)?\s*(?:pour|le|la|/|=|:)?\s*"
+    r"(?:(?:un|une|le|la)\s+)?(?:(?:" + "|".join(_PACKAGED_LABELS) + r")s?\s+)?(?:de\s+)?"
+    r"(?P<size>\d+(?:[.,]\d+)?)\s*(?P<unit>" + _GENERIC_PACKAGE_UNIT_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+
+
+def parse_package_price_reply(text: Any, payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Réponse à « Quel est le prix d'un sachet de 500 ml ? » (ou, pour PLUSIEURS conditionnements, « Quel est le
+    prix : 1. … 2. … ? ») lue DÉTERMINISTEMENT dans le contexte du stock déclaré.
+
+    Un conditionnement : « 500 », « 500f », « 500f pour 500 ml », « 500 FCFA le sachet » -> `price` PAR CONDITIONNEMENT
+    (`price_unit` = le conditionnement). Plusieurs : « 500 et 350 » (dans l'ordre) ou « 500 pour 500 ml et 350 pour
+    330 ml » (rattachés à la taille) -> `pricing_tiers`. Abstention (`None`) dès qu'un prix PAR UNITÉ est explicite
+    (« 1000 francs le litre ») ou que la lecture n'est pas univoque."""
+    ntext = normalize_text(text)
+    if not ntext or _PER_BASE_UNIT_MARKER_RE.search(ntext):
+        return None
+    groups = [g for g in (payload.get("package_groups") or []) if isinstance(g, Mapping)]
+    if len(groups) >= 2:
+        pairs = []
+        for m in _PACKAGE_PRICE_PAIR_RE.finditer(ntext):
+            price = _to_float(m.group("price").replace(" ", ""))
+            size = _to_float(m.group("size"))
+            converted = _convert_content(size, m.group("unit")) if size is not None else None
+            if price is None or price <= 0 or converted is None:
+                return None
+            pairs.append((price, converted))
+        tiers: List[Dict[str, Any]] = []
+        if pairs:
+            for g in groups:
+                hit = [pr for pr, (sz, un) in pairs if un == g.get("unit") and abs(sz - float(g.get("size") or 0)) < 1e-9]
+                if len(hit) != 1:
+                    return None
+                tiers.append(_tier_from_group(g, hit[0]))
+            return {"pricing_tiers": tiers} if len(pairs) == len(groups) else None
+        bare = [_to_float(t.group(0).strip().rstrip(".,").replace(" ", "")) for t in _AMOUNT_TOKEN_RE.finditer(ntext)]
+        numbers = [n for n in bare if n is not None and n > 0]
+        if len(numbers) != len(bare) or len(numbers) != len(groups):
+            return None
+        return {"pricing_tiers": [_tier_from_group(g, n) for g, n in zip(groups, numbers, strict=True)]}
+
+    count, size, unit, label = (
+        payload.get("package_count"), _num(payload.get("package_size")), payload.get("package_unit"),
+        payload.get("package_label"),
+    )
+    if not count or size is None or not unit or not label:
+        return None
+    remainder = ntext
+    # « 500f pour 500mililitre » : le 2e 500 est la TAILLE du conditionnement, pas un second prix.
+    if price_for_quantity_in_text(ntext, _first_number(ntext)) is not None:
+        remainder = re.sub(r"(?:pour|les|=|:|/)\s*(?:un\s+|une\s+)?\d+(?:[.,]\d+)?\s*[a-z]+", " ", ntext, count=1)
+    found: List[Optional[float]] = [
+        _to_float(t.group(0).strip().rstrip(".,").replace(" ", "")) for t in _AMOUNT_TOKEN_RE.finditer(remainder)
+    ]
+    only = found[0] if len(found) == 1 else None
+    if only is None or only <= 0:
+        return None
+    return {"price": only, "price_unit": str(label).lower()}
+
+
+def _first_number(ntext: str) -> Optional[float]:
+    m = _AMOUNT_TOKEN_RE.search(ntext)
+    return _to_float(m.group(0).strip().rstrip(".,").replace(" ", "")) if m else None
+
+
+_SHORT_CONTENT_UNITS = {
+    "MILLILITRE": "ml", "CENTILITRE": "cl", "DECILITRE": "dl", "LITRE": "L", "GRAMME": "g", "KG": "kg",
+}
+
+
+def short_content_unit(unit: Any) -> str:
+    """« MILLILITRE » -> « ml » : l'unité telle qu'un producteur l'écrit (jamais « 500 MILLILITRE » côté acheteur)."""
+    text = str(unit or "").strip()
+    return _SHORT_CONTENT_UNITS.get(text.upper(), text)
+
+
+def _tier_from_group(group: Mapping[str, Any], price: float) -> Dict[str, Any]:
+    return {
+        "quantity": group.get("size_literal") or group.get("size"),
+        "unit": short_content_unit(group.get("unit_literal") or group.get("unit")),
+        "price": price,
+        "packaging": str(group.get("label") or "").lower() or None,
+        "count": group.get("count"),
+    }
 
 
 _CONTENT_REPLY_FILLER = frozenset(
@@ -783,6 +1044,18 @@ def build_commercial_offer_from_sales_state(
             package_type = reply.package_type or package_type
         elif new_price_info and has_total_cue(ntext):
             basis, basis_source = PriceBasis.TOTAL_LOT, Provenance.USER_EXPLICIT
+        elif new_price_info and package_from_count_size is not None and _price_targets_stock_package(
+            package_from_count_size, text, ntext, amount, price_unit_in_text, payload.get("price_unit"), question
+        ):
+            # (hotfix 2026-10-03) Stock CONDITIONNÉ connu (« 100 sachets de 500 ml ») : « 500f pour 500 ml »,
+            # « à 500 FCFA » rattaché au groupe, ou un montant nu répondant à « quel est le prix d'un sachet ? »
+            # est le prix D'UN CONDITIONNEMENT — JAMAIS « 500 FCFA par millilitre ». La conversion physique sert
+            # au stock, pas à la base commerciale du prix.
+            basis, basis_source = PriceBasis.PER_PACKAGE, Provenance.USER_EXPLICIT
+            if question is not None and question.expected_basis == "PER_PACKAGE" and price_for_quantity_in_text(text, amount) is None:
+                basis_source = Provenance.QUESTION_CONTEXT_EXPLICIT
+            package_type = package_from_count_size.package_type
+            events.append("PRODUCER_PRICING_BASIS_RESOLVED")
         elif new_price_info and price_unit_in_text:
             if price_unit_in_text in _PACKAGE_LIKE_UNITS:
                 basis, basis_source = PriceBasis.PER_PACKAGE, Provenance.USER_EXPLICIT
@@ -876,12 +1149,28 @@ def build_commercial_offer_from_sales_state(
             content_amount = previous.package.content_amount
             content_unit = previous.package.content_unit
             content_source = previous.package.source
+        stock_count: Optional[int] = None
+        if (
+            package_from_count_size is not None
+            and package_from_count_size.is_content_known
+            and (
+                normalize_text(package_from_count_size.package_type or "") == ptype_key
+                or ptype_key == "conditionnement"
+            )
+            and (content_amount is None or _same_content(content_amount, content_unit, package_from_count_size))
+        ):
+            # Le conditionnement de STOCK (« 100 sachets de 500 ml ») porte déjà son contenu ET son compte.
+            content_amount = package_from_count_size.content_amount
+            content_unit = package_from_count_size.content_unit
+            content_source = package_from_count_size.source
+            stock_count = package_from_count_size.count
         default_content_unit = base_unit_for(commercial_unit) if commercial_unit else None
         known = content_amount is not None and content_amount > 0 and bool(content_unit)
         package = PackageDefinition(
             package_type=ptype.upper(),
             content_amount=content_amount if known else None,
             content_unit=(content_unit if known else default_content_unit),
+            count=stock_count,
             status=PackageStatus.KNOWN if known else PackageStatus.UNKNOWN,
             source=content_source if known else Provenance.UNKNOWN,
         )
@@ -897,6 +1186,51 @@ def build_commercial_offer_from_sales_state(
     )
     offer = replace(offer, normalized=derive_normalized(offer))
     return offer, events
+
+
+def _same_content(amount: Optional[float], unit: Optional[str], package: PackageDefinition) -> bool:
+    """`True` si (amount, unit) désigne le MÊME contenu physique que `package` (0,5 L == 500 ml)."""
+    if amount is None or not unit or package.content_amount is None:
+        return False
+    converted = _convert_content(amount, str(unit)) if str(unit).lower() in _CONTENT_UNIT_MAP else None
+    if converted is None:
+        base = base_unit_for(str(unit))
+        factor = _convert_quantity(1.0, str(unit).upper(), base) if base else None
+        converted = (amount * factor, base) if factor is not None and base else None
+    return (
+        converted is not None
+        and converted[1] == package.content_unit
+        and abs(converted[0] - package.content_amount) < 1e-9
+    )
+
+
+def _price_targets_stock_package(
+    package: PackageDefinition,
+    text: Any,
+    ntext: str,
+    amount: Optional[float],
+    price_unit_in_text: Optional[str],
+    entity_price_unit: Any,
+    question: Optional["CommercialQuestion"],
+) -> bool:
+    """Le montant de CE tour est-il le prix D'UN conditionnement du stock déclaré ?"""
+    if amount is None or not package.is_content_known:
+        return False
+    for_qty = price_for_quantity_in_text(text, amount)
+    if for_qty is not None:
+        # « 500f pour 500ml » : vrai ssi la quantité visée EST le contenu du conditionnement.
+        return for_qty[1] == package.content_unit and abs(for_qty[0] - (package.content_amount or 0.0)) < 1e-9
+    label = normalize_text(package.package_type or "")
+    if label and re.search(rf"\b{re.escape(label)}s?\b", ntext):
+        return True  # « 500 FCFA le sachet », « par bidon »
+    if label and normalize_text(str(entity_price_unit or "")) == label:
+        return True  # prix rattaché au groupe dans le message de stock (« … de 500 ml à 500 FCFA »)
+    return bool(
+        question is not None
+        and question.requested_field == "price"
+        and question.expected_basis == "PER_PACKAGE"
+        and not price_unit_in_text
+    )
 
 
 def offer_from_package_tier(
@@ -995,6 +1329,20 @@ def clarification_for(
         )
         return question, text
 
+    if first == "price" and package is not None and package.is_content_known and package.count:
+        # Stock CONDITIONNÉ déclaré (« 100 sachets de 500 ml ») : on demande le prix D'UN conditionnement, jamais
+        # « par millilitre » / « par litre » (hotfix 2026-10-03).
+        label = (package.package_type or "conditionnement").lower()
+        content = _format_content(package.content_amount, package.content_unit)
+        return (
+            CommercialQuestion(
+                requested_field="price",
+                expected_basis="PER_PACKAGE",
+                package_type=(package.package_type or "").upper() or None,
+                content_unit=package.content_unit,
+            ),
+            f"Quel est le prix d'un *{label} de {content}* ? (ex : 500 FCFA le {label})",
+        )
     if first == "price" and cq is not None:
         return price_question(cq.unit)
     return None, None
@@ -1020,6 +1368,23 @@ def evaluate_sales_offer(
     )
     validation = validate_offer(offer)
     question_out, question_text = clarification_for(offer, validation)
+    groups = [g for g in (payload.get("package_groups") or []) if isinstance(g, Mapping)]
+    if (
+        not validation.is_valid
+        and validation.missing_fields
+        and validation.missing_fields[0] == "price"
+        and len(groups) >= 2
+        and not payload.get("pricing_tiers")
+    ):
+        # PLUSIEURS conditionnements en stock, aucun prix : on demande LE PRIX DE CHACUN, jamais un prix « par
+        # litre » générique (hotfix 2026-10-03).
+        lines = [
+            f"{i}. un *{str(g.get('label') or 'conditionnement').lower()} de "
+            f"{_format_content(_num(g.get('size')), g.get('unit'))}* ?"
+            for i, g in enumerate(groups, start=1)
+        ]
+        question_out = CommercialQuestion(requested_field="price", expected_basis="PER_PACKAGE", package_type="MULTI")
+        question_text = "Quel est le prix :\n" + "\n".join(lines) + "\n(ex : 500 et 350 FCFA)"
     all_events = list(events)
     all_events.append("COMMERCIAL_OFFER_PARSED")
     if not validation.is_valid:
@@ -1048,6 +1413,12 @@ __all__ = [
     "parse_package_content",
     "parse_generic_package_count_and_size",
     "parse_generic_package_price_context",
+    "PackagedGroup",
+    "PackagedStock",
+    "parse_packaged_stock_message",
+    "parse_package_price_reply",
+    "price_for_quantity_in_text",
+    "short_content_unit",
     "parse_basis_reply",
     "price_unit_next_to_amount",
     "package_word_before_amount",

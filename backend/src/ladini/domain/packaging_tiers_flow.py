@@ -92,14 +92,19 @@ def clean_tiers(raw_tiers: Any) -> List[Dict[str, Any]]:
         if not isinstance(raw, Mapping):
             continue
         packaging = str(raw.get("packaging") or "").strip() or None
-        out.append(
-            {
-                "quantity": _number(raw.get("quantity")),
-                "unit": str(raw.get("unit") or "").strip(),
-                "price": _number(raw.get("price")),
-                "packaging": packaging,
-            }
-        )
+        tier: Dict[str, Any] = {
+            "quantity": _number(raw.get("quantity")),
+            "unit": str(raw.get("unit") or "").strip(),
+            "price": _number(raw.get("price")),
+            "packaging": packaging,
+        }
+        # `count` : nombre de conditionnements EN STOCK dits par le producteur (« 50 bidons de 500 ml ») — gardé
+        # pour le récapitulatif de la conversation UNIQUEMENT ; jamais persisté (`validate_pricing_tiers` ne le
+        # reprend pas : le stock réel est la quantité totale, les comptes périmeraient à la première vente).
+        count = _number(raw.get("count"))
+        if count is not None and count > 0 and count == int(count):
+            tier["count"] = int(count)
+        out.append(tier)
     return out
 
 
@@ -180,7 +185,11 @@ __all__ = [
 # Affichage — projection PURE des paliers (jamais un prix par unité)
 # ---------------------------------------------------------------------------
 
-_SHORT_UNITS = {"LITRE": "L", "LITRES": "L", "L": "L", "KG": "kg", "KGS": "kg", "G": "g", "TONNE": "t"}
+_SHORT_UNITS = {
+    "LITRE": "L", "LITRES": "L", "L": "L", "KG": "kg", "KGS": "kg", "G": "g", "GRAMME": "g", "TONNE": "t",
+    "MILLILITRE": "ml", "MILLILITRES": "ml", "ML": "ml", "CENTILITRE": "cl", "CENTILITRES": "cl", "CL": "cl",
+    "DECILITRE": "dl", "DECILITRES": "dl", "DL": "dl",
+}
 
 
 def short_unit_label(unit: Any) -> str:
@@ -202,6 +211,11 @@ def render_tiers_summary(product: Any, quantity: Any, unit: Any, tiers: Any) -> 
     for tier in clean_tiers(tiers):
         content = f"{fmt_num(tier['quantity'])} {short_unit_label(tier['unit'])}"
         packaging = tier["packaging"]
+        count = tier.get("count")
+        if count and packaging:
+            plural = f"{packaging}s" if count > 1 else packaging
+            lines.append(f"- {count} {plural} de {content} : {fmt_num(tier['price'])} FCFA le {packaging}")
+            continue
         label = f"{packaging[:1].upper()}{packaging[1:]} de {content}" if packaging else content
         lines.append(f"- {label} : {fmt_num(tier['price'])} FCFA")
     return "\n".join(lines)

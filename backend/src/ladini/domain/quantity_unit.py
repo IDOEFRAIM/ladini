@@ -61,6 +61,9 @@ UNIT_SYNONYMS: Dict[str, str] = {
     "ml": "MILLILITRE",
     "millilitre": "MILLILITRE",
     "millilitres": "MILLILITRE",
+    # Faute de frappe très courante (« 500 mililitre ») : un seul « l » — même unité, jamais une unité inconnue.
+    "mililitre": "MILLILITRE",
+    "mililitres": "MILLILITRE",
     "cl": "CENTILITRE",
     "centilitre": "CENTILITRE",
     "centilitres": "CENTILITRE",
@@ -762,7 +765,7 @@ _SCAN_UNIT_RE = re.compile(
     # commercial_offer_flow.py). Formes accentuées ET non-accentuées pour
     # "décilitre" : ce scan ne passe QUE par `.lower()` (pas de pliage
     # d'accent) avant consultation, contrairement à `normalize_unit_token`.
-    r"g|gramme|grammes|ml|millilitre|millilitres|cl|centilitre|centilitres|"
+    r"g|gramme|grammes|ml|millilitre|millilitres|mililitre|mililitres|cl|centilitre|centilitres|"
     r"dl|decilitre|decilitres|décilitre|décilitres|"
     r"l|litre|litres)\b(?!['’])"
 )
@@ -1057,7 +1060,7 @@ _TIER_CLAUSE_SPLIT_RE = re.compile(
 _TIER_UNIT_ALTERNATION = (
     r"kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
     r"sacs?|sachets?|paniers?|t[êe]tes?|unit[ée]s?|"
-    r"g|grammes?|ml|millilitres?|cl|centilitres?|dl|d[ée]cilitres?|"
+    r"g|grammes?|ml|mil{1,2}ilitres?|cl|centilitres?|dl|d[ée]cilitres?|"
     r"litres?|l"
 )
 _TIER_QTY_UNIT_RE = re.compile(
