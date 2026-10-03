@@ -1786,6 +1786,9 @@ class ProducerMgmtMixin(BaseMixin):
         # re-déclencher la transition ni renvoyer une erreur brute : outcome
         # explicite, même discipline que le reste du produit.
         if str(order.status or "").upper() == "COMPLETED":
+            _recompute = getattr(self, "_recompute_occurrence_fulfillment_for_order", None)
+            if _recompute is not None:
+                await _recompute(order, reason="cash_closure_replay")
             logger.info(
                 "PRODUCER_ORDER_COMPLETION_RESULT | order=%s | success=True | "
                 "final_order_status=COMPLETED | final_payment_status=%s | "
@@ -1828,7 +1831,12 @@ class ProducerMgmtMixin(BaseMixin):
         # terminal est la CONSÉQUENCE directe des deux autres, jamais un
         # raccourci séparé.
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.delivery_status = "DELIVERED"
+        # B14 : pour une commande RECURRING_SUPPLY, la déclaration « livrée + payée » du producteur EST la
+        # confirmation de réception (la commande passe COMPLETED sans autre étape) : `RECEIVED` est le seul
+        # statut que le contrat `quantity_delivered` (et l'analytics) comptent comme livré.
+        _is_recurring = str(getattr(order, "order_type", "") or "").upper() == "RECURRING_SUPPLY"
+        _delivered_status = "RECEIVED" if _is_recurring else "DELIVERED"
+        order.delivery_status = _delivered_status
         order.payment_status = "PAID"
         order.status = "COMPLETED"
         order.confirmed_at = now
@@ -1837,7 +1845,7 @@ class ProducerMgmtMixin(BaseMixin):
         # de ce dépôt (voir `services/database/order_service.py`), jamais
         # une nouvelle table. Une entrée par axe métier (mandat §16).
         for status_type, from_status, to_status in (
-            ("DELIVERY", "PENDING", "DELIVERED"),
+            ("DELIVERY", "PENDING", _delivered_status),
             ("PAYMENT", "PENDING", "PAID"),
             ("ORDER", "CONFIRMED", "COMPLETED"),
         ):
@@ -1891,6 +1899,9 @@ class ProducerMgmtMixin(BaseMixin):
 
         await current_session.flush()
         await BusinessEventEmitter(current_session).emit_order_delivered(order)
+        _recompute = getattr(self, "_recompute_occurrence_fulfillment_for_order", None)
+        if _recompute is not None:
+            await _recompute(order, reason="cash_closure")
 
         order_ref = str(order.id)[:8].upper()
         amount_txt = _fmt_num(order.total_amount)
@@ -2102,6 +2113,12 @@ class ProducerMgmtMixin(BaseMixin):
                 ),
             )
         )
+
+        # B14 : une commande RECURRING_SUPPLY refusée/annulée ferme (ou fait avancer) son occurrence.
+        await current_session.flush()
+        _recompute = getattr(self, "_recompute_occurrence_fulfillment_for_order", None)
+        if _recompute is not None:
+            await _recompute(order, reason="producer_cancelled")
 
         # Notification acheteur — miroir exact de la notification producteur
         # posée par `cancel_pending_order`. Outbox, MÊME transaction.

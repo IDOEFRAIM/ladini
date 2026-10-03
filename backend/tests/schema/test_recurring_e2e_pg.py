@@ -223,9 +223,9 @@ def test_full_cycle_matching_digest_buyer_view_accept_producer_delivery_receptio
     assert final == ("COMPLETED", "PENDING", "RECEIVED")  # GAP : jamais PAID (paiement hors plateforme, non suivi)
 
     # (10) Occurrence APRÈS orders COMPLETED : quantité livrée suivie, mais le statut reste ACCEPTED.
-    #      GAP : FULFILLED / PARTIALLY_FULFILLED / UNFULFILLED existent dans la contrainte, AUCUN code ne les écrit.
+    #      (B14) toutes les commandes sont terminales et la quantité demandée est livrée : FULFILLED.
     closed = _occ_row(pg_dsn, occ)
-    assert closed["status"] == "ACCEPTED" and closed["delivered"] == 40.0 and closed["confirmed"] == 40.0
+    assert closed["status"] == "FULFILLED" and closed["delivered"] == 40.0 and closed["confirmed"] == 40.0
     need_status = _sql(pg_dsn, "select status from marketplace.recurring_needs where id = %s", (str(need),))[0][0]
     assert need_status == "ACTIVE"
 
@@ -244,10 +244,10 @@ def test_full_cycle_matching_digest_buyer_view_accept_producer_delivery_receptio
 
 # ── B11 x recurring : la clôture « livrée et payée » du producteur sur une commande RECURRING_SUPPLY ──
 
-def test_GAP_b11_cash_closure_on_a_recurring_order_bypasses_reception_and_leaves_quantity_delivered_at_zero(pg_dsn):
-    """BUG EXISTANT (interaction B11 / VS5) : `confirm_delivery_and_payment` n'exclut pas `RECURRING_SUPPLY`. La
-    commande passe COMPLETED/PAID/DELIVERED SANS réception acheteur et sans `_refresh_occurrence_quantity_delivered` :
-    l'occurrence garde `quantity_delivered = 0` alors que la commande est terminée."""
+def test_b11_cash_closure_on_a_recurring_order_counts_as_received_and_fulfills_the_occurrence(pg_dsn):
+    """(B14) Avant : `confirm_delivery_and_payment` laissait `quantity_delivered = 0` alors que la commande était
+    COMPLETED. Désormais la déclaration « livrée + payée » d'une commande RECURRING_SUPPLY EST la réception
+    (`RECEIVED`) : l'occurrence est recalculée dans la même transaction."""
     d = _fresh_date()
     g, need, occ, _product = _seed_one_cycle(pg_dsn, d)
     _run(pg_dsn, lambda s: NeedMatchingService(s).rematch_occurrence(occ))
@@ -264,8 +264,9 @@ def test_GAP_b11_cash_closure_on_a_recurring_order_bypasses_reception_and_leaves
 
     assert _svc_run(pg_dsn, g, close)["outcome"] == "COMPLETED"
     assert _sql(pg_dsn, "select status, payment_status, delivery_status from marketplace.orders where id = %s", (order_id,))[0] == (
-        "COMPLETED", "PAID", "DELIVERED")
-    assert _occ_row(pg_dsn, occ)["delivered"] == 0.0
+        "COMPLETED", "PAID", "RECEIVED")
+    final = _occ_row(pg_dsn, occ)
+    assert final["delivered"] == 40.0 and final["status"] == "FULFILLED"
 
 
 # ── NO-RESPONSE ──────────────────────────────────────────────────────────────

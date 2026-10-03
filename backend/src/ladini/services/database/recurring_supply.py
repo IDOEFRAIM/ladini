@@ -83,6 +83,7 @@ from ladini.domain.models import (
     SubCategory,
     User,
 )
+from ladini.domain.pricing_tiers import resolve_stock_debit
 from ladini.domain.recurring_supply.recurrence import (
     OCCURRENCE_WINDOW_DAYS,
     RecurrenceRule,
@@ -1048,6 +1049,224 @@ class RecurringSupplyMixin(BaseMixin):
             "quantity_confirmed": converted_quantity,
         }
 
+    # ─── FULFILLMENT (B14) : fermeture déterministe de l'occurrence ──────────────────────
+
+    async def _recompute_occurrence_fulfillment_for_order(
+        self, order: Any, *, reason: str = "order_changed", require_recurring: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Recalcule l'occurrence d'une commande RECURRING_SUPPLY (même transaction que le changement
+        d'état de la commande). Aucun effet pour une commande d'un autre type ou sans lignée."""
+        if require_recurring and str(getattr(order, "order_type", "") or "").upper() != "RECURRING_SUPPLY":
+            return None
+        group_id = getattr(order, "checkout_group_id", None)
+        if group_id is None:
+            return None
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        occurrence = await current_session.scalar(
+            select(RecurringNeedOccurrence)
+            .where(RecurringNeedOccurrence.order_group_id == group_id)
+            .with_for_update()
+        )
+        if occurrence is None:
+            return None
+        return await self._recompute_occurrence_fulfillment(occurrence, reason=reason)
+
+    async def _recompute_occurrence_fulfillment(self, occurrence: Any, *, reason: str = "recompute") -> Dict[str, Any]:
+        """PRIMITIVE UNIQUE du fulfillment d'une occurrence (B14) — l'occurrence est DÉJÀ verrouillée.
+
+        Source de vérité = les lignes des commandes issues de SES allocations `CONVERTED`
+        (`need_allocations.order_item_id` -> `order_items` -> `orders`), jamais un incrément :
+        un rejeu produit exactement le même résultat (idempotent).
+
+        - `quantity_delivered` = somme des quantités (en UNITÉ DE BASE, `COALESCE(base_unit_quantity,
+          quantity)`) des commandes `delivery_status == RECEIVED` et non annulées — contrat INCHANGÉ
+          (lu par l'analytics et le contrôle de dérive). `RECEIVED_WITH_ISSUE` n'est pas compté.
+          Une ligne dont l'unité diffère de celle de l'occurrence n'est JAMAIS sommée (pas de kg+L).
+        - Une commande est TERMINALE si : annulée, RECEIVED, ou RECEIVED_WITH_ISSUE (résolution humaine).
+          Tout le reste (attente producteur, CONFIRMED, en route, livrée sans réception) est EN COURS.
+        - Statut final, UNIQUEMENT depuis ACCEPTED/PARTIALLY_ACCEPTED et seulement quand TOUTES les
+          commandes sont terminales : livré >= demandé -> FULFILLED ; 0 < livré < demandé ->
+          PARTIALLY_FULFILLED ; livré == 0 -> UNFULFILLED. Tant qu'une commande est en cours : aucun
+          statut terminal. Le paiement n'intervient pas (fulfillment PHYSIQUE).
+        """
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        rows = (
+            await current_session.execute(
+                select(
+                    Order.id,
+                    Order.status,
+                    Order.delivery_status,
+                    func.coalesce(OrderItem.base_unit_quantity, OrderItem.quantity),
+                    NeedAllocation.unit,
+                )
+                .select_from(NeedAllocation)
+                .join(OrderItem, OrderItem.id == NeedAllocation.order_item_id)
+                .join(Order, Order.id == OrderItem.order_id)
+                .where(NeedAllocation.occurrence_id == occurrence.id, NeedAllocation.status == "CONVERTED")
+            )
+        ).all()
+
+        occ_unit = str(occurrence.unit or "").upper()
+        order_state: Dict[Any, str] = {}
+        delivered = 0.0
+        for oid, o_status, d_status, qty, unit in rows:
+            state = _order_fulfillment_state(o_status, d_status)
+            order_state[oid] = state
+            if state == "DELIVERED":
+                if str(unit or "").upper() == occ_unit:
+                    delivered += float(qty or 0)
+                else:
+                    logger.warning(
+                        "RECURRING_FULFILLMENT_UNIT_MISMATCH | occurrence_id=%s | order_id=%s | line_unit=%s | occurrence_unit=%s",
+                        occurrence.id, oid, unit, occ_unit,
+                    )
+        previous_status = str(occurrence.status)
+        previous_delivered = float(occurrence.quantity_delivered or 0)
+        requested = float(occurrence.requested_quantity or 0)
+        all_terminal = bool(order_state) and all(s != "ACTIVE" for s in order_state.values())
+
+        new_status = previous_status
+        if previous_status in ("ACCEPTED", "PARTIALLY_ACCEPTED") and all_terminal:
+            if delivered >= requested - 1e-9 and requested > 0:
+                new_status = "FULFILLED"
+            elif delivered > 1e-9:
+                new_status = "PARTIALLY_FULFILLED"
+            else:
+                new_status = "UNFULFILLED"
+
+        changed = abs(delivered - previous_delivered) > 1e-9 or new_status != previous_status
+        if changed:
+            occurrence.quantity_delivered = delivered
+            occurrence.status = new_status
+            occurrence.version = int(occurrence.version) + 1
+            await current_session.flush()
+        logger.info(
+            "RECURRING_FULFILLMENT_RECOMPUTED | occurrence_id=%s | recurring_need_id=%s | orders=%s | "
+            "active_orders=%s | requested_quantity=%s | delivered_quantity=%s | previous_status=%s | "
+            "new_status=%s | changed=%s | reason=%s",
+            occurrence.id, occurrence.recurring_need_id, len(order_state),
+            sum(1 for s in order_state.values() if s == "ACTIVE"), requested, delivered, previous_status,
+            new_status, changed, reason,
+        )
+        if new_status != previous_status:
+            logger.info(
+                "RECURRING_OCCURRENCE_%s | occurrence_id=%s | recurring_need_id=%s | requested_quantity=%s | "
+                "delivered_quantity=%s | previous_status=%s | reason=%s",
+                new_status, occurrence.id, occurrence.recurring_need_id, requested, delivered, previous_status, reason,
+            )
+        return {"occurrence_id": str(occurrence.id), "status": new_status, "quantity_delivered": delivered,
+                "changed": changed}
+
+    async def reconcile_recurring_fulfillment(self, limit: int = 200) -> Dict[str, Any]:
+        """Filet idempotent (cron) : recalcule les occurrences encore `ACCEPTED`/`PARTIALLY_ACCEPTED` — répare
+        une commande terminée AVANT B14 (ou modifiée hors des chemins instrumentés) sans jamais rien
+        ré-incrémenter. `SKIP LOCKED` : une transaction en cours (livraison/annulation) gagne."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        rows = (
+            await current_session.execute(
+                select(RecurringNeedOccurrence)
+                .where(RecurringNeedOccurrence.status.in_(("ACCEPTED", "PARTIALLY_ACCEPTED")))
+                .order_by(RecurringNeedOccurrence.accepted_at.asc())
+                .limit(int(limit))
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+        closed = 0
+        for occ in rows:
+            res = await self._recompute_occurrence_fulfillment(occ, reason="reconciliation")
+            if res["status"] not in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
+                closed += 1
+        return {"occurrences_examined": len(rows), "occurrences_closed": closed}
+
+    async def expire_unconfirmed_recurring_orders(self) -> Dict[str, Any]:
+        """TIMEOUT PRODUCTEUR (B14) : une commande RECURRING_SUPPLY encore `PENDING_PRODUCER_CONFIRMATION`
+        alors que sa date de livraison (`expected_fulfillment_date`) est STRICTEMENT passée ne sera plus jamais
+        honorée : elle passe `CANCELLED` (`cancellation_role="SYSTEM"`), le stock débité à l'acceptation est
+        RESTITUÉ (même calcul que l'annulation), l'acheteur est notifié (Outbox) et l'occurrence est recalculée.
+
+        Règle dérivée, sans nouveau paramètre : le délai de confirmation est la date de livraison elle-même.
+        Idempotent : le verrou `FOR UPDATE SKIP LOCKED` + le garde de statut empêchent tout double recrédit."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        today_dt = datetime.combine(_today(), datetime.min.time())
+        orders = (
+            await current_session.execute(
+                select(Order)
+                .where(
+                    Order.order_type == "RECURRING_SUPPLY",
+                    Order.status == "PENDING_PRODUCER_CONFIRMATION",
+                    Order.expected_fulfillment_date < today_dt,
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+        expired_ids: List[str] = []
+        for order in orders:
+            items = (
+                await current_session.execute(select(OrderItem).where(OrderItem.order_id == order.id))
+            ).scalars().all()
+            product_ids = sorted({i.product_id for i in items if i.product_id}, key=str)
+            products = {
+                p.id: p
+                for p in (
+                    await current_session.scalars(
+                        select(Product).where(Product.id.in_(product_ids)).order_by(Product.id).with_for_update()
+                    )
+                ).all()
+            } if product_ids else {}
+            for item in items:
+                product = products.get(item.product_id)
+                if product is not None:
+                    previous = float(product.quantity_for_sale or 0.0)
+                    product.quantity_for_sale = previous + resolve_stock_debit(item)
+                    await BusinessEventEmitter(current_session).emit_product_quantity_changed(
+                        product, previous_quantity=previous, source="recurring_confirmation_expired_recredit"
+                    )
+            order.status = "CANCELLED"
+            order.cancellation_role = "SYSTEM"
+            current_session.add(
+                OrderStatusHistory(
+                    id=uuid.uuid4(), order_id=order.id, status_type="ORDER",
+                    from_status="PENDING_PRODUCER_CONFIRMATION", to_status="CANCELLED",
+                    actor_id=None, note="producer_confirmation_expired",
+                )
+            )
+            buyer_phone = (
+                await current_session.execute(
+                    select(User.phone).join(BuyerProfile, BuyerProfile.user_id == User.id)
+                    .where(BuyerProfile.id == order.buyer_id).limit(1)
+                )
+            ).scalar_one_or_none()
+            if buyer_phone:
+                from ladini.workers.outbox import templates as _outbox_templates
+                from ladini.workers.repositories import outbox_repo as _outbox_repo
+
+                await _outbox_repo.enqueue(
+                    current_session,
+                    [{
+                        "channel": "WHATSAPP", "recipient_phone": buyer_phone,
+                        "template_key": _outbox_templates.ORDER_CANCELLED_BY_PRODUCER_BUYER,
+                        "payload": {"order_number": str(order.id)[:8].upper(),
+                                    "reason": "Le producteur n'a pas confirmé à temps."},
+                        "dedupe_key": f"ORDER_CANCELLED_BUYER:{order.id}",
+                    }],
+                )
+            await current_session.flush()
+            logger.info(
+                "RECURRING_ORDER_CONFIRMATION_EXPIRED | order_id=%s | checkout_group_id=%s | items=%s",
+                order.id, order.checkout_group_id, len(items),
+            )
+            await self._recompute_occurrence_fulfillment_for_order(order, reason="producer_confirmation_expired")
+            expired_ids.append(str(order.id))
+        return {"recurring_orders_expired": len(expired_ids)}
+
     @staticmethod
     async def _producer_account_blocked(session: Any, producer_id: Any) -> bool:
         producer = await session.get(Producer, producer_id)
@@ -1342,8 +1561,8 @@ class RecurringSupplyMixin(BaseMixin):
             )
         )
         await current_session.flush()
-        if outcome == "RECEIVED":
-            await self._refresh_occurrence_quantity_delivered(order)
+        # B14 : les DEUX issues sont terminales pour l'occurrence ; seule RECEIVED compte dans `quantity_delivered`.
+        await self._refresh_occurrence_quantity_delivered(order)
         logger.info(
             "recurring_supply.reception_recorded | order_id=%s | outcome=%s", order.id, outcome
         )
@@ -1355,50 +1574,10 @@ class RecurringSupplyMixin(BaseMixin):
         }
 
     async def _refresh_occurrence_quantity_delivered(self, order: Order) -> Optional[float]:
-        """Recompute (never increment) `RecurringNeedOccurrence.quantity_delivered` from the source
-        of truth, in the SAME transaction as the RECEIVED transition.
-
-        Exactness proof (see docs/analytics/METRIC_LAYER.md): `accept_match_proposal` creates ONE order
-        per producer, all with `checkout_group_id == occurrence.order_group_id` (a fresh uuid per
-        acceptance; an occurrence is accepted once, under FOR UPDATE), and ONE `OrderItem` per
-        allocation (`need_allocations.order_item_id`, allocation unique per occurrence/producer/product).
-        Matching only pairs a product whose unit literally equals the occurrence unit, so item
-        quantities are in the occurrence unit. `RECEIVED` = the buyer's "tout est bon" for the whole
-        order; `RECEIVED_WITH_ISSUE` carries only a free-text quantity and is deliberately NOT counted
-        (delivered is then a lower bound). Being a SUM over CONVERTED allocations whose order is
-        RECEIVED, a replay/retry yields the identical value and it can never exceed `quantity_confirmed`.
-        """
-        group_id = order.checkout_group_id
-        if group_id is None:
-            return None
-        current_session = self.session
-        if not current_session:
-            raise BusinessRuleException("Session indisponible.")
-        occurrence = await current_session.scalar(
-            select(RecurringNeedOccurrence)
-            .where(RecurringNeedOccurrence.order_group_id == group_id)
-            .with_for_update()
-        )
-        if occurrence is None:
-            return None
-        delivered = await current_session.scalar(
-            select(func.coalesce(func.sum(OrderItem.quantity), 0))
-            .select_from(NeedAllocation)
-            .join(OrderItem, OrderItem.id == NeedAllocation.order_item_id)
-            .join(Order, Order.id == OrderItem.order_id)
-            .where(
-                NeedAllocation.occurrence_id == occurrence.id,
-                NeedAllocation.status == "CONVERTED",
-                Order.order_type == "RECURRING_SUPPLY",
-                Order.delivery_status == "RECEIVED",
-            )
-        )
-        delivered = float(delivered or 0)
-        if float(occurrence.quantity_delivered or 0) != delivered:
-            occurrence.quantity_delivered = delivered
-            occurrence.version = occurrence.version + 1
-            await current_session.flush()
-        return delivered
+        """Conservé pour compatibilité : délègue à la PRIMITIVE UNIQUE `_recompute_occurrence_fulfillment`
+        (recalcul déterministe depuis les lignes terminales, jamais un incrément — B14)."""
+        res = await self._recompute_occurrence_fulfillment_for_order(order, reason="reception", require_recurring=False)
+        return None if res is None else float(res["quantity_delivered"])
 
     async def list_my_deliverable_orders(self, phone: str, delivery_status: str) -> Dict[str, Any]:
         """Lecture bornée, réservée au fast-path déterministe (VS5 pilote,
@@ -1660,6 +1839,19 @@ class RecurringSupplyMixin(BaseMixin):
                 f"Cette date n'est plus modifiable (statut actuel : {occ.status})."
             )
         return occ
+
+
+def _order_fulfillment_state(order_status: Any, delivery_status: Any) -> str:
+    """Classe une commande RECURRING_SUPPLY pour le fulfillment : DELIVERED (reçue, comptée),
+    ISSUE (réception avec problème, terminale, non comptée), CANCELLED, sinon ACTIVE (en cours)."""
+    if str(order_status or "").upper() == "CANCELLED":
+        return "CANCELLED"
+    d = str(delivery_status or "").upper()
+    if d == "RECEIVED":
+        return "DELIVERED"
+    if d == "RECEIVED_WITH_ISSUE":
+        return "ISSUE"
+    return "ACTIVE"
 
 
 def _occurrence_is_past(occurrence: Any) -> bool:

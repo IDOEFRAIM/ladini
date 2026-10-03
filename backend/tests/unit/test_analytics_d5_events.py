@@ -108,11 +108,19 @@ class TestDeliveredHelperSkipsFutureProduction:
 
 
 class TestQuantityDeliveredWriter:
-    def _svc(self, occurrence, delivered):
+    """Le writer délègue désormais à la primitive unique de fulfillment (B14) : recalcul DÉTERMINISTE depuis les lignes
+    des commandes (`RECEIVED` seules comptées), jamais un incrément."""
+
+    def _svc(self, occurrence, rows):
         from ladini.services.database.recurring_supply import RecurringSupplyMixin
 
+        class _R:
+            def all(self):
+                return rows
+
         session = SimpleNamespace(
-            scalar=AsyncMock(side_effect=[occurrence, delivered]) if occurrence is not None else AsyncMock(return_value=None),
+            scalar=AsyncMock(return_value=occurrence),
+            execute=AsyncMock(return_value=_R()),
             flush=AsyncMock(),
         )
 
@@ -123,23 +131,29 @@ class TestQuantityDeliveredWriter:
 
         return _S(), session
 
-    def _occ(self, delivered=0):
-        return SimpleNamespace(id=uuid.uuid4(), quantity_delivered=delivered, version=3)
+    def _occ(self, delivered=0, status="ACCEPTED", requested=100):
+        return SimpleNamespace(id=uuid.uuid4(), recurring_need_id=uuid.uuid4(), quantity_delivered=delivered,
+                               version=3, status=status, requested_quantity=requested, unit="KG")
 
     def test_sets_the_value_recomputed_from_received_orders_and_bumps_the_version(self):
         occ = self._occ()
-        svc, _ = self._svc(occ, 70)
+        rows = [(uuid.uuid4(), "COMPLETED", "RECEIVED", 70, "KG"), (uuid.uuid4(), "CONFIRMED", "PENDING", 30, "KG")]
+        svc, _ = self._svc(occ, rows)
         out = run(svc._refresh_occurrence_quantity_delivered(_order(checkout_group_id=uuid.uuid4())))
         assert out == 70 and occ.quantity_delivered == 70 and occ.version == 4
+        assert occ.status == "ACCEPTED"  # une commande est encore en cours : jamais terminal trop tôt
 
     def test_retry_is_a_no_op_same_value_same_version(self):
         occ = self._occ(delivered=70)
-        svc, session = self._svc(occ, 70)
+        rows = [(uuid.uuid4(), "COMPLETED", "RECEIVED", 70, "KG"), (uuid.uuid4(), "CONFIRMED", "PENDING", 30, "KG")]
+        svc, session = self._svc(occ, rows)
         run(svc._refresh_occurrence_quantity_delivered(_order(checkout_group_id=uuid.uuid4())))
         assert occ.quantity_delivered == 70 and occ.version == 3
         session.flush.assert_not_awaited()
 
     def test_order_without_a_group_or_occurrence_is_ignored(self):
-        svc, _ = self._svc(None, 0)
+        svc, _ = self._svc(None, [])
         assert run(svc._refresh_occurrence_quantity_delivered(_order(checkout_group_id=None))) is None
         assert run(svc._refresh_occurrence_quantity_delivered(_order(checkout_group_id=uuid.uuid4()))) is None
+
+

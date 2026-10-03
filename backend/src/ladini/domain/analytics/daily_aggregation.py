@@ -35,7 +35,11 @@ NON_NEED_ORDER_STATUSES = frozenset({"DRAFT", "SUPERSEDED"})
 DELIVERED_DELIVERY_STATUSES = frozenset({"DELIVERED", "FULFILLED"})
 #: Occurrence statuses that mean the buyer withdrew the demand.
 WITHDRAWN_OCCURRENCE_STATUSES = frozenset({"SKIPPED", "CANCELLED"})
-ACCEPTED_OCCURRENCE_STATUSES = frozenset({"ACCEPTED", "PARTIALLY_ACCEPTED"})
+#: B14 : une occurrence FULFILLED / PARTIALLY_FULFILLED / UNFULFILLED a été ACCEPTÉE (puis exécutée) — elle
+#: reste comptée comme acceptée, sinon l'acceptation rétroactive chuterait à chaque clôture.
+ACCEPTED_OCCURRENCE_STATUSES = frozenset(
+    {"ACCEPTED", "PARTIALLY_ACCEPTED", "FULFILLED", "PARTIALLY_FULFILLED", "UNFULFILLED"}
+)
 
 
 def _id(value: Any) -> str:
