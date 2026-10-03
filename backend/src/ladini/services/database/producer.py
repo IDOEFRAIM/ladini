@@ -1786,15 +1786,27 @@ class ProducerMgmtMixin(BaseMixin):
         # re-déclencher la transition ni renvoyer une erreur brute : outcome
         # explicite, même discipline que le reste du produit.
         if str(order.status or "").upper() == "COMPLETED":
+            logger.info(
+                "PRODUCER_ORDER_COMPLETION_RESULT | order=%s | success=True | "
+                "final_order_status=COMPLETED | final_payment_status=%s | "
+                "final_delivery_status=%s | idempotent_replay=True | "
+                "buyer_notification_enqueued=False | error_class=None",
+                str(order.id)[:8], order.payment_status, order.delivery_status,
+            )
             return {
                 "status": "success",
                 "outcome": "ALREADY_COMPLETED",
                 "order_id": str(order.id),
                 "message": (
-                    f"Commande #{str(order.id)[:8].upper()} déjà marquée "
-                    "livrée et payée."
+                    f"Cette commande (#{str(order.id)[:8].upper()}) est déjà "
+                    "clôturée : livrée et payée."
                 ),
             }
+
+        if str(order.status or "").upper() == "CANCELLED":
+            raise BusinessRuleException(
+                "Impossible : cette commande est annulée.", reason="order_not_confirmed"
+            )
 
         if str(order.payment_status or "").upper() != "PENDING":
             raise BusinessRuleException(
@@ -1882,14 +1894,23 @@ class ProducerMgmtMixin(BaseMixin):
 
         order_ref = str(order.id)[:8].upper()
         amount_txt = _fmt_num(order.total_amount)
+        logger.info(
+            "PRODUCER_ORDER_COMPLETION_RESULT | order=%s | success=True | "
+            "final_order_status=%s | final_payment_status=%s | "
+            "final_delivery_status=%s | idempotent_replay=False | "
+            "buyer_notification_enqueued=%s | error_class=None",
+            order_ref, order.status, order.payment_status, order.delivery_status,
+            bool(buyer_phone),
+        )
         return {
             "status": "success",
             "outcome": "COMPLETED",
             "order_id": str(order.id),
             "message": (
-                f"✅ Commande #{order_ref} clôturée : livraison confirmée et "
-                f"paiement de {amount_txt} {order.currency or 'XOF'} reçu à "
-                "la livraison."
+                f"✅ Commande #{order_ref} clôturée.\n"
+                "📦 Livraison confirmée\n"
+                f"💵 Paiement de {amount_txt} {order.currency or 'XOF'} reçu\n"
+                "✅ Transaction terminée"
             ),
         }
 
