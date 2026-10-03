@@ -369,10 +369,25 @@ async def _producer_sales_block(
             "(🟡), ou *annuler* si vous ne pouvez pas l'honorer._"
         )
     else:
-        lines.append(
-            "\n_Ces commandes sont déjà confirmées : rien à accepter. "
-            "Tapez *annuler* si vous ne pouvez plus l'honorer._"
-        )
+        # B11.1 : la clôture (livrée + payée) n'était PAS découvrable depuis cette liste.
+        _closable = [
+            sale
+            for sale in sales
+            if str(sale.get("status") or "").upper() == "CONFIRMED"
+            and str(sale.get("payment_status") or "").upper() == "PENDING"
+        ]
+        if _closable:
+            _ex = _closable[0].get("reference") or str(_closable[0].get("order_id") or "")[:8].upper()
+            lines.append(
+                "\n_Ces commandes sont confirmées et restent à livrer._\n"
+                f"✅ _Après livraison et paiement, écrivez :_ *commande #{_ex} livrée*\n"
+                "❌ _Tapez *annuler* si vous ne pouvez plus l'honorer._"
+            )
+        else:
+            lines.append(
+                "\n_Aucune commande en attente d'action de votre part. "
+                "Tapez *annuler* si vous ne pouvez plus honorer une commande confirmée._"
+            )
     single_pending_order_id = (
         str(_pending[0].get("order_id")) if len(_pending) == 1 else None
     )

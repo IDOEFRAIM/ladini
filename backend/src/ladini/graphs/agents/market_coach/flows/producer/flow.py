@@ -600,10 +600,11 @@ async def _resolve_order_for_delivery_payment(
     ]
 
     if not candidates:
+        # B11.1 : status COMPLETED — avec ERROR, `render_error` n'affichait que le code brut
+        # (« Opération impossible : no_order_pending_payment_at_delivery »).
         return {
-            "status": "ERROR",
+            "status": "COMPLETED",
             "validation_errors": ["no_order_pending_payment_at_delivery"],
-            "response_strategy": "ERROR",
             "final_response": (
                 "Aucune commande confirmée n'est actuellement en attente de "
                 "livraison/paiement à la livraison."
