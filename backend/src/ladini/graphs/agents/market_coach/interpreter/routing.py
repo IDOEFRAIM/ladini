@@ -1957,6 +1957,85 @@ _DELIVERY_IN_TRANSIT_PHRASES = frozenset({"en route", "parti", "c'est parti", "e
 _DELIVERY_DELIVERED_PHRASES = frozenset({"livre", "livré", "livree", "livrée", "c'est livre", "c'est livré"})
 
 
+# B11.1 — déclaration de clôture producteur ("commande #REF livrée"). Vocabulaire FERMÉ et borné :
+# jamais « toute phrase avec "livrée" » (« quand sera livrée ma commande ? », « ma commande a-t-elle
+# été livrée ? » appartiennent à d'autres intents).
+_DELIVERY_DECLARATION_RE = _re.compile(
+    r"\b(livr[ée]e?s?|j['’ ]ai livr[ée]|remis[e]?|terminee?|terminée?|cloturee?|clôturée?)\b", _re.I
+)
+_DELIVERY_NEGATION_OR_QUESTION_RE = _re.compile(
+    r"\?|\b(pas|non|jamais|quand|comment|pourquoi|est-ce|a-t-elle|a-t-il|combien|ou est|où est)\b", _re.I
+)
+# Sans référence : phrases entières (déclaratives) uniquement.
+_DELIVERY_NO_REF_PHRASES = frozenset(
+    {
+        "commande livrée", "commande livree", "j'ai livré", "j'ai livre", "j’ai livré", "j’ai livre",
+        "j'ai livré la commande", "j'ai livre la commande",  # « livré » nu : filet récurrent 1.7
+        "le client a reçu la commande", "le client a recu la commande", "le client a reçu", "le client a recu",
+        "commande terminée", "commande terminee",
+    }
+)
+
+
+async def _producer_delivery_completion_signal(
+    mc_runtime: Any, phone: str, role_up: str, text: str
+) -> Optional[Dict[str, Any]]:
+    """B11.1 — « commande #11DE2D1B livrée » (et variantes) -> `PRODUCER_CONFIRM_DELIVERY_PAYMENT`,
+    SANS LLM. Bug prod : le classifieur renvoyait UNKNOWN (`NewTaskEntities` interdit tout identifiant
+    technique, le prompt est saturé) -> « Je n'ai pas bien compris ».
+
+    Signal fort exigé : (a) déclaration de livraison au vocabulaire fermé, ni question ni négation,
+    (b) soit une RÉFÉRENCE de commande dans le message (extraction B11 réutilisée, jamais un second
+    parser), soit une phrase entière sans référence en rôle PRODUCER. Une référence en rôle BUYER
+    (compte double-rôle) n'est routée que si elle désigne réellement une vente de ce producteur.
+    L'appartenance et l'éligibilité sont revérifiées ensuite par le résolveur
+    (`flows/producer/flow.py::_resolve_order_for_delivery_payment`) AVANT toute mutation."""
+    from ladini.graphs.agents.market_coach.flows.producer.flow import (
+        _extract_reference_from_text,
+        _order_matches_reference,
+    )
+
+    raw = (text or "").strip()
+    if not raw or role_up not in ("PRODUCER", "BUYER") or not phone:
+        return None
+    low = raw.lower()
+    if _DELIVERY_NEGATION_OR_QUESTION_RE.search(low):
+        return None
+    ref = _extract_reference_from_text(raw)
+    source = "explicit_reference"
+    eligible = -1
+    if ref:
+        if not _DELIVERY_DECLARATION_RE.search(low):
+            return None
+        if role_up == "BUYER":
+            try:
+                from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+                    OrderTrackingGateway,
+                )
+
+                res = await OrderTrackingGateway(mc_runtime).get_producer_orders(phone=phone)
+            except Exception:
+                return None
+            if not any(_order_matches_reference(o, ref) for o in ((res or {}).get("data") or [])):
+                return None
+    else:
+        if role_up != "PRODUCER" or low.strip(" .!,;:") not in _DELIVERY_NO_REF_PHRASES:
+            return None
+        source = "active_orders_context"
+    logger.info(
+        "PRODUCER_DELIVERY_INTENT_ROUTED | source=%s | order_ref_present=%s | eligible_order_count=%s | "
+        "goal_after=PRODUCER_CONFIRM_DELIVERY_PAYMENT",
+        source, bool(ref), eligible,
+    )
+    return {
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": "PRODUCER_CONFIRM_DELIVERY_PAYMENT",
+        "interpreter_confidence": 0.95,
+        "extracted_entities": {},
+        "raw_analysis": {"path": "producer_delivery_declaration"},
+    }
+
+
 async def _bare_confirmation_for_delivery_transition(
     mc_runtime: Any, phone: str, bare_text: str
 ) -> Optional[Dict[str, Any]]:
@@ -2448,6 +2527,16 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     or _digest_check.get("detected_intent"),
                 )
                 return _digest_check
+
+        # 1.65 DÉCLARATION DE CLÔTURE PRODUCTEUR ("commande #REF livrée"), SANS TUNNEL ACTIF (B11.1) —
+        # avant le filet « livré » récurrent (1.7, mot nu, `RECURRING_SUPPLY` seulement) et avant tout
+        # repli générique. Voir `_producer_delivery_completion_signal`.
+        if not locked_goal and not _cart_ready and not onboarding_active:
+            _completion = await _producer_delivery_completion_signal(
+                mc_runtime, str(state.get("user_phone") or ""), role_up, text
+            )
+            if _completion is not None:
+                return _completion
 
         # 1.7 TRANSITION DE LIVRAISON ("en route"/"livré"), SANS TUNNEL ACTIF
         # (VS5 pilote) — rôle PRODUCER uniquement. Voir le docstring de
