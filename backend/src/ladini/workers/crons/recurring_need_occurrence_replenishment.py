@@ -25,6 +25,10 @@ async def _run() -> dict:
     # No-response (B12) : les occurrences passées restées ouvertes passent EXPIRED (même cron, aucun
     # nouvel ordonnanceur) — avant ce correctif elles masquaient la vraie prochaine occurrence.
     summary.update(await svc.expire_past_occurrences())
+    # B14 : timeout producteur (commande jamais confirmée, date de livraison passée) puis filet de
+    # fulfillment (occurrences encore ACCEPTED alors que toutes leurs commandes sont terminales).
+    summary.update(await svc.expire_unconfirmed_recurring_orders())
+    summary.update(await svc.reconcile_recurring_fulfillment())
     return summary
 
 

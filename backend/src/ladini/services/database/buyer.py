@@ -1191,6 +1191,10 @@ class BuyerMixin(BaseMixin):
                 )
 
         await current_session.flush()
+        # B14 : une commande RECURRING_SUPPLY annulée par l'acheteur fait avancer son occurrence.
+        _recompute = getattr(self, "_recompute_occurrence_fulfillment_for_order", None)
+        if _recompute is not None:
+            await _recompute(order, reason="buyer_cancelled")
 
         # Anti-abus : au-delà de MAX_CANCELLATIONS annulations acheteur, on
         # bloque le compte (déblocage manuel via service client).
