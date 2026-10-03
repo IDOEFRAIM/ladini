@@ -184,14 +184,11 @@ def test_partial_proposal_leaves_occurrence_partially_accepted_for_the_matched_q
     assert product.quantity_for_sale == 40.0
 
 
-def test_legacy_mode_now_refuses_inactive_need_and_expired_occurrence():
+def test_legacy_mode_now_refuses_inactive_need():
     from ladini.services.database.errors import BusinessRuleException
 
     svc, need, occ, allocs, product, session = _case(need_status="CANCELLED")
-    with pytest.raises(BusinessRuleException):
-        run(svc.accept_match_proposal("+22670000001", str(need.id), "ACCEPT"))
-    svc, need, occ, allocs, product, session = _case(occ_date=_NOW - timedelta(days=2))
     with pytest.raises(BusinessRuleException) as exc:
         run(svc.accept_match_proposal("+22670000001", str(need.id), "ACCEPT"))
-    assert exc.value.reason == "occurrence_expired"
+    assert exc.value.reason == "need_inactive"
     assert session.added == []

@@ -748,8 +748,8 @@ class RecurringSupplyMixin(BaseMixin):
         `outcome` ∈ {ALREADY_PROCESSED, EXPIRED, NEED_INACTIVE, PROPOSAL_CHANGED, NO_PROPOSAL,
         STOCK_CHANGED, NOT_FOUND} quand la proposition n'est plus valide ; `expected_version` (CAS
         sur `occurrence.version`) détecte une proposition modifiée depuis l'envoi. Sans
-        `occurrence_id` (écran détail d'UN besoin) : comportement historique, resserré (besoin
-        ACTIVE, occurrence non expirée)."""
+        `occurrence_id` (écran détail d'UN besoin) : comportement historique, resserré
+        uniquement sur le besoin ACTIF (la date d'expiration n'est vérifiée qu'en mode exact)."""
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
@@ -818,8 +818,6 @@ class RecurringSupplyMixin(BaseMixin):
         else:
             if occurrence is None:
                 raise BusinessRuleException("Aucune proposition en attente pour ce besoin.")
-            if _occurrence_is_past(occurrence):
-                raise BusinessRuleException("Cette proposition a expiré.", reason="occurrence_expired")
 
         allocations = (
             (
