@@ -632,6 +632,9 @@ class RecurringSupplyMixin(BaseMixin):
                     "next_occurrence_id": str(next_occ.id) if next_occ else None,
                     "requested_quantity": float(next_occ.requested_quantity) if next_occ else None,
                     "matched_quantity": float(next_occ.quantity_matched) if next_occ else None,
+                    # Identité de la proposition (réponse au digest) : version CAS + « a été notifiée ».
+                    "next_occurrence_version": int(next_occ.version) if next_occ else None,
+                    "next_occurrence_notified": bool(next_occ and next_occ.notified_at),
                 }
             )
         return {"status": "success", "items": items}
@@ -710,7 +713,14 @@ class RecurringSupplyMixin(BaseMixin):
 
     # ─── CONFIRMATION (VS4 pilote) ────────────────────────────────────
 
-    async def accept_match_proposal(self, phone: str, recurring_need_id: str, action: str) -> Dict[str, Any]:
+    async def accept_match_proposal(
+        self,
+        phone: str,
+        recurring_need_id: str,
+        action: str,
+        occurrence_id: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Confirme ou refuse la proposition d'approvisionnement de la PROCHAINE occurrence
         matchée d'un besoin (UX pilote : "CONFIRMER TOUT" / "PAS DEMAIN").
 
@@ -730,7 +740,16 @@ class RecurringSupplyMixin(BaseMixin):
 
         Verrouille l'occurrence ET ses allocations (`FOR UPDATE`) pour empêcher un double accept
         concurrent (deux tours WhatsApp presque simultanés) de convertir deux fois les mêmes
-        allocations ou de créer deux jeux de commandes."""
+        allocations ou de créer deux jeux de commandes.
+
+        MODE EXACT (`occurrence_id` fourni — chemin de la réponse au DIGEST, B11-recurring) : la
+        réponse vise UNE occurrence précise (celle que le digest a notifiée), jamais « la plus
+        proche encore ouverte ». Aucune mutation, retour structuré `status="success"` +
+        `outcome` ∈ {ALREADY_PROCESSED, EXPIRED, NEED_INACTIVE, PROPOSAL_CHANGED, NO_PROPOSAL,
+        STOCK_CHANGED, NOT_FOUND} quand la proposition n'est plus valide ; `expected_version` (CAS
+        sur `occurrence.version`) détecte une proposition modifiée depuis l'envoi. Sans
+        `occurrence_id` (écran détail d'UN besoin) : comportement historique, resserré
+        uniquement sur le besoin ACTIF (la date d'expiration n'est vérifiée qu'en mode exact)."""
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
@@ -747,21 +766,58 @@ class RecurringSupplyMixin(BaseMixin):
             )
         )
         if need is None:
+            if occurrence_id is not None:
+                return self._proposal_refused("NOT_FOUND", recurring_need_id, occurrence_id, action)
             raise BusinessRuleException("Besoin introuvable.")
 
-        occurrence = await current_session.scalar(
-            select(RecurringNeedOccurrence)
-            .where(
-                RecurringNeedOccurrence.recurring_need_id == need.id,
+        if need.status != "ACTIVE":
+            # Besoin désactivé (PAUSED/CANCELLED) entre l'envoi du message et la réponse : aucune
+            # commande ne doit en naître.
+            if occurrence_id is not None:
+                return self._proposal_refused("NEED_INACTIVE", need.id, occurrence_id, action)
+            raise BusinessRuleException("Ce besoin n'est plus actif.", reason="need_inactive")
+
+        occ_stmt = select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == need.id)
+        if occurrence_id is not None:
+            try:
+                occ_uuid = uuid.UUID(str(occurrence_id))
+            except (TypeError, ValueError):
+                return self._proposal_refused("NOT_FOUND", need.id, occurrence_id, action)
+            occ_stmt = occ_stmt.where(RecurringNeedOccurrence.id == occ_uuid)
+        else:
+            occ_stmt = occ_stmt.where(
                 RecurringNeedOccurrence.status.in_(("OPEN", "MATCHED")),
                 RecurringNeedOccurrence.quantity_matched > 0,
-            )
-            .order_by(RecurringNeedOccurrence.occurrence_date.asc())
-            .limit(1)
-            .with_for_update()
-        )
-        if occurrence is None:
-            raise BusinessRuleException("Aucune proposition en attente pour ce besoin.")
+            ).order_by(RecurringNeedOccurrence.occurrence_date.asc())
+        occurrence = await current_session.scalar(occ_stmt.limit(1).with_for_update())
+
+        if occurrence_id is not None:
+            # Revalidation de la proposition EXACTE (jamais « la prochaine occurrence ouverte »).
+            if occurrence is None:
+                return self._proposal_refused("NOT_FOUND", need.id, occurrence_id, action)
+            if occurrence.status not in ("OPEN", "MATCHED"):
+                return self._proposal_refused(
+                    "ALREADY_PROCESSED", need.id, occurrence.id, action, occurrence_status=occurrence.status
+                )
+            if _occurrence_is_past(occurrence):
+                return self._proposal_refused("EXPIRED", need.id, occurrence.id, action)
+            if expected_version is not None and int(occurrence.version) != int(expected_version):
+                return self._proposal_refused("PROPOSAL_CHANGED", need.id, occurrence.id, action)
+            # Une proposition JAMAIS notifiée n'a pas pu être vue (donc acceptée) par l'acheteur ; une
+            # proposition re-matchée APRÈS la notification (updated_at > notified_at) n'est plus celle
+            # que son message décrivait. `notified_at` est reposé à chaque nouveau digest réellement
+            # envoyé : un digest ré-émis après changement rend l'occurrence de nouveau acceptable.
+            if occurrence.notified_at is None:
+                return self._proposal_refused("NO_PROPOSAL", need.id, occurrence.id, action, reason="not_notified")
+            if occurrence.updated_at is not None and occurrence.updated_at > occurrence.notified_at + timedelta(
+                seconds=2
+            ):
+                return self._proposal_refused("PROPOSAL_CHANGED", need.id, occurrence.id, action)
+            if float(occurrence.quantity_matched or 0) <= 0:
+                return self._proposal_refused("NO_PROPOSAL", need.id, occurrence.id, action)
+        else:
+            if occurrence is None:
+                raise BusinessRuleException("Aucune proposition en attente pour ce besoin.")
 
         allocations = (
             (
@@ -778,7 +834,22 @@ class RecurringSupplyMixin(BaseMixin):
             .all()
         )
         if not allocations:
+            if occurrence_id is not None:
+                return self._proposal_refused("NO_PROPOSAL", need.id, occurrence.id, action)
             raise BusinessRuleException("Aucune proposition en attente pour ce besoin.")
+
+        if action == "ACCEPT" and occurrence_id is not None:
+            # Pré-validation du stock AVANT toute création : un stock modifié depuis la proposition
+            # ne doit jamais produire de commande partielle ni de débit négatif.
+            short: List[str] = []
+            for alloc in allocations:
+                product = await current_session.get(Product, alloc.product_id)
+                if product is None or float(product.quantity_for_sale or 0.0) < float(alloc.quantity):
+                    short.append(str(getattr(product, "name", None) or alloc.product_id))
+            if short:
+                return self._proposal_refused(
+                    "STOCK_CHANGED", need.id, occurrence.id, action, products=short
+                )
 
         if action == "REJECT":
             for alloc in allocations:
@@ -786,6 +857,10 @@ class RecurringSupplyMixin(BaseMixin):
             occurrence.status = "REJECTED"
             occurrence.version = occurrence.version + 1
             await current_session.flush()
+            logger.info(
+                "RECURRING_PROPOSAL_REJECTED | recurring_need_id=%s | occurrence_id=%s | exact=%s",
+                need.id, occurrence.id, occurrence_id is not None,
+            )
             logger.info("recurring_need.match_rejected | occurrence_id=%s", occurrence.id)
             return {"status": "success", "occurrence_id": str(occurrence.id), "action": "REJECT"}
 
@@ -903,6 +978,12 @@ class RecurringSupplyMixin(BaseMixin):
         )
 
         logger.info(
+            "RECURRING_PROPOSAL_ACCEPTED | recurring_need_id=%s | occurrence_id=%s | exact=%s | "
+            "orders=%s | quantity=%s | result=%s",
+            need.id, occurrence.id, occurrence_id is not None, len(created_order_ids),
+            converted_quantity, occurrence.status,
+        )
+        logger.info(
             "recurring_need.match_accepted | occurrence_id=%s | orders=%s | quantity=%s",
             occurrence.id, created_order_ids, converted_quantity,
         )
@@ -912,6 +993,31 @@ class RecurringSupplyMixin(BaseMixin):
             "action": "ACCEPT",
             "order_ids": created_order_ids,
             "quantity_confirmed": converted_quantity,
+        }
+
+    @staticmethod
+    def _proposal_refused(
+        outcome: str, need_id: Any, occurrence_id: Any, action: str, **extra: Any
+    ) -> Dict[str, Any]:
+        """Refus MÉTIER d'une réponse à une proposition exacte — aucune mutation (rien à annuler).
+        `status="success"` + `outcome` (même convention que `ALREADY_COMPLETED`, B11) : l'appelant
+        distingue « confirmé » de « refusé » sur `outcome`, jamais sur une exception opaque."""
+        logger.info(
+            "RECURRING_PROPOSAL_REVALIDATED | recurring_need_id=%s | occurrence_id=%s | action=%s | "
+            "result=%s | reason=%s",
+            need_id, occurrence_id, action, "REFUSED", outcome,
+        )
+        if outcome == "EXPIRED":
+            logger.info(
+                "RECURRING_PROPOSAL_EXPIRED | recurring_need_id=%s | occurrence_id=%s", need_id, occurrence_id
+            )
+        return {
+            "status": "success",
+            "outcome": outcome,
+            "action": action,
+            "occurrence_id": str(occurrence_id),
+            "recurring_need_id": str(need_id),
+            **extra,
         }
 
     # ─── LIVRAISON / RÉCEPTION (VS5 pilote) ────────────────────────────
@@ -1424,6 +1530,16 @@ class RecurringSupplyMixin(BaseMixin):
                 f"Cette date n'est plus modifiable (statut actuel : {occ.status})."
             )
         return occ
+
+
+def _occurrence_is_past(occurrence: Any) -> bool:
+    """Une occurrence dont la date est STRICTEMENT passée n'est plus livrable : sa proposition a
+    expiré (un « oui » tardif ne doit jamais produire de commande pour hier)."""
+    occ_date = getattr(occurrence, "occurrence_date", None)
+    if occ_date is None:
+        return False
+    occ_day = occ_date.date() if isinstance(occ_date, datetime) else occ_date
+    return occ_day < _today()
 
 
 def _parse_date(value: Optional[Any]) -> Optional[date]:

@@ -7,7 +7,7 @@ event, (2) que la clé identifie le fait métier (un rejeu retombe sur la même 
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -52,7 +52,7 @@ def _svc(session):
 
 def _need(**over):
     base = dict(
-        id=uuid.uuid4(), buyer_id=uuid.uuid4(), sub_category_id=uuid.uuid4(), quantity=40, unit="KG",
+        id=uuid.uuid4(), buyer_id=uuid.uuid4(), sub_category_id=uuid.uuid4(), quantity=40, unit="KG", status="ACTIVE",
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -141,7 +141,7 @@ class TestDigestAccepted:
         need = _need()
         occ = SimpleNamespace(
             id=uuid.uuid4(), status="MATCHED", version=1, requested_quantity=40, unit="KG",
-            quantity_confirmed=0, order_group_id=None, accepted_at=None, occurrence_date=datetime(2026, 9, 16),
+            quantity_confirmed=0, order_group_id=None, accepted_at=None, occurrence_date=datetime.utcnow() + timedelta(days=1),
         )
         product = SimpleNamespace(id=uuid.uuid4(), producer_id=uuid.uuid4(), name="tomate", quantity_for_sale=100)
         scalars = iter([need, occ])
