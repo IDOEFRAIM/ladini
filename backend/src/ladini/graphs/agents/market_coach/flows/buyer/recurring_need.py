@@ -972,12 +972,22 @@ def _resolve_menu_reply(state: Dict[str, Any]):
     touché). Sinon `("LIST"|"DETAIL"|"CONFIRM"|"REJECT"|"INVALID", target)`. `target` est un
     `recurring_need_id` pour `DETAIL`/`CONFIRM`/`REJECT`, `None` pour `LIST`/`INVALID`."""
     pending = state.get("pending_interaction") or {}
-    if not isinstance(pending, dict) or pending.get("kind") != "SELECTION_MENU" or pending.get("goal") != "GET_MY_NEEDS":
+    if not isinstance(pending, dict):
         return None
     menu = (state.get("working_memory") or {}).get("recurring_need_menu")
     if not isinstance(menu, dict):
         return None
-    if time.time() - float(pending.get("created_at") or 0) > _MENU_TTL_SECONDS:
+    if pending:
+        # Un pending vivant d'un AUTRE tunnel n'est jamais touché.
+        if pending.get("kind") != "SELECTION_MENU" or pending.get("goal") != "GET_MY_NEEDS":
+            return None
+        created_at = pending.get("created_at")
+    else:
+        # B13 : en vraie conversation le pending est CONSOMMÉ (résolu en `selection_index`) avant que le flow
+        # ne tourne — exiger un pending vivant rendait « liste -> 1 -> détail » inatteignable. Le menu gardé
+        # dans `working_memory` (avec SA propre date) fait foi ; ce flow ne tourne que pour le goal GET_MY_NEEDS.
+        created_at = menu.get("created_at")
+    if time.time() - float(created_at or 0) > _MENU_TTL_SECONDS:
         return None  # périmé — traité comme une première visite, silencieusement (même convention que confirmation_gate)
 
     payload = state.get("transaction_payload") or {}
@@ -1021,7 +1031,10 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
 
     return {
         "final_response": "\n".join(lines),
-        "status": "COMPLETED",
+        # B13 : WAITING_INPUT (et non COMPLETED) — garde `current_goal=GET_MY_NEEDS` vivant
+        # (`nodes/cleanup.py::keep_selection_channel`). Avec COMPLETED le goal était effacé et le « 1 » suivant
+        # retombait sur le menu générique : liste -> détail -> confirmer était INATTEIGNABLE en vraie conversation.
+        "status": "WAITING_INPUT",
         "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time()}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
@@ -1100,7 +1113,7 @@ async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, re
     )
     return {
         "final_response": text,
-        "status": "COMPLETED",
+        "status": "WAITING_INPUT",  # B13 : voir `_render_needs_list` (garde le goal vivant pour « 1/2/3 »)
         "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time()}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
