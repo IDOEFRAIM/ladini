@@ -154,7 +154,7 @@ class TestCircuitBreakerFullSequence:
         client_a = _ScriptedClient([exc] * 20)
         client_b = _ScriptedClient([_FakeCompletion(model="model-b")] * 20)
         store: Dict[str, Any] = {}
-        settings = _settings(LLM_CIRCUIT_COOLDOWN_SECONDS=0.05)
+        settings = _settings(LLM_CIRCUIT_COOLDOWN_SECONDS=1.0)
         gw = _make_gateway(
             provider_clients={"provider_a": client_a, "provider_b": client_b},
             settings=settings,
@@ -170,7 +170,7 @@ class TestCircuitBreakerFullSequence:
         run(gw.complete(profile=LLMProfile.FAST, messages=[{"role": "user", "content": "hi"}]))
         assert len(client_a.calls) == calls_before  # aucun nouvel appel, cooldown actif
 
-        time.sleep(0.06)
+        time.sleep(1.1)  # cooldown 1.0 s (marge CI : 0.05 s expirait avant le 4e appel sur runner lent)
         # Guérit le candidat primaire juste avant le probe HALF_OPEN.
         client_a._behaviors = [_FakeCompletion(model="model-a")] * 5
         run(gw.complete(profile=LLMProfile.FAST, messages=[{"role": "user", "content": "hi"}]))
