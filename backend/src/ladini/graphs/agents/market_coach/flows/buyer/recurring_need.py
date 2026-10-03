@@ -956,7 +956,11 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         if kind == "DETAIL":
             return await _show_need_detail(state, mc_runtime, target)
         if kind in ("CONFIRM", "REJECT"):
-            return await _respond_to_match(state, mc_runtime, recurring_need_id=target, action=kind)
+            need_id, occurrence_id, version = _split_match_target(target)
+            return await _respond_to_match(
+                state, mc_runtime, recurring_need_id=need_id, action=kind,
+                occurrence_id=occurrence_id, expected_version=version,
+            )
         if kind == "INVALID":
             return await _render_needs_list(state, mc_runtime, notice="Je n'ai pas compris ce choix.\n\n")
         # kind == "LIST" (retour / mes besoins) — retombe sur la liste fraîche ci-dessous.
@@ -1044,6 +1048,21 @@ def _fmt_qty(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
+def _join_match_target(recurring_need_id: Any, occurrence_id: Any, version: Any) -> str:
+    if occurrence_id is None or version is None:
+        return str(recurring_need_id)
+    return f"{recurring_need_id}|{occurrence_id}|{int(version)}"
+
+
+def _split_match_target(target: Any) -> tuple[str, Optional[str], Optional[int]]:
+    """Inverse de `_join_match_target`. Ancien format (`<need_id>` seul, menu affiché avant B12) :
+    pas d'identité exacte -> `(need_id, None, None)`."""
+    parts = str(target or "").split("|")
+    if len(parts) == 3 and parts[1] and parts[2].isdigit():
+        return parts[0], parts[1], int(parts[2])
+    return parts[0], None, None
+
+
 async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str) -> Dict[str, Any]:
     phone = state.get("user_phone")
     gw = RecurringSupplyGateway(mc_runtime)
@@ -1071,8 +1090,11 @@ async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, re
         allocations=allocations,
         confirmable=confirmable,
     )
+    # B12 : la confirmation depuis cet écran vise l'occurrence ET la version AFFICHÉES (identité
+    # exacte, même service durci que la réponse au digest) — jamais « la prochaine ouverte ».
+    target = _join_match_target(recurring_need_id, detail.get("occurrence_id"), detail.get("occurrence_version"))
     mapping = (
-        {"1": f"CONFIRM:{recurring_need_id}", "2": f"REJECT:{recurring_need_id}", "3": "LIST"}
+        {"1": f"CONFIRM:{target}", "2": f"REJECT:{target}", "3": "LIST"}
         if confirmable
         else {"1": "LIST", "2": "LIST"}
     )
@@ -1132,7 +1154,13 @@ def _to_match_service_action(resolved_action: str) -> str:
 
 
 async def _respond_to_match(
-    state: Dict[str, Any], mc_runtime: MarketRuntime, *, recurring_need_id: str, action: str
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+    *,
+    recurring_need_id: str,
+    action: str,
+    occurrence_id: Optional[str] = None,
+    expected_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Confirme ("CONFIRM") ou refuse ("REJECT") la proposition affichée par `_show_need_detail` —
     VS4 pilote. `RecurringSupplyGateway.accept_match_proposal` réutilise le moteur de commande
@@ -1143,7 +1171,11 @@ async def _respond_to_match(
     gw = RecurringSupplyGateway(mc_runtime)
     try:
         result = await gw.accept_match_proposal(
-            phone=str(phone), recurring_need_id=recurring_need_id, action=service_action
+            phone=str(phone),
+            recurring_need_id=recurring_need_id,
+            action=service_action,
+            occurrence_id=occurrence_id,
+            expected_version=expected_version,
         )
     except MCPCallError as exc:
         logger.warning(
@@ -1156,6 +1188,20 @@ async def _respond_to_match(
             "status": "COMPLETED",
         }
 
+    outcome = (result or {}).get("outcome")
+    if outcome:
+        # Refus MÉTIER structuré (modifiée / expirée / déjà traitée / stock...) : aucune mutation.
+        label = _PROPOSAL_REFUSAL_LABELS.get(str(outcome), str(outcome).lower())
+        logger.info(
+            "recurring_supply.match_response_mapped | need=%s | resolved_action=%s | "
+            "service_action=%s | result=refused | outcome=%s",
+            recurring_need_id, action, service_action, outcome,
+        )
+        return {
+            "final_response": f"Je n'ai rien enregistré : {label}. Consultez à nouveau votre besoin pour voir la proposition à jour.",
+            "status": "COMPLETED",
+            "result": result,
+        }
     # Log structuré (mandat §8) : même convention que `_respond_to_digest_flow` — le mapping
     # conversation -> service reste visible même quand les deux mots coïncident (REJECT->REJECT).
     logger.info(
@@ -1186,7 +1232,8 @@ _PROPOSAL_REFUSAL_LABELS = {
     "ALREADY_PROCESSED": "déjà traité",
     "EXPIRED": "proposition expirée",
     "NEED_INACTIVE": "besoin désactivé",
-    "PROPOSAL_CHANGED": "proposition modifiée depuis l'envoi",
+    "PROPOSAL_CHANGED": "proposition modifiée depuis l'envoi — nouvelle validation nécessaire",
+    "PRODUCER_UNAVAILABLE": "producteur ou produit indisponible",
     "NO_PROPOSAL": "plus de proposition en attente",
     "STOCK_CHANGED": "stock modifié",
     "NOT_FOUND": "introuvable",
@@ -1196,30 +1243,44 @@ _PROPOSAL_REFUSAL_LABELS = {
 def _digest_target_set(items: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """L'OBJET MÉTIER qu'une réponse courte au digest désigne — jamais « tout ce qui est matché ».
 
-    Le digest est UN message (outbox, aucun tour de conversation donc aucun `PendingInteraction`
-    possible) qui liste les occurrences d'UNE date. Le lien message -> objet est donc reconstruit
-    de façon déterministe depuis la base : occurrences NOTIFIÉES (`notified_at`, posé seulement
-    quand le digest a réellement été enfilé), d'un besoin ACTIF, avec une disponibilité réelle,
-    et UNIQUEMENT celles du digest LE PLUS RÉCENT (même date d'occurrence). Un besoin hors digest,
-    une occurrence jamais notifiée, ou une occurrence d'un ancien digest ne sont jamais
-    confirmés par un « oui » : ils sont écartés (et journalisés), pas absorbés.
+    Le digest est UN message (outbox) : aucun tour de conversation, donc aucun `PendingInteraction`
+    possible. Son contenu EXACT est le payload du dernier digest (B12) : `[(occurrence_id, version)]`.
+    `list_my_recurring_needs` expose, par besoin, `in_latest_digest` + `digest_occurrence_version` ;
+    les cibles sont EXACTEMENT ces occurrences, chacune avec la version que le message décrivait
+    (`expected_version`). Un besoin hors digest, une occurrence d'un ancien digest ne sont jamais
+    confirmés par un « oui ».
+
+    REPLI TRANSITOIRE (digest envoyé avant B12, payload sans versions) : occurrences NOTIFIÉES d'un
+    besoin ACTIF du digest le plus récent, SANS version attendue (le service retombe alors sur
+    l'heuristique temporelle). À retirer quand ces digests seront écoulés.
     Retourne `(cibles, écartées)`."""
+    with_identity = [i for i in items if i.get("next_occurrence_id")]
+    in_digest = [i for i in with_identity if i.get("in_latest_digest")]
+    if in_digest:
+        targets = []
+        for i in in_digest:
+            # Une proposition sans disponibilité au moment du digest ET inchangée depuis n'a jamais
+            # été confirmable : on ne la compte pas comme « refus » (bruit) ; si elle a changé, le
+            # service la refusera (PROPOSAL_CHANGED) et on le dira.
+            unchanged = i.get("next_occurrence_version") == i.get("digest_occurrence_version")
+            if float(i.get("matched_quantity") or 0) > 0 or not unchanged:
+                targets.append({**i, "expected_version": i.get("digest_occurrence_version")})
+        skipped = [i for i in with_identity if i not in in_digest]
+        return targets, skipped
+
     candidates = [
         i
-        for i in items
-        if i.get("next_occurrence_id")
-        and float(i.get("matched_quantity") or 0) > 0
-        and str(i.get("status") or "ACTIVE").upper() == "ACTIVE"
+        for i in with_identity
+        if float(i.get("matched_quantity") or 0) > 0 and str(i.get("status") or "ACTIVE").upper() == "ACTIVE"
     ]
-    # Les doubles de test historiques n'exposent pas `next_occurrence_notified` (clé absente) ;
-    # le service réel la fournit toujours. Absente => on ne peut PAS prouver la notification.
     notified = [i for i in candidates if i.get("next_occurrence_notified")]
     if not notified:
         return [], candidates
     latest = max(str(i.get("next_occurrence_date") or "") for i in notified)
-    targets = [i for i in notified if str(i.get("next_occurrence_date") or "") == latest]
-    skipped = [i for i in candidates if i not in targets]
-    return targets, skipped
+    legacy = [i for i in notified if str(i.get("next_occurrence_date") or "") == latest]
+    logger.info("RECURRING_PROPOSAL_REPLY_ROUTED | legacy_digest=True | occurrence_ids=%s",
+                [i.get("next_occurrence_id") for i in legacy])
+    return [{**i, "expected_version": None} for i in legacy], [i for i in candidates if i not in legacy]
 
 
 async def _respond_to_digest_flow(
@@ -1257,6 +1318,7 @@ async def _respond_to_digest_flow(
                 recurring_need_id=item["recurring_need_id"],
                 action=service_action,
                 occurrence_id=str(item["next_occurrence_id"]),
+                expected_version=item.get("expected_version"),
             )
         except MCPCallError as exc:
             # Idempotence (mandat §6) : un 2e ACCEPT/REJECT sur une occurrence déjà traitée échoue

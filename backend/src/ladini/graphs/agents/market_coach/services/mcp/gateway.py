@@ -697,11 +697,15 @@ class RecurringSupplyGateway(_BaseGateway):
         recurring_need_id: str,
         action: str,
         occurrence_id: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {"phone": phone, "recurring_need_id": recurring_need_id, "action": action}
         if occurrence_id is not None:
             # Réponse à UNE proposition précise (digest) — jamais « la prochaine occurrence ouverte ».
             kwargs["occurrence_id"] = occurrence_id
+        if expected_version is not None:
+            # Version MÉTIER que l'acheteur a vue (digest/écran détail) : garde principale côté service.
+            kwargs["expected_version"] = int(expected_version)
         return await self._call("accept_match_proposal", **kwargs)
 
     async def mark_order_delivery_status(
