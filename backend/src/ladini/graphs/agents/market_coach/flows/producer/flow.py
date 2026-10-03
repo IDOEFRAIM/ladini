@@ -12,6 +12,7 @@ Tous les helpers filtrent défensivement les `None` avant d'appeler FastMCP.
 from __future__ import annotations
 
 import logging
+import re
 import re as _re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -406,8 +407,148 @@ def _resolve_selected_candidate(
 # =====================================================================
 
 
+_ORDER_REF_RE = re.compile(r"^[0-9a-f-]{6,36}$")
+
+
+def _clean_order_reference(raw: Any) -> str:
+    """Référence de commande saisie par l'utilisateur ("#11DE2D1B", UUID
+    complet) -> forme comparable. Un petit nombre ("4") N'EST PAS une
+    référence : c'est un index de menu, résolu ailleurs (`nodes/memory.py`).
+    Renvoie "" si `raw` n'a pas la forme d'une référence."""
+    text = str(raw or "").strip().lstrip("#").strip().lower()
+    return text if _ORDER_REF_RE.match(text) else ""
+
+
+_TEXT_REF_RE = re.compile(r"#\s*([A-Za-z0-9-]{6,36})|\b([0-9a-fA-F]{8})\b")
+
+
+def _extract_reference_from_text(raw_text: str) -> str:
+    """Référence de commande écrite dans le message ("la commande #11DE2D1B
+    est livrée"). Le LLM NEW_TASK ne peut PAS l'extraire (spec §11 :
+    `NewTaskEntities` interdit tout identifiant technique) — extraction
+    déterministe, bornée : `#<réf>` ou un jeton hexadécimal de 8 caractères
+    contenant au moins un chiffre (jamais un mot français)."""
+    for m in _TEXT_REF_RE.finditer(raw_text or ""):
+        cand = (m.group(1) or m.group(2) or "").lower()
+        if m.group(1) or any(ch.isdigit() for ch in cand):
+            ref = _clean_order_reference(cand)
+            if ref:
+                return ref
+    return ""
+
+
+def _order_matches_reference(order: Dict[str, Any], ref: str) -> bool:
+    full = str(order.get("order_id") or "").lower()
+    short = str(order.get("reference") or "").lower()
+    return bool(ref) and (ref == full or ref == short or full.startswith(ref))
+
+
+def _delivery_payment_selected(
+    payload: Dict[str, Any], chosen: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Commande retenue : pose l'identifiant complet ET les champs d'affichage
+    du récapitulatif (`services/ui/confirmation_summary.py`) — le récap ne
+    doit JAMAIS être vide (« Confirmez-vous cette opération ? » seul)."""
+    new_payload = dict(payload)
+    new_payload["order_id"] = str(chosen.get("order_id"))
+    new_payload["order_reference"] = (
+        chosen.get("reference") or str(chosen.get("order_id") or "")[:8].upper()
+    )
+    new_payload["order_amount"] = chosen.get("total_amount")
+    new_payload["order_currency"] = chosen.get("currency") or "XOF"
+    new_payload["order_buyer"] = chosen.get("buyer_name")
+    items: List[str] = []
+    for i in chosen.get("items") or []:
+        qty = i.get("quantity")
+        if i.get("product_name") and isinstance(qty, (int, float)):
+            items.append(
+                f"{i['product_name']} ({qty:g} {i.get('tier_label') or i.get('unit') or ''})".replace(" )", ")")
+            )
+    new_payload["order_items"] = items
+    mark_deleted(new_payload, "selection_index", "selected_value")
+    logger.info(
+        "PRODUCER_ORDER_COMPLETION_REQUESTED | order=%s | ownership_valid=True | "
+        "order_status=%s | payment_status=%s | delivery_status=%s",
+        str(chosen.get("order_id") or "")[:8],
+        chosen.get("status"),
+        chosen.get("payment_status"),
+        chosen.get("delivery_status"),
+    )
+    return {
+        "status": "PLANNING",
+        "transaction_payload": new_payload,
+        "ag_ui_component": None,
+    }
+
+
+def _delivery_payment_refusal(reason: str, message: str, **log: Any) -> Dict[str, Any]:
+    logger.info(
+        "PRODUCER_ORDER_COMPLETION_REQUESTED | refused=%s | %s",
+        reason,
+        " | ".join(f"{k}={v}" for k, v in log.items()),
+    )
+    # status COMPLETED (comme `_resolve_delivery_transition`) : `render_error` n'affiche que le CODE
+    # de `validation_errors` (« Opération impossible : order_cancelled ») et écraserait ce message.
+    return {
+        "status": "COMPLETED",
+        "final_response": message,
+        "transaction_payload": {"__reset__": True},
+        "ag_ui_component": None,
+    }
+
+
+async def _resolve_explicit_delivery_payment_order(
+    gw: Any, phone: str, payload: Dict[str, Any], ref: str
+) -> Dict[str, Any]:
+    result = await gw.get_producer_orders(phone=phone)
+    matches = [o for o in (result.get("data") or []) if _order_matches_reference(o, ref)]
+    if len(matches) != 1:
+        return _delivery_payment_refusal(
+            "order_not_found",
+            "Je ne trouve pas cette commande parmi vos commandes actives.",
+            ownership_valid=False,
+            matches=len(matches),
+        )
+    order = matches[0]
+    status = str(order.get("status") or "").upper()
+    pay = str(order.get("payment_status") or "").upper()
+    seen = {
+        "ownership_valid": True,
+        "order_status": status,
+        "payment_status": pay,
+        "delivery_status": order.get("delivery_status"),
+    }
+    if status == "CANCELLED":
+        return _delivery_payment_refusal(
+            "order_cancelled", "Impossible : cette commande est annulée.", **seen
+        )
+    if status == "COMPLETED":
+        return _delivery_payment_refusal(
+            "order_already_completed",
+            "Cette commande est déjà clôturée (livrée et payée).",
+            **seen,
+        )
+    if status == "PENDING_PRODUCER_CONFIRMATION":
+        return _delivery_payment_refusal(
+            "order_not_confirmed",
+            "Cette commande n'est pas encore confirmée : confirmez-la d'abord.",
+            **seen,
+        )
+    if status != "CONFIRMED" or pay != "PENDING":
+        return _delivery_payment_refusal(
+            "order_not_closable",
+            "Cette commande n'est pas dans un état permettant la clôture "
+            f"(commande : {status.lower() or 'inconnu'}, paiement : {pay.lower() or 'inconnu'}).",
+            **seen,
+        )
+    return _delivery_payment_selected(payload, order)
+
+
 async def _resolve_order_for_delivery_payment(
-    mc_runtime: MarketRuntime, phone: str, payload: Dict[str, Any]
+    mc_runtime: MarketRuntime,
+    phone: str,
+    payload: Dict[str, Any],
+    raw_text: str = "",
 ) -> Dict[str, Any]:
     """Résout QUELLE commande le producteur vise pour
     `confirm_delivery_and_payment` — jamais "la dernière commande" (mandat
@@ -437,6 +578,19 @@ async def _resolve_order_for_delivery_payment(
         }
 
     gw = OrderTrackingGateway(mc_runtime)
+
+    # B11 — référence EXPLICITE ("la commande #11DE2D1B est livrée", ou un
+    # identifiant déjà résolu par un menu) : résolue et validée CONTRE les
+    # commandes du producteur AVANT toute mutation. Un identifiant étranger
+    # est indiscernable d'un identifiant inexistant (aucune fuite).
+    explicit_ref = _clean_order_reference(
+        payload.get("order_id")
+    ) or _extract_reference_from_text(raw_text)
+    if explicit_ref:
+        return await _resolve_explicit_delivery_payment_order(
+            gw, str(phone), payload, explicit_ref
+        )
+
     result = await gw.get_producer_orders(phone=str(phone), status="CONFIRMED")
     all_orders = result.get("data") or []
     candidates = [
@@ -466,15 +620,7 @@ async def _resolve_order_for_delivery_payment(
         )
 
     if chosen:
-        order_id = chosen.get("order_id")
-        new_payload = dict(payload)
-        new_payload["order_id"] = str(order_id)
-        mark_deleted(new_payload, "selection_index", "selected_value")
-        return {
-            "status": "PLANNING",
-            "transaction_payload": new_payload,
-            "ag_ui_component": None,
-        }
+        return _delivery_payment_selected(payload, chosen)
 
     # Plus d'une commande éligible : menu de sélection strict — jamais de
     # choix implicite.
@@ -2633,8 +2779,13 @@ async def producer_context_resolver(
     # 3bis. Clôture paiement-à-la-livraison (2026-09-04) — résout QUELLE
     # commande est visée (jamais "la dernière", mandat §20) avant de
     # tomber sur confirmation_gate/mcp_tool_executor génériques.
-    if goal == "PRODUCER_CONFIRM_DELIVERY_PAYMENT" and not payload.get("order_id"):
-        return await _resolve_order_for_delivery_payment(mc_runtime, str(phone), payload)
+    if goal == "PRODUCER_CONFIRM_DELIVERY_PAYMENT":
+        return await _resolve_order_for_delivery_payment(
+            mc_runtime,
+            str(phone),
+            payload,
+            str(state.get("normalized_text") or state.get("user_query") or ""),
+        )
 
     # 3quinquies. Livraison (VS5 pilote) : "en route"/"livré" — AVANT le
     # dispatch générique PRODUCER_CONFIRM_ORDER ci-dessous, exactement le

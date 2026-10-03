@@ -228,6 +228,27 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         summary = "Mise à jour de la production"
         return f"{summary} :\n{bullet_list}" if bullet_list else summary
 
+    if goal == "PRODUCER_CONFIRM_DELIVERY_PAYMENT":
+        # B11 : clôture paiement-à-la-livraison. Sans ce gabarit le récap
+        # retombait sur « Confirmez-vous cette opération ? » (aucun détail).
+        ref = payload.get("order_reference") or str(payload.get("order_id") or "")[:8].upper()
+        lines = [f"Commande : #{ref}"]
+        items = payload.get("order_items")
+        if isinstance(items, list) and items:
+            lines.append("Produits : " + ", ".join(str(i) for i in items))
+        if payload.get("order_buyer"):
+            lines.append(f"Client : {payload['order_buyer']}")
+        if payload.get("order_amount") not in (None, "", [], {}):
+            lines.append(
+                f"Montant : {_fmt_num(payload['order_amount'])} {payload.get('order_currency') or 'XOF'}"
+            )
+        bullet_list = "\n".join(f"- {line}" for line in lines)
+        return (
+            f"Clôture de la commande :\n{bullet_list}\n\n"
+            "Le client a-t-il bien reçu la commande et le paiement a-t-il été reçu ? "
+            "(livraison + paiement en espèces, commande terminée)"
+        )
+
     if goal == "SALES_UPDATE_PRODUCT":
         # Même logique que PRODUCTION_UPDATE_FUTURE : n'afficher QUE les champs
         # réellement fournis (mise à jour partielle du catalogue).
