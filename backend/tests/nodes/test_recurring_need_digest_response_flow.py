@@ -14,22 +14,22 @@ from tests.conftest import StubRuntime, make_state, run
 
 _LISTING_ONE_FULL = {
     "status": "success",
-    "items": [{"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 40}],
+    "items": [{"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 40, "status": "ACTIVE", "next_occurrence_id": "occ-need-tomate", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True}],
 }
 _LISTING_ONE_PARTIAL = {
     "status": "success",
-    "items": [{"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 20}],
+    "items": [{"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 20, "status": "ACTIVE", "next_occurrence_id": "occ-need-tomate", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True}],
 }
 _LISTING_TWO_FULL = {
     "status": "success",
     "items": [
-        {"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 40},
-        {"recurring_need_id": "need-oignon", "product": "oignon", "matched_quantity": 20},
+        {"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 40, "status": "ACTIVE", "next_occurrence_id": "occ-need-tomate", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True},
+        {"recurring_need_id": "need-oignon", "product": "oignon", "matched_quantity": 20, "status": "ACTIVE", "next_occurrence_id": "occ-need-oignon", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True},
     ],
 }
 _LISTING_NOTHING_ACTIONABLE = {
     "status": "success",
-    "items": [{"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 0}],
+    "items": [{"recurring_need_id": "need-tomate", "product": "tomate", "matched_quantity": 0, "status": "ACTIVE", "next_occurrence_id": "occ-need-tomate", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True}],
 }
 
 
@@ -64,7 +64,9 @@ def test_cas1_confirm_with_one_actionable_need_calls_accept_for_that_need():
     # (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT") : `accept_match_proposal` ne parle que le
     # vocabulaire `MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")` — "CONFIRM" (verrouillé ici
     # auparavant) n'a jamais été une valeur valide côté service réel.
-    assert seen == [{"phone": "+22670000000", "recurring_need_id": "need-tomate", "action": "ACCEPT"}]
+    # B11-recurring : la réponse vise l'occurrence EXACTE notifiée, jamais « la prochaine ouverte ».
+    assert seen == [{"phone": "+22670000000", "recurring_need_id": "need-tomate", "action": "ACCEPT",
+                     "occurrence_id": "occ-need-tomate"}]
     assert "confirmé" in result["final_response"].lower()
     assert result["status"] == "COMPLETED"
 

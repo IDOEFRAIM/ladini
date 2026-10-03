@@ -1182,6 +1182,46 @@ async def _respond_to_match(
 # =====================================================================
 
 
+_PROPOSAL_REFUSAL_LABELS = {
+    "ALREADY_PROCESSED": "déjà traité",
+    "EXPIRED": "proposition expirée",
+    "NEED_INACTIVE": "besoin désactivé",
+    "PROPOSAL_CHANGED": "proposition modifiée depuis l'envoi",
+    "NO_PROPOSAL": "plus de proposition en attente",
+    "STOCK_CHANGED": "stock modifié",
+    "NOT_FOUND": "introuvable",
+}
+
+
+def _digest_target_set(items: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """L'OBJET MÉTIER qu'une réponse courte au digest désigne — jamais « tout ce qui est matché ».
+
+    Le digest est UN message (outbox, aucun tour de conversation donc aucun `PendingInteraction`
+    possible) qui liste les occurrences d'UNE date. Le lien message -> objet est donc reconstruit
+    de façon déterministe depuis la base : occurrences NOTIFIÉES (`notified_at`, posé seulement
+    quand le digest a réellement été enfilé), d'un besoin ACTIF, avec une disponibilité réelle,
+    et UNIQUEMENT celles du digest LE PLUS RÉCENT (même date d'occurrence). Un besoin hors digest,
+    une occurrence jamais notifiée, ou une occurrence d'un ancien digest ne sont jamais
+    confirmés par un « oui » : ils sont écartés (et journalisés), pas absorbés.
+    Retourne `(cibles, écartées)`."""
+    candidates = [
+        i
+        for i in items
+        if i.get("next_occurrence_id")
+        and float(i.get("matched_quantity") or 0) > 0
+        and str(i.get("status") or "ACTIVE").upper() == "ACTIVE"
+    ]
+    # Les doubles de test historiques n'exposent pas `next_occurrence_notified` (clé absente) ;
+    # le service réel la fournit toujours. Absente => on ne peut PAS prouver la notification.
+    notified = [i for i in candidates if i.get("next_occurrence_notified")]
+    if not notified:
+        return [], candidates
+    latest = max(str(i.get("next_occurrence_date") or "") for i in notified)
+    targets = [i for i in notified if str(i.get("next_occurrence_date") or "") == latest]
+    skipped = [i for i in candidates if i not in targets]
+    return targets, skipped
+
+
 async def _respond_to_digest_flow(
     state: Dict[str, Any], mc_runtime: MarketRuntime, *, action: str
 ) -> Dict[str, Any]:
@@ -1193,11 +1233,13 @@ async def _respond_to_digest_flow(
         return {"final_response": "Je n'ai pas pu récupérer vos approvisionnements.", "status": "COMPLETED"}
 
     items = listing.get("items") or []
-    # Seuls les besoins avec une disponibilité RÉELLEMENT trouvée (mandat CAS 5 : une réponse
-    # tardive sur une proposition déjà traitée/expirée ne doit jamais créer de commande) —
-    # `accept_match_proposal` referait de toute façon ce contrôle par besoin, mais le filtrer ici
-    # évite un message générique "rien à confirmer" répété autant de fois qu'il y a de besoins.
-    actionable = [i for i in items if float(i.get("matched_quantity") or 0) > 0]
+    actionable, skipped = _digest_target_set(items)
+    logger.info(
+        "RECURRING_PROPOSAL_REPLY_ROUTED | action=%s | occurrence_ids=%s | skipped_occurrence_ids=%s",
+        action,
+        [i.get("next_occurrence_id") for i in actionable],
+        [i.get("next_occurrence_id") for i in skipped],
+    )
     if not actionable:
         return {
             "final_response": "Il n'y a rien à confirmer pour le moment — votre prochaine proposition arrivera bientôt.",
@@ -1207,41 +1249,64 @@ async def _respond_to_digest_flow(
     service_action = _to_match_service_action(action)
     confirmed_products: List[str] = []
     failed_products: List[str] = []
+    refusal_outcomes: List[str] = []
     for item in actionable:
         try:
-            await gw.accept_match_proposal(
-                phone=str(phone), recurring_need_id=item["recurring_need_id"], action=service_action
+            result = await gw.accept_match_proposal(
+                phone=str(phone),
+                recurring_need_id=item["recurring_need_id"],
+                action=service_action,
+                occurrence_id=str(item["next_occurrence_id"]),
             )
-            # Log structuré (mandat §8) : le mapping conversation -> service reste visible même
-            # quand les deux mots coïncident (REJECT->REJECT) — jamais implicite en observabilité.
-            logger.info(
-                "recurring_supply_digest.confirm_action_mapped | need=%s | resolved_action=%s | "
-                "service_action=%s | result=success",
-                item["recurring_need_id"], action, service_action,
-            )
-            confirmed_products.append(item["product"])
         except MCPCallError as exc:
             # Idempotence (mandat §6) : un 2e ACCEPT/REJECT sur une occurrence déjà traitée échoue
-            # proprement côté service (occurrence hors OPEN/MATCHED) — jamais une 2e commande. Un
-            # échec ici est donc attendu en cas de double-tap, pas forcément une vraie erreur.
+            # proprement côté service — jamais une 2e commande. Un échec ici est donc attendu en cas
+            # de double-tap, pas forcément une vraie erreur.
             logger.info(
                 "recurring_supply_digest.confirm_action_mapped | need=%s | resolved_action=%s | "
                 "service_action=%s | result=failed | error_class=%s",
                 item["recurring_need_id"], action, service_action, type(exc).__name__,
             )
             failed_products.append(item["product"])
+            continue
+        outcome = (result or {}).get("outcome")
+        if outcome:
+            # Refus MÉTIER structuré (proposition expirée / modifiée / déjà traitée / stock...) :
+            # AUCUNE mutation côté service, jamais comptée comme confirmée.
+            label = _PROPOSAL_REFUSAL_LABELS.get(str(outcome), str(outcome).lower())
+            refusal_outcomes.append(str(outcome))
+            failed_products.append(f"{item['product']} ({label})")
+            logger.info(
+                "recurring_supply_digest.confirm_action_mapped | need=%s | resolved_action=%s | "
+                "service_action=%s | result=refused | outcome=%s",
+                item["recurring_need_id"], action, service_action, outcome,
+            )
+            continue
+        # Log structuré (mandat §8) : le mapping conversation -> service reste visible même
+        # quand les deux mots coïncident (REJECT->REJECT) — jamais implicite en observabilité.
+        logger.info(
+            "recurring_supply_digest.confirm_action_mapped | need=%s | resolved_action=%s | "
+            "service_action=%s | result=success",
+            item["recurring_need_id"], action, service_action,
+        )
+        confirmed_products.append(item["product"])
 
-    if action == "REJECT":
+    if action == "REJECT" and confirmed_products:
         message = "D'accord, rien ne sera livré demain — vos besoins habituels restent actifs."
     elif confirmed_products and failed_products:
         # (B9) succès PARTIEL : jamais « vos commandes sont en cours de préparation » si une partie
         # seulement a été confirmée (un échec peut aussi être un double-tap déjà traité).
         message = (
             f"✅ Confirmé : {', '.join(confirmed_products)}.\n"
-            f"⚠️ Non confirmé (déjà traité ou indisponible) : {', '.join(failed_products)}."
+            f"⚠️ Non confirmé : {', '.join(failed_products)}."
         )
     elif confirmed_products:
         message = "✅ C'est confirmé, vos commandes sont en cours de préparation."
+    elif refusal_outcomes and len(set(refusal_outcomes)) == 1 and len(refusal_outcomes) == len(failed_products):
+        label = _PROPOSAL_REFUSAL_LABELS.get(refusal_outcomes[0], refusal_outcomes[0].lower())
+        message = f"Je n'ai rien confirmé : {label}. Votre prochaine proposition arrivera bientôt."
+    elif refusal_outcomes:
+        message = f"Je n'ai rien confirmé : {', '.join(failed_products)}."
     else:
         message = "Je n'ai pas pu confirmer votre approvisionnement — réessayez dans un instant."
     return {

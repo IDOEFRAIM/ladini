@@ -147,7 +147,16 @@ class RecurringSupplyDigestService:
                         "channel": "WHATSAPP",
                         "recipient_phone": phone,
                         "template_key": templates.RECURRING_SUPPLY_DIGEST_BUYER,
-                        "payload": {"body": body},
+                        # Traçabilité message -> objets métier (B11-recurring) : le digest référence EXACTEMENT
+                        # ces occurrences/versions. `render` n'utilise que `body` ; clés additionnelles inertes.
+                        "payload": {
+                            "body": body,
+                            "digest_signature": signature,
+                            "occurrences": [
+                                {"occurrence_id": str(r["occurrence_id"]), "version": r["version"]}
+                                for r in buyer_rows
+                            ],
+                        },
                         "dedupe_key": dedupe_key,
                     }
                 )

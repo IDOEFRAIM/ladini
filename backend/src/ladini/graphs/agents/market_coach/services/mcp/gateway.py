@@ -692,11 +692,17 @@ class RecurringSupplyGateway(_BaseGateway):
         return await self._call("get_recurring_need_detail", phone=phone, recurring_need_id=recurring_need_id)
 
     async def accept_match_proposal(
-        self, phone: str, recurring_need_id: str, action: str
+        self,
+        phone: str,
+        recurring_need_id: str,
+        action: str,
+        occurrence_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return await self._call(
-            "accept_match_proposal", phone=phone, recurring_need_id=recurring_need_id, action=action
-        )
+        kwargs: Dict[str, Any] = {"phone": phone, "recurring_need_id": recurring_need_id, "action": action}
+        if occurrence_id is not None:
+            # Réponse à UNE proposition précise (digest) — jamais « la prochaine occurrence ouverte ».
+            kwargs["occurrence_id"] = occurrence_id
+        return await self._call("accept_match_proposal", **kwargs)
 
     async def mark_order_delivery_status(
         self, phone: str, order_id: str, action: str
