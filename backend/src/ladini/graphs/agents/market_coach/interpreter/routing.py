@@ -2009,7 +2009,9 @@ async def _producer_delivery_completion_signal(
             return None
         if role_up == "BUYER":
             try:
-                from ladini.graphs.agents.market_coach.services.mcp.gateway import OrderTrackingGateway
+                from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+                    OrderTrackingGateway,
+                )
 
                 res = await OrderTrackingGateway(mc_runtime).get_producer_orders(phone=phone)
             except Exception:
