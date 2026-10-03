@@ -642,7 +642,16 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             and gate_result is not None
             and gate_result.offer.commercial_quantity is not None
         ):
-            gate_question, gate_text = price_question(gate_result.offer.commercial_quantity.unit)
+            if (
+                gate_result.question is not None
+                and gate_result.question.requested_field == "price"
+                and gate_result.question.expected_basis == "PER_PACKAGE"
+            ):
+                # Stock CONDITIONNÉ (« 100 sachets de 500 ml », ou plusieurs conditionnements) : on demande le
+                # prix D'UN conditionnement — jamais « par litre » / « par millilitre » (hotfix 2026-10-03).
+                gate_question, gate_text = gate_result.question, gate_result.question_text
+            else:
+                gate_question, gate_text = price_question(gate_result.offer.commercial_quantity.unit)
 
         return _finalize_validator_response(
             state,

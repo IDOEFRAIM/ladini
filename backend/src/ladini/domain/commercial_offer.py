@@ -735,6 +735,18 @@ def validate_offer(offer: "CommercialOffer") -> CommercialOfferValidation:
     return base
 
 
+def format_package_content(amount: Optional[float], unit: Optional[str]) -> str:
+    """Contenu d'UN conditionnement dans l'unité la plus lisible : 0,5 litre -> « 500 ml », 2 -> « 2 litres »."""
+    if amount is None:
+        return ""
+    u = str(unit or "").upper()
+    if u == "LITRE" and amount < 1:
+        return f"{_fmt(round(amount * 1000, 6))} ml"
+    if u == "KG" and amount < 1:
+        return f"{_fmt(round(amount * 1000, 6))} g"
+    return f"{_fmt(amount)} {unit_display(u, amount)}"
+
+
 def render_offer_summary(offer: "CommercialOffer") -> str:
     """Formulation COMMERCIALE de l'offre — celle que l'utilisateur a choisie, jamais la
     représentation normalisée interne (« 500 000 FCFA par tonne », pas « 500 FCFA/kg »)."""
@@ -747,6 +759,15 @@ def render_offer_summary(offer: "CommercialOffer") -> str:
     amount = f"{_fmt(pr.amount)} {pr.currency}"
     if pr.basis == PriceBasis.PER_PACKAGE and pk is not None and pk.is_content_known:
         ptype = (pk.package_type or "conditionnement").lower()
+        if pk.count:
+            # Stock CONDITIONNÉ déclaré (« 100 sachets de 500 ml ») : la structure commerciale est conservée
+            # (hotfix 2026-10-03) — jamais « 100 litres », jamais un prix par millilitre.
+            plural = f"{ptype}s" if pk.count > 1 else ptype
+            return (
+                f"Publication de {pk.count} {plural} de {offer.product} de "
+                f"{format_package_content(pk.content_amount, pk.content_unit)} à {amount} le {ptype}.\n"
+                f"Quantité totale : {_fmt(cq.amount)} {unit_display(cq.unit, cq.amount)}."
+            )
         return (
             f"{head} à {amount} par {ptype} de "
             f"{_fmt(pk.content_amount)} {unit_display(pk.content_unit, pk.content_amount)}."
@@ -795,6 +816,7 @@ def offer_execution_payload(offer: "CommercialOffer") -> Dict[str, Any]:
 
 
 __all__ = [
+    "format_package_content",
     "CommercialOffer",
     "unit_display",
     "base_unit_for",

@@ -125,6 +125,32 @@ def _short_label_for_goal(goal: str) -> str:
     return str((INTENT_CONFIG.get(goal) or {}).get("label", goal))
 
 
+def _packaged_stock_phrase(facts: Dict[str, Any]) -> Optional[str]:
+    """« 100 sachets de 500 ml (50 litres au total) » / « 50 bidons de 500 ml et 100 bidons de 330 ml (58 litres
+    au total) », ou `None` si les faits ne décrivent pas un stock conditionné."""
+    from ladini.domain.commercial_offer import format_package_content
+
+    groups = facts.get("package_groups")
+    if not groups and facts.get("package_count") and facts.get("package_size") and facts.get("package_unit"):
+        groups = [{"count": facts["package_count"], "label": facts.get("package_label"),
+                   "size": facts["package_size"], "unit": facts["package_unit"]}]
+    if not isinstance(groups, list) or not groups:
+        return None
+    parts = []
+    for g in groups:
+        if not isinstance(g, dict) or not g.get("count") or not g.get("size"):
+            return None
+        label = str(g.get("label") or "conditionnement").lower()
+        count = int(g["count"])
+        parts.append(
+            f"{count} {label}{'s' if count > 1 else ''} de {format_package_content(float(g['size']), g.get('unit'))}"
+        )
+    total = facts.get("quantity")
+    unit = str(facts.get("unit") or "").strip().lower()
+    suffix = f" ({fmt_num(total)} {unit}{'s' if unit and unit != 'kg' and float(total) > 1 else ''} au total)" if total is not None and unit else ""
+    return " et ".join(parts) + suffix
+
+
 def _facts_summary_text(facts: Dict[str, Any]) -> str:
     """Résumé déterministe des faits déjà compris — AUCUN appel LLM, ces
     valeurs ont déjà été extraites/normalisées en amont. Volontairement
@@ -135,6 +161,11 @@ def _facts_summary_text(facts: Dict[str, Any]) -> str:
     quantity = facts.get("quantity")
     unit = facts.get("unit")
     qty_part = None
+    packaged = _packaged_stock_phrase(facts)
+    if packaged and product:
+        # Stock CONDITIONNÉ : la structure dite par l'utilisateur (« 50 bidons de 500 ml et 100 bidons de
+        # 330 ml ») est conservée avec le total physique — jamais une quantité inventée (hotfix 2026-10-03).
+        return f"Vous avez {packaged} de {product}."
     if quantity is not None:
         unit_label = str(unit).strip().lower() if unit else ""
         qty_part = f"{fmt_num(quantity)} {unit_label}".strip()
@@ -333,6 +364,13 @@ def _merge_clarification_facts(
         current_clean = dict(current_clean)
         current_clean.pop("quantity", None)
         current_clean.pop("unit", None)
+    if (pending_facts.get("package_groups") or pending_facts.get("package_count")) and not (
+        current_clean.get("package_groups") or current_clean.get("package_count")
+    ):
+        # Stock CONDITIONNÉ déjà lu DÉTERMINISTEMENT (« 50 bidons de 500 ml et 100 bidons de 330 ml » = 58 L) :
+        # une quantité/unité hallucinée au tour de réponse (« je veux les vendre ») ne l'écrase JAMAIS
+        # (hotfix 2026-10-03).
+        current_clean = {k: v for k, v in current_clean.items() if k not in ("quantity", "unit")}
     merged = dict(pending_facts)
     merged.update(current_clean)
     return merged

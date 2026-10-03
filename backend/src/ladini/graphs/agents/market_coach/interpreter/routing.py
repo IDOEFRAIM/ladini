@@ -42,6 +42,9 @@ from ladini.domain.commercial_offer_flow import (
     parse_basis_reply,
     parse_generic_package_count_and_size,
     parse_package_content,
+    parse_package_price_reply,
+    parse_packaged_stock_message,
+    short_content_unit,
 )
 from ladini.domain.quantity_unit import (
     all_numbers_accounted_for,
@@ -2151,6 +2154,104 @@ async def _bare_confirmation_for_order_reception(
     }
 
 
+# Entités posées par le correctif « stock conditionné » (hotfix 2026-10-03) : tout ce que le LLM a pu mettre
+# pour la QUANTITÉ / le PRIX d'un message de publication conditionné est REMPLACÉ, jamais fusionné.
+_PACKAGED_STOCK_OVERRIDE_KEYS = (
+    "quantity", "unit", "price", "price_unit", "pricing_tiers", "package_count", "package_label",
+    "package_size", "package_unit", "package_groups", "package_type", "package_content_amount",
+    "package_content_unit", "price_basis",
+)
+
+
+def _apply_packaged_stock_entities(raw: Dict[str, Any], state: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """Publication d'un produit CONDITIONNÉ (« 100 sachets de lait de 500 ml », « 50 bidons de 500 ml et 100
+    bidons de 330 ml ») : la structure est DÉTERMINISTE, elle ne doit pas dépendre de l'arithmétique du LLM
+    (250 litres au lieu de 58) ni de l'unité lue dans la phrase (« 500ml » pris pour l'unité de la quantité).
+
+    Remplace `quantity`/`unit`/`price*`/`pricing_tiers`/`package_*` par la lecture déterministe ; ne touche à
+    rien d'autre (produit, description…). Périmètre : SALES_PUBLISH_PRODUCT uniquement."""
+    if not isinstance(raw, dict) or state.get("is_onboarding"):
+        return raw
+    intent = str(raw.get("detected_intent") or "").upper()
+    event = str(raw.get("interpreted_event") or "").upper()
+    ambiguous_publish = "SALES_PUBLISH_PRODUCT" in (raw.get("candidate_goals") or [])
+    if not ambiguous_publish and (
+        intent != "SALES_PUBLISH_PRODUCT" or event not in ("NEW_TASK", "ANSWER", "UPDATE")
+    ):
+        return raw
+    stock = parse_packaged_stock_message(text)
+    if stock is None:
+        # Nouvelle quantité MASS/VOLUME explicite (« je veux vendre 50 litres de lait ») alors qu'un stock
+        # conditionné était déjà décrit : l'ancienne structure (compte × contenance) ne survit JAMAIS à une
+        # nouvelle description du stock (hotfix 2026-10-03, « annuler → nouvelle publication »). Jamais pendant
+        # une réponse de prix (« 500f pour 500 ml » : 500 ml y est une TAILLE, pas un stock).
+        payload_now = state.get("transaction_payload") or {}
+        entities_now = dict(raw.get("extracted_entities") or {})
+        if (
+            event in ("NEW_TASK", "UPDATE")
+            and (payload_now.get("package_count") or payload_now.get("package_groups"))
+            and entities_now.get("quantity") is not None
+            and entities_now.get("price") in (None, "")
+            and not _re.search(r"(fcfa|cfa|francs?)", str(text).lower())
+        ):
+            reset = {k: None for k in ("package_count", "package_label", "package_size", "package_unit", "package_groups")}
+            patched_reset = dict(raw)
+            patched_reset["extracted_entities"] = {**entities_now, **reset}
+            return patched_reset
+        return raw
+    entities: Dict[str, Any] = {
+        k: v for k, v in dict(raw.get("extracted_entities") or {}).items() if k not in _PACKAGED_STOCK_OVERRIDE_KEYS
+    }
+    first = stock.groups[0]
+    entities["quantity"] = stock.total_base_quantity
+    entities["unit"] = stock.base_unit
+    if not entities.get("product") and first.product_hint:
+        entities["product"] = first.product_hint
+    if len(stock.groups) == 1:
+        entities.update(
+            {
+                "package_count": first.count,
+                "package_label": first.label,
+                "package_size": first.size,
+                "package_unit": first.unit,
+            }
+        )
+        if first.price is not None:
+            entities["price"] = first.price
+            entities["price_unit"] = first.label.lower()
+    else:
+        entities["package_groups"] = [
+            {"count": g.count, "label": g.label, "size": g.size, "unit": g.unit,
+             "size_literal": g.size_literal, "unit_literal": g.unit_literal, "price": g.price}
+            for g in stock.groups
+        ]
+        if stock.all_priced:
+            entities["pricing_tiers"] = [
+                {"quantity": g.size_literal, "unit": short_content_unit(g.unit_literal), "price": g.price,
+                 "packaging": g.label.lower(), "count": g.count}
+                for g in stock.groups
+            ]
+    logger.info(
+        "PRODUCER_PACKAGING_PARSED groups=%d package_count=%s package_size=%s package_unit=%s packaging_type=%s "
+        "stock_quantity_base=%s base_unit=%s priced=%s source=deterministic_text",
+        len(stock.groups), [g.count for g in stock.groups], [g.size for g in stock.groups],
+        [g.unit_literal for g in stock.groups], [g.label for g in stock.groups], stock.total_base_quantity,
+        stock.base_unit, stock.any_priced,
+    )
+    logger.info(
+        "PRODUCER_PACKAGING_STOCK_NORMALIZED stock_quantity_base=%s base_unit=%s groups=%d tiers=%d "
+        "pricing_basis=%s",
+        stock.total_base_quantity, stock.base_unit, len(stock.groups), len(entities.get("pricing_tiers") or []),
+        "PER_PACKAGE" if stock.any_priced else "UNPRICED",
+    )
+    patched = dict(raw)
+    patched["extracted_entities"] = entities
+    ra = dict(patched.get("raw_analysis") or {})
+    ra["packaged_stock_override"] = True
+    patched["raw_analysis"] = ra
+    return patched
+
+
 def make_input_interpreter(role: str = "PRODUCER"):
     """Crée un nœud `input_interpreter`.
 
@@ -2299,6 +2400,28 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "extracted_entities": {},
                 "raw_analysis": {"path": "commercial_question_fast_path"},
             }
+
+        # 0.455 RÉPONSE AU PRIX D'UN CONDITIONNEMENT (hotfix 2026-10-03) : « 500f pour 500 ml » après « Quel est le
+        # prix d'un sachet de 500 ml ? » est le prix PAR SACHET — jamais « 500 FCFA par millilitre ». Lu
+        # DÉTERMINISTEMENT dans le contexte du stock conditionné déclaré (aucun LLM).
+        if (
+            _commercial_q is not None
+            and _commercial_q.requested_field == "price"
+            and _commercial_q.expected_basis == "PER_PACKAGE"
+        ):
+            _pkg_reply = parse_package_price_reply(text, state.get("transaction_payload") or {})
+            if _pkg_reply is not None:
+                logger.info(
+                    "PRODUCER_PRICING_BASIS_RESOLVED basis=PER_PACKAGE source=question_context tiers=%d",
+                    len(_pkg_reply.get("pricing_tiers") or []),
+                )
+                return {
+                    "interpreted_event": "ANSWER",
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": _pkg_reply,
+                    "raw_analysis": {"path": "fast_path_package_price_reply"},
+                }
 
         # 0.46 RÉPONSE À UNE QUESTION DE PRIX DE BID (Phase B2b, 2026-09-28) : « 450000 » après « quel prix
         # par tonne ? », « par tonne » après « par tonne ou pour l'ensemble ? ». Lue déterministiquement dans
@@ -3601,6 +3724,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 ).to_state_patch()
                 return same_patch
             raw = await _input_interpreter_impl(state, mc_runtime)
+            raw = _apply_packaged_stock_entities(raw, state, text)
             return InterpreterResult.from_legacy_dict(raw).to_state_patch()
 
         # B4 (2026-10-02) — CHANGEMENT DE PRODUIT EXPLICITE pendant un tunnel quantité Buyer :
