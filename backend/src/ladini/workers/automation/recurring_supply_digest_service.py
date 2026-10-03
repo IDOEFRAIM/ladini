@@ -56,7 +56,7 @@ logger = logging.getLogger("ladini.workers.automation.recurring_supply_digest")
 # jamais une par acheteur. OPEN avec matched=0 est inclus délibérément (mandat §3) : le restaurant
 # voit aussi ce qui manque, pas seulement ce qui est couvert.
 _RELEVANT_OCCURRENCES_SQL = text(
-    "SELECT o.id AS occurrence_id, o.version, o.requested_quantity, o.quantity_matched, o.unit, "
+    "SELECT o.id AS occurrence_id, n.id AS recurring_need_id, o.version, o.requested_quantity, o.quantity_matched, o.unit, "
     "n.buyer_id, sc.name AS product, u.phone AS buyer_phone "
     "FROM marketplace.recurring_need_occurrences o "
     "JOIN marketplace.recurring_needs n ON n.id = o.recurring_need_id "
@@ -153,7 +153,11 @@ class RecurringSupplyDigestService:
                             "body": body,
                             "digest_signature": signature,
                             "occurrences": [
-                                {"occurrence_id": str(r["occurrence_id"]), "version": r["version"]}
+                                {
+                                    "recurring_need_id": str(r.get("recurring_need_id")) if r.get("recurring_need_id") else None,
+                                    "occurrence_id": str(r["occurrence_id"]),
+                                    "version": r["version"],
+                                }
                                 for r in buyer_rows
                             ],
                         },

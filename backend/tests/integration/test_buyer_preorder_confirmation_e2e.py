@@ -353,7 +353,7 @@ class TestUnit:
                 return {"items": [{"recurring_need_id": "a", "product": "oignon", "matched_quantity": 5, "status": "ACTIVE", "next_occurrence_id": "occ-a", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True},
                                   {"recurring_need_id": "b", "product": "tomate", "matched_quantity": 5, "status": "ACTIVE", "next_occurrence_id": "occ-b", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True}]}
 
-            async def accept_match_proposal(self, phone, recurring_need_id, action, occurrence_id=None):
+            async def accept_match_proposal(self, phone, recurring_need_id, action, occurrence_id=None, expected_version=None):
                 if recurring_need_id == "b":
                     raise MCPCallError("accept_match_proposal", "déjà traité", "ALREADY_DONE", "r-1")
                 return {"status": "success"}

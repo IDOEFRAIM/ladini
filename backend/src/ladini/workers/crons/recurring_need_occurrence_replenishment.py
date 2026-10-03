@@ -20,7 +20,12 @@ logger = logging.getLogger("Ladini.Workers.Cron.RecurringNeedOccurrenceReplenish
 async def _run() -> dict:
     from ladini.services.database.d import AgriDatabaseService
 
-    return await AgriDatabaseService().replenish_occurrence_windows()
+    svc = AgriDatabaseService()
+    summary = dict(await svc.replenish_occurrence_windows())
+    # No-response (B12) : les occurrences passées restées ouvertes passent EXPIRED (même cron, aucun
+    # nouvel ordonnanceur) — avant ce correctif elles masquaient la vraie prochaine occurrence.
+    summary.update(await svc.expire_past_occurrences())
+    return summary
 
 
 @celery_app.task(name="workers.recurring_need_occurrence_replenishment", bind=True, max_retries=1)

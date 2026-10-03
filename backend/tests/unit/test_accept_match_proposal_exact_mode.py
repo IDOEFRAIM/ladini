@@ -192,3 +192,102 @@ def test_legacy_mode_now_refuses_inactive_need():
         run(svc.accept_match_proposal("+22670000001", str(need.id), "ACCEPT"))
     assert exc.value.reason == "need_inactive"
     assert session.added == []
+
+
+# ── B12 : contrat de VERSION (garde principale) ─────────────────────────────────────────────────
+
+def test_expected_version_match_accepts_even_without_notification_detail_screen_path():
+    # Écran détail : aucune notification, la version AFFICHÉE fait foi (même service durci).
+    svc, need, occ, allocs, product, session = _case(notified=None)
+    res = _accept(svc, need, occ, expected_version=3)
+    assert res.get("outcome") is None and occ.status == "ACCEPTED"
+
+
+@pytest.mark.parametrize("action", ["ACCEPT", "REJECT"])
+def test_expected_version_mismatch_is_refused_for_accept_and_reject_with_zero_mutation(action):
+    svc, need, occ, allocs, product, session = _case()
+    res = _accept(svc, need, occ, action=action, expected_version=2)
+    assert res["outcome"] == "PROPOSAL_CHANGED"
+    assert res["expected_version"] == 2 and res["current_version"] == 3
+    assert occ.status == "MATCHED" and all(a.status == "PROPOSED" for a in allocs)
+    _no_mutation(session, allocs, product, 100.0)
+
+
+def test_updated_at_is_no_longer_the_main_guard_when_a_version_is_provided():
+    # updated_at > notified_at (ancienne heuristique) NE refuse PLUS quand la version correspond.
+    svc, need, occ, allocs, product, session = _case(
+        notified=_NOW - timedelta(hours=5), updated=_NOW - timedelta(hours=1)
+    )
+    res = _accept(svc, need, occ, expected_version=3)
+    assert res.get("outcome") is None and occ.status == "ACCEPTED"
+
+
+def test_expired_status_gives_expired_outcome():
+    svc, need, occ, allocs, product, session = _case(occ_status="EXPIRED")
+    assert _accept(svc, need, occ)["outcome"] == "EXPIRED"
+
+
+def test_unavailable_product_is_refused_before_any_mutation():
+    svc, need, occ, allocs, product, session = _case()
+    product.is_available = False
+    res = _accept(svc, need, occ, expected_version=3)
+    assert res["outcome"] == "PRODUCER_UNAVAILABLE"
+    _no_mutation(session, allocs, product, 100.0)
+
+
+def test_blocked_producer_account_is_refused_before_any_mutation(monkeypatch):
+    async def _blocked(_session, _producer_id):
+        return True
+
+    monkeypatch.setattr(_Service, "_producer_account_blocked", staticmethod(_blocked))
+    svc, need, occ, allocs, product, session = _case()
+    res = _accept(svc, need, occ, expected_version=3)
+    assert res["outcome"] == "PRODUCER_UNAVAILABLE"
+    _no_mutation(session, allocs, product, 100.0)
+
+
+def test_sweep_marks_past_occurrences_expired_with_version_bump_and_expires_their_allocations():
+    class _SweepSession:
+        def __init__(self, rows):
+            self.rows, self.executed, self.flushed = rows, [], False
+
+        async def execute(self, stmt):
+            self.executed.append(stmt)
+            return _Result(self.rows)
+
+        async def flush(self):
+            self.flushed = True
+
+    rows = [
+        types.SimpleNamespace(id=uuid.uuid4(), recurring_need_id=uuid.uuid4(), status="MATCHED", version=4,
+                              notified_at=_NOW),
+        types.SimpleNamespace(id=uuid.uuid4(), recurring_need_id=uuid.uuid4(), status="OPEN", version=1,
+                              notified_at=None),
+    ]
+    sess = _SweepSession(rows)
+    res = run(_Service(sess).expire_past_occurrences())
+    assert res == {"occurrences_expired": 2}
+    assert [r.status for r in rows] == ["EXPIRED", "EXPIRED"] and [r.version for r in rows] == [5, 2]
+    assert len(sess.executed) == 2 and sess.flushed  # le SELECT puis l'UPDATE des allocations PROPOSED
+
+
+def test_sweep_with_nothing_to_expire_is_a_no_op():
+    class _Empty:
+        async def execute(self, stmt):
+            return _Result([])
+
+    assert run(_Service(_Empty()).expire_past_occurrences()) == {"occurrences_expired": 0}
+
+
+def test_latest_digest_snapshot_reads_occurrence_versions_from_the_outbox_payload():
+    class _S:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def scalar(self, _stmt):
+            return self.payload
+
+    ok = {"occurrences": [{"occurrence_id": "o1", "version": 7}, {"occurrence_id": "o2", "version": 2}]}
+    assert run(_Service(_S(ok))._latest_digest_snapshot("+226")) == {"o1": 7, "o2": 2}
+    assert run(_Service(_S({"body": "legacy digest"}))._latest_digest_snapshot("+226")) is None
+    assert run(_Service(_S(None))._latest_digest_snapshot("+226")) is None
