@@ -88,6 +88,11 @@ class PricingTier(BaseModel):
     packaging: Optional[str] = None
     base_unit_quantity: float = Field(gt=0)
     min_order_quantity: int = Field(default=1, ge=1)
+    #: INVENTAIRE de cette variante PHYSIQUE (B16) : nombre de conditionnements disponibles. `None` = pas
+    #: d'inventaire par conditionnement (palier tarifaire, produit historique, stock en vrac) — le stock reste alors
+    #: `Product.quantity_for_sale`. Renseigné UNIQUEMENT pour un palier qui a un `packaging` (un conditionnement
+    #: physique : sachet, bidon…), jamais pour un simple palier de quantité. Voir `domain/package_inventory.py`.
+    available_count: Optional[int] = Field(default=None, ge=0)
 
     model_config = {"frozen": True}
 
@@ -115,6 +120,7 @@ def validate_pricing_tiers(
 
     tiers: List[PricingTier] = []
     seen: set = set()
+    seen_identity: set = set()
     for i, raw in enumerate(raw_tiers):
         if not isinstance(raw, dict):
             raise PricingTierError(
@@ -145,13 +151,33 @@ def validate_pricing_tiers(
         packaging = packaging or None
 
         dedup_key = (round(quantity, 6), unit_raw.upper(), (packaging or "").lower())
+        label = f"{quantity} {unit_raw}" + (f" ({packaging})" if packaging else "")
         if dedup_key in seen:
-            label = f"{quantity} {unit_raw}" + (f" ({packaging})" if packaging else "")
             raise PricingTierError(f"pricing_tiers[{i}] : tarif en double ({label}).")
         seen.add(dedup_key)
 
         base_unit_quantity = quantity * (_unit_factor(unit_raw) / base_factor)
+        # IDENTITÉ d'une variante = (type de conditionnement, taille CANONIQUE) : « sachet 500 ml », « sachet
+        # 0,5 L » et « sachet 50 cl » sont UNE variante ; « sachet 500 ml » et « bidon 500 ml » en sont DEUX.
+        identity = ((packaging or "").lower(), round(base_unit_quantity, 6))
+        if identity in seen_identity:
+            raise PricingTierError(f"pricing_tiers[{i}] : tarif en double ({label}, même taille canonique).")
+        seen_identity.add(identity)
         tier_id = str(raw.get("tier_id") or uuid.uuid4().hex[:12])
+        count_raw = raw.get("available_count", raw.get("count"))
+        available_count: Optional[int] = None
+        if count_raw not in (None, ""):
+            try:
+                count_f = float(str(count_raw))
+            except (TypeError, ValueError) as exc:
+                raise PricingTierError(f"pricing_tiers[{i}] : nombre de conditionnements invalide.") from exc
+            if count_f < 0 or count_f != int(count_f):
+                raise PricingTierError(f"pricing_tiers[{i}] : nombre de conditionnements invalide.")
+            if not packaging:
+                raise PricingTierError(
+                    f"pricing_tiers[{i}] : un nombre de conditionnements exige un type de conditionnement."
+                )
+            available_count = int(count_f)
         min_order_quantity_raw = raw.get("min_order_quantity") or 1
         try:
             min_order_quantity = int(min_order_quantity_raw)
@@ -168,6 +194,7 @@ def validate_pricing_tiers(
                     packaging=packaging,
                     base_unit_quantity=base_unit_quantity,
                     min_order_quantity=min_order_quantity,
+                    available_count=available_count,
                 )
             )
         except Exception as exc:  # pydantic.ValidationError
@@ -177,7 +204,13 @@ def validate_pricing_tiers(
 
 
 def tiers_to_dicts(tiers: List[PricingTier]) -> List[Dict[str, Any]]:
-    return [t.model_dump() for t in tiers]
+    out: List[Dict[str, Any]] = []
+    for t in tiers:
+        d = t.model_dump()
+        if d.get("available_count") is None:
+            d.pop("available_count", None)  # forme historique inchangée pour un palier sans inventaire
+        out.append(d)
+    return out
 
 
 def describe_tiers(raw_tiers: Optional[List[Dict[str, Any]]]) -> Optional[str]:

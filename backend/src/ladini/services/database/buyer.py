@@ -1,6 +1,7 @@
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import and_, case, desc, func, literal, or_, select, update
@@ -36,10 +37,14 @@ from ladini.domain.models import (
 from ladini.domain.order_policy import (
     validate_minimum_order_quantity,
 )
+from ladini.domain.package_inventory import (
+    check_variant_availability,
+    debit_stock_for_item,
+    restore_stock_for_item,
+)
 from ladini.domain.pricing_tiers import (
     PricingTierError,
     compute_line,
-    resolve_stock_debit,
     resolve_tier,
 )
 from ladini.domain.quantity_unit import is_livestock_product
@@ -740,9 +745,22 @@ class BuyerMixin(BaseMixin):
                     reason="below_minimum_order_quantity",
                 )
 
-            if product.quantity_for_sale < stock_debit:
+            # B16 : disponibilité ET débit par la primitive UNIQUE (variante physique : compte + stock physique ;
+            # sinon stock physique seul). Refus = aucune mutation.
+            refusal = debit_stock_for_item(
+                product,
+                SimpleNamespace(tier_id=tier_id, quantity=qty, base_unit_quantity=base_unit_quantity),
+            )
+            if refusal is not None:
+                if refusal.get("reason") == "insufficient_package_stock":
+                    raise BusinessRuleException(
+                        f"Stock insuffisant pour {product.name} : seulement {refusal['available_packages']} "
+                        f"{refusal.get('packaging') or 'conditionnement'}(s) disponible(s) sur "
+                        f"{refusal['requested_packages']} demandé(s).",
+                        reason="insufficient_package_stock",
+                    )
                 raise BusinessRuleException(
-                    f"Stock insuffisant pour {product.name} (Dispo: {product.quantity_for_sale}).",
+                    f"Stock insuffisant pour {product.name} (Dispo: {refusal.get('available')}).",
                     reason="insufficient_stock",
                 )
 
@@ -778,9 +796,6 @@ class BuyerMixin(BaseMixin):
             # incident réel 2026-09-15). Conversion explicite avant
             # l'arithmétique, jamais d'opérateur augmenté sur la colonne
             # Decimal directement.
-            product.quantity_for_sale = (
-                float(product.quantity_for_sale or 0.0) - stock_debit
-            )
             summary_items.append(f"{product.name} (x{qty} {product.unit or 'u'})")
             line_items_for_event.append(
                 {"sub_category_id": product.sub_category_id, "quantity": stock_debit, "unit": product.unit}
@@ -1116,7 +1131,7 @@ class BuyerMixin(BaseMixin):
                     # portent le même produit, la 2e doit voir le recrédit de
                     # la 1re déjà appliqué sur le MÊME objet `product`.
                     previous_quantity = float(product.quantity_for_sale or 0.0)
-                    product.quantity_for_sale = previous_quantity + resolve_stock_debit(item)
+                    restore_stock_for_item(product, item)  # B16 : stock physique ET compte de la variante
                     await BusinessEventEmitter(current_session).emit_product_quantity_changed(
                         product, previous_quantity=previous_quantity, source="order_cancelled_recredit_buyer"
                     )
@@ -1384,6 +1399,8 @@ class BuyerMixin(BaseMixin):
         quantity: float,
         unit: Optional[str] = None,
         buyer_phone: Optional[str] = None,
+        tier_id: Optional[str] = None,
+        package_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Vérifie et verrouille la disponibilité réelle d'un produit avant précommande.
 
@@ -1425,6 +1442,26 @@ class BuyerMixin(BaseMixin):
                 }
 
             available = float(product.quantity_for_sale or 0.0)
+            if tier_id and package_count:
+                # B16 : un conditionnement (variante physique) se vérifie PAR VARIANTE — 60 bidons de 500 ml sur
+                # 50 refusent même si le stock global (58 L) couvre 30 L.
+                variant_refusal = check_variant_availability(product, tier_id, int(package_count))
+                if variant_refusal is not None:
+                    return {
+                        "status": "error",
+                        "product_id": str(product.id),
+                        "product_name": product.name,
+                        "available_quantity": available,
+                        "requested_quantity": requested,
+                        "message": (
+                            f"Stock insuffisant pour {product.name} : seulement "
+                            f"{variant_refusal['available_packages']} {variant_refusal.get('packaging') or 'conditionnement'}(s) "
+                            f"de {variant_refusal.get('package_size')} {variant_refusal.get('package_unit')} "
+                            f"disponible(s) sur {variant_refusal['requested_packages']} demandé(s)."
+                        ),
+                        "fallback": [],
+                        **variant_refusal,
+                    }
             if available >= requested:
                 response_unit = _guess_display_unit(product.name, unit or product.unit)
                 return {
@@ -1434,7 +1471,9 @@ class BuyerMixin(BaseMixin):
                     "available_quantity": available,
                     "requested_quantity": requested,
                     "unit": response_unit,
-                    "unit_price": float(product.price or 0.0),
+                    # B16 : un produit à paliers n'a PAS de prix unitaire — `Product.price` n'en est que le shadow
+                    # legacy ; ne jamais l'exposer comme un prix par unité (None = « choisir un conditionnement »).
+                    "unit_price": None if _has_uncertified_tiers(product) else float(product.price or 0.0),
                     "producer_id": str(product.producer_id)
                     if product.producer_id
                     else None,
@@ -2440,21 +2479,13 @@ class BuyerMixin(BaseMixin):
             # Quantité en unité de BASE à débiter — diffère de `requested`
             # (le nombre de paquets/palier affiché à l'acheteur) dès qu'un
             # `tier_id` est impliqué. Voir domain/pricing_tiers.py.
-            stock_debit = resolve_stock_debit(item)
             available = float(product.quantity_for_sale or 0.0)
-            if available < stock_debit:
-                insufficient.append(
-                    {
-                        "product_id": str(product.id),
-                        "name": product.name,
-                        "requested": stock_debit,
-                        "available": available,
-                        "unit": (product.unit or "KG").upper(),
-                    }
-                )
+            # B16 : débit par la primitive UNIQUE — une variante physique est débitée (compte ET stock) sous
+            # le verrou du produit ; 41 bidons de 500 ml sur 40 refusent MÊME si le stock global suffit.
+            refusal = debit_stock_for_item(product, item)
+            if refusal is not None:
+                insufficient.append(refusal)
                 continue
-
-            product.quantity_for_sale = available - stock_debit
             await BusinessEventEmitter(current_session).emit_product_quantity_changed(
                 product, previous_quantity=available, source="order_debit_direct"
             )

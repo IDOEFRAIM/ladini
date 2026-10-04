@@ -272,14 +272,17 @@ class StockGateway(_BaseGateway):
         quantity: float,
         unit: str,
         buyer_phone: str,
+        tier_id: Optional[str] = None,
+        package_count: Optional[int] = None,
     ) -> Dict[str, Any]:
-        return await self._call(
-            "validate_stock_availability_atomic",
-            product_id=product_id,
-            quantity=quantity,
-            unit=unit,
-            buyer_phone=buyer_phone,
-        )
+        kwargs: Dict[str, Any] = {
+            "product_id": product_id, "quantity": quantity, "unit": unit, "buyer_phone": buyer_phone,
+        }
+        if tier_id and package_count:
+            # B16 : un conditionnement se vérifie PAR VARIANTE (compte de conditionnements disponibles).
+            kwargs["tier_id"] = str(tier_id)
+            kwargs["package_count"] = int(package_count)
+        return await self._call("validate_stock_availability_atomic", **kwargs)
 
 
 # ── Product Search ─────────────────────────────────────────────────

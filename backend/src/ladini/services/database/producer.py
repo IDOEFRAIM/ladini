@@ -33,10 +33,14 @@ from ladini.domain.models import (
     SubCategory,
     User,
 )
+from ladini.domain.package_inventory import (
+    PackageInventoryError,
+    restore_stock_for_item,
+    validate_inventory_invariant,
+)
 from ladini.domain.pricing_tiers import (
     PricingTierError,
     describe_tiers,
-    resolve_stock_debit,
     resolve_tier,
     tiers_to_dicts,
     validate_pricing_tiers,
@@ -663,6 +667,13 @@ class ProducerMgmtMixin(BaseMixin):
         except PricingTierError as exc:
             raise BusinessRuleException(str(exc)) from exc
         clean_tiers: Optional[list] = tiers_to_dicts(validated_tiers) or None
+        # B16 : INVENTAIRE par conditionnement — tous les conditionnements ont un compte ET
+        # Σ comptes × taille canonique == stock physique publié (Decimal). Jamais un compte « à peu près ».
+        try:
+            validate_inventory_invariant(clean_tiers, quantity_for_sale)
+        except PackageInventoryError as exc:
+            logger.warning("PRODUCT_PACKAGE_INVENTORY_REJECTED | reason=%s | %s", exc.reason, exc)
+            raise BusinessRuleException(str(exc), reason=exc.reason) from exc
 
         commercial_pricing = certify_commercial_offer(
             commercial_offer,
@@ -2083,7 +2094,7 @@ class ProducerMgmtMixin(BaseMixin):
                     # portent le même produit, la 2e doit voir le recrédit de
                     # la 1re déjà appliqué sur le MÊME objet `product`.
                     previous_quantity = float(product.quantity_for_sale or 0.0)
-                    product.quantity_for_sale = previous_quantity + resolve_stock_debit(item)
+                    restore_stock_for_item(product, item)  # B16 : stock physique ET compte de la variante
                     await BusinessEventEmitter(current_session).emit_product_quantity_changed(
                         product, previous_quantity=previous_quantity, source="order_cancelled_recredit_producer"
                     )

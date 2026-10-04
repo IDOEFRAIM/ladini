@@ -804,14 +804,16 @@ def offer_execution_payload(offer: "CommercialOffer") -> Dict[str, Any]:
         "price": normalized.unit_price,
     }
     if pr.basis == PriceBasis.PER_PACKAGE and pk is not None and pk.is_content_known:
-        payload["pricing_tiers"] = [
-            {
-                "quantity": pk.content_amount,
-                "unit": pk.content_unit,
-                "price": pr.amount,
-                "packaging": (pk.package_type or "").lower() or None,
-            }
-        ]
+        tier: Dict[str, Any] = {
+            "quantity": pk.content_amount,
+            "unit": pk.content_unit,
+            "price": pr.amount,
+            "packaging": (pk.package_type or "").lower() or None,
+        }
+        if pk.count and tier["packaging"]:
+            # B16 : « 100 sachets de 500 ml » — le COMPTE est l'inventaire de cette variante (Σ == stock publié).
+            tier["available_count"] = int(pk.count)
+        payload["pricing_tiers"] = [tier]
     return payload
 
 

@@ -26,9 +26,7 @@ from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.core.settings import settings
 from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.models import Order, OrderItem, Producer, Product, User
-from ladini.domain.pricing_tiers import (
-    resolve_stock_debit,
-)
+from ladini.domain.package_inventory import debit_stock_for_item
 from ladini.services.payments.paydunya_client import PaydunyaClient, PaydunyaError
 
 from .base import BaseMixin
@@ -281,20 +279,11 @@ class EscrowMixin(BaseMixin):
             # Voir domain/pricing_tiers.py — quantité en unité de BASE à
             # débiter, distincte de `requested` (nombre de paquets/palier)
             # dès qu'un `tier_id` est impliqué.
-            stock_debit = resolve_stock_debit(item)
             available = float(product.quantity_for_sale or 0.0)
-            if available < stock_debit:
-                insufficient.append(
-                    {
-                        "product_id": str(product.id),
-                        "name": product.name,
-                        "requested": stock_debit,
-                        "available": available,
-                        "unit": (product.unit or "KG").upper(),
-                    }
-                )
+            refusal = debit_stock_for_item(product, item)  # B16 : variante physique = compte ET stock
+            if refusal is not None:
+                insufficient.append(refusal)
                 continue
-            product.quantity_for_sale = available - stock_debit
             await BusinessEventEmitter(current_session).emit_product_quantity_changed(
                 product, previous_quantity=available, source="order_debit_escrow"
             )
