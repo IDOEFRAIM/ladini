@@ -7,6 +7,12 @@ from sqlalchemy import and_, desc, func, select
 
 from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.models import Order, OrderItem, Product
+from ladini.domain.package_inventory import (
+    PackageInventoryError,
+    has_package_inventory,
+    merge_tiers_preserving_inventory,
+    validate_inventory_invariant,
+)
 from ladini.domain.pricing_tiers import (
     PricingTierError,
     tiers_to_dicts,
@@ -104,6 +110,21 @@ class ProductMixin(BaseMixin):
             was_sellable = bool(product.is_available) and float(product.quantity_for_sale or 0.0) > 0
             previous_quantity = float(product.quantity_for_sale or 0.0)
 
+            # B17 : un produit à INVENTAIRE par conditionnement (comptes par variante, B16) ne se corrige pas par
+            # un stock brut ni un changement d'unité — le total physique et les comptes divergeraient. Fail-closed
+            # (la mise à jour sémantique du stock conditionné est un chantier distinct).
+            if has_package_inventory(product.pricing_tiers) and (
+                quantity is not None or (unit is not None and clean_text(unit, "unit", max_length=16))
+            ):
+                return {
+                    "status": "error",
+                    "reason": "package_inventory_requires_counts",
+                    "message": (
+                        "Ce produit est géré par conditionnement : le stock ne peut pas être corrigé en litres/kilos "
+                        "seuls (les nombres de sachets/bidons deviendraient faux)."
+                    ),
+                }
+
             changed: List[str] = []
             if price is not None:
                 product.price = positive_float(price, "price", allow_zero=True)
@@ -133,7 +154,18 @@ class ProductMixin(BaseMixin):
                     )
                 except PricingTierError as exc:
                     return {"status": "error", "message": str(exc)}
-                product.pricing_tiers = tiers_to_dicts(validated_tiers) or None
+                # B17 : l'inventaire (compte par variante) appartient au SERVEUR — fusion par identité canonique
+                # contre la ligne VERROUILLÉE ; un cache de conversation périmé ne peut ni effacer ni ressusciter un
+                # compte (jamais « remplacer tout pricing_tiers »).
+                try:
+                    new_tiers = merge_tiers_preserving_inventory(product.pricing_tiers, tiers_to_dicts(validated_tiers))
+                except PackageInventoryError as exc:
+                    return {"status": "error", "reason": exc.reason, "message": str(exc)}
+                try:
+                    validate_inventory_invariant(new_tiers, product.quantity_for_sale)
+                except PackageInventoryError as exc:
+                    return {"status": "error", "reason": exc.reason, "message": str(exc)}
+                product.pricing_tiers = new_tiers or None
                 changed.append("tarifs multiples")
 
             if not changed:

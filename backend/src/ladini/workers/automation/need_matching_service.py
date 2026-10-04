@@ -125,7 +125,13 @@ _CANDIDATES_SQL = text(
     # Un produit à paliers SANS prix certifié n'a pas de prix par unité : `p.price` n'est qu'un shadow legacy
     # (prix brut du 1er palier) et servirait de `unit_price` d'allocation -> jamais candidat au matching récurrent.
     "AND (p.commercial_pricing IS NOT NULL OR p.pricing_tiers IS NULL OR "
-    "CASE WHEN jsonb_typeof(p.pricing_tiers) = 'array' THEN jsonb_array_length(p.pricing_tiers) ELSE 0 END = 0)"
+    "CASE WHEN jsonb_typeof(p.pricing_tiers) = 'array' THEN jsonb_array_length(p.pricing_tiers) ELSE 0 END = 0) "
+    # B17 : un produit vendu PAR CONDITIONNEMENT (sachet, bidon... — comptes par variante) n'est JAMAIS candidat :
+    # l'allocation récurrente débite l'unité de base à un prix par unité, ce qui désynchroniserait le compte des
+    # variantes et prendrait le prix d'un conditionnement pour un prix par litre/kilo.
+    "AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements("
+    "CASE WHEN jsonb_typeof(p.pricing_tiers) = 'array' THEN p.pricing_tiers ELSE '[]'::jsonb END) AS pt(tier) "
+    "WHERE COALESCE(pt.tier ->> 'packaging', '') <> '')"
 )
 
 _ACTIVE_ALLOCATIONS_SQL = text(

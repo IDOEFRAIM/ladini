@@ -134,3 +134,120 @@ def test_restore_returns_package_and_litres_once_and_rollback_is_clean(pg_dsn):
     assert _state(pg_dsn, pid)[1]["t500"] == 40
     asyncio.run(restore(True))
     assert _state(pg_dsn, pid) == (58.0, {"t500": 50, "t330": 100})
+
+
+# ─────────────────────────────── B17 : writers, recurring, concurrence annulation/achat, rollback ───────────────────────
+
+
+def test_price_only_writer_merge_persists_and_keeps_counts_in_real_jsonb(pg_dsn):
+    from ladini.domain.package_inventory import (
+        assert_package_inventory_consistency,
+        merge_tiers_preserving_inventory,
+    )
+
+    pid = _seed(pg_dsn)
+
+    async def go():
+        engine = _engine(pg_dsn)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as s:
+                product = await _locked(s, pid)
+                incoming = [
+                    {"tier_id": "ignored", "quantity": 0.5, "unit": "LITRE", "price": 650, "packaging": "bidon",
+                     "base_unit_quantity": 0.5, "min_order_quantity": 1, "available_count": 999},  # compte périmé
+                    {"tier_id": "x", "quantity": 0.33, "unit": "LITRE", "price": 350, "packaging": "bidon",
+                     "base_unit_quantity": 0.33, "min_order_quantity": 1},
+                ]
+                product.pricing_tiers = merge_tiers_preserving_inventory(product.pricing_tiers, incoming)
+                await s.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+    qty, counts = _state(pg_dsn, pid)
+    assert counts == {"t500": 50, "t330": 100} and qty == 58.0
+
+    async def reload_check():
+        engine = _engine(pg_dsn)
+        try:
+            async with AsyncSession(engine) as s:
+                product = (await s.execute(select(Product).where(Product.id == pid))).scalar_one()
+                assert_package_inventory_consistency(product)
+                assert {t["tier_id"]: t["price"] for t in product.pricing_tiers} == {"t500": 650, "t330": 350}
+        finally:
+            await engine.dispose()
+
+    asyncio.run(reload_check())
+
+
+def test_recurring_candidates_sql_never_selects_a_package_product(pg_dsn):
+    """Le VRAI SQL du matching récurrent contre PostgreSQL : le produit conditionné est exclu, le simple reste."""
+    from ladini.workers.automation.need_matching_service import _CANDIDATES_SQL
+
+    conn = psycopg2.connect(pg_dsn)
+    try:
+        with conn, conn.cursor() as cur:
+            g = Graph(cur)
+            cur.execute(
+                "update marketplace.products set unit='LITRE', quantity_for_sale=58, is_available=true, "
+                "pricing_tiers=%s where id=%s", (Json(_TIERS), str(g.product)),
+            )
+            plain = g.product_for(unit="LITRE", quantity_for_sale=40)
+            cur.execute("select sub_category_id from marketplace.products where id=%s", (str(g.product),))
+            sub = cur.fetchone()[0]
+            cur.execute(
+                str(_CANDIDATES_SQL).replace(":sub_category_id", "%(sub)s"), {"sub": str(sub)}
+            )
+            rows = {str(r[0]) for r in cur.fetchall()}
+        assert str(plain) in rows and str(g.product) not in rows
+    finally:
+        conn.close()
+
+
+def test_concurrent_cancel_and_buy_end_consistent(pg_dsn):
+    pid = _seed(pg_dsn)
+
+    async def prepare():
+        await _debit(pg_dsn, pid, "t500", 45, 0.5)  # 5 restants
+
+    asyncio.run(prepare())
+
+    async def restore_five():
+        engine = _engine(pg_dsn)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as s:
+                product = await _locked(s, pid)
+                await asyncio.sleep(0.2)
+                restore_stock_for_item(product, _item("t500", 45, 0.5))
+                await s.commit()
+        finally:
+            await engine.dispose()
+
+    async def go():
+        return await asyncio.gather(restore_five(), _debit(pg_dsn, pid, "t500", 8, 0.5))
+
+    _none, refusal = asyncio.run(go())
+    qty, counts = _state(pg_dsn, pid)
+    assert counts["t500"] >= 0 and qty >= 0
+    # restitution d'abord : 50 - 8 = 42 ; achat d'abord : refusé (5 < 8) puis restitution : 50
+    assert (refusal is None and counts["t500"] == 42) or (refusal is not None and counts["t500"] == 50)
+    assert abs(qty - (counts["t500"] * 0.5 + counts["t330"] * 0.33)) < 0.002
+
+
+def test_exception_after_the_variant_mutation_rolls_everything_back(pg_dsn):
+    pid = _seed(pg_dsn)
+
+    async def go():
+        engine = _engine(pg_dsn)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as s:
+                product = await _locked(s, pid)
+                assert debit_stock_for_item(product, _item("t500", 10, 0.5)) is None
+                raise RuntimeError("panne après la mutation, avant le commit")
+        except RuntimeError:
+            pass
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+    assert _state(pg_dsn, pid) == (58.0, {"t500": 50, "t330": 100})

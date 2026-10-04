@@ -203,6 +203,65 @@ def restore_stock_for_item(product: Any, item: Any) -> None:
     _set_quantity(product, available + base)
 
 
+def sells_by_package(tiers: Any) -> bool:
+    """Au moins un palier porte un type de conditionnement : le produit se vend PAR conditionnement
+    (avec ou sans compte — un produit publié avant B16 n'a pas de compte mais reste un produit à paquets)."""
+    return any(isinstance(t, dict) and str(t.get("packaging") or "").strip() for t in (tiers or []))
+
+
+def variant_identity(tier: Any) -> tuple:
+    """Identité CANONIQUE d'une variante : (type de conditionnement, taille en unité de base)."""
+    size = tier.get("base_unit_quantity", tier.get("quantity")) if isinstance(tier, dict) else None
+    return (str((tier or {}).get("packaging") or "").strip().lower(), round(float(size or 0), 6))
+
+
+def merge_tiers_preserving_inventory(existing: Any, incoming: Any) -> List[Dict[str, Any]]:
+    """Fusion d'une liste de paliers ENTRANTE (déjà validée : `base_unit_quantity` renseigné) dans l'existante.
+
+    Règle : l'INVENTAIRE appartient au serveur. Une modification de paliers (prix, etc.) ne peut jamais supprimer
+    ni réécrire un compte : pour une variante reconnue (même identité canonique) on reprend `available_count`
+    ET `tier_id` de la LIGNE VERROUILLÉE, quel que soit ce que porte l'entrant (compte absent, ou périmé parce que
+    copié d'un cache de conversation avant des ventes). Une variante ABSENTE de l'entrant mais encore en stock ne
+    peut pas être supprimée par une simple édition de prix (refus). Une variante NOUVELLE garde son compte déclaré.
+    """
+    old = [t for t in (existing or []) if isinstance(t, dict)]
+    by_identity = {variant_identity(t): t for t in old if str(t.get("packaging") or "").strip()}
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for t in incoming or []:
+        new = dict(t)
+        ident = variant_identity(new)
+        match = by_identity.get(ident) if ident[0] else None
+        if match is not None:
+            seen.add(ident)
+            if match.get("tier_id"):
+                new["tier_id"] = match["tier_id"]
+            if match.get("available_count") is not None:
+                new["available_count"] = match["available_count"]
+            else:
+                new.pop("available_count", None)
+        merged.append(new)
+    for ident, t in by_identity.items():
+        if ident not in seen and int(t.get("available_count") or 0) > 0:
+            raise PackageInventoryError(
+                "Une variante encore en stock ne peut pas être retirée par une modification de prix.",
+                reason="variant_in_stock_cannot_be_removed",
+                packaging=t.get("packaging"),
+                available_count=int(t.get("available_count") or 0),
+            )
+    return merged
+
+
+def assert_package_inventory_consistency(product: Any) -> None:
+    """Produit ENTIÈREMENT conditionné : `quantity_for_sale == Σ available_count × taille canonique` (Decimal).
+
+    `quantity_for_sale` est le stock DISPONIBLE (déjà net des commandes débitées à leur création : aucun stock
+    « réservé » séparé n'existe). Sans compte (produit historique / simples paliers de prix) : rien à affirmer.
+    Un modèle mixte conditionné + vrac n'est pas représentable (documenté) : jamais d'égalité imposée à un
+    produit dont certains conditionnements n'ont pas de compte — `validate_inventory_invariant` le refuse déjà."""
+    validate_inventory_invariant(getattr(product, "pricing_tiers", None), getattr(product, "quantity_for_sale", 0))
+
+
 def describe_variants(tiers: Any) -> List[Dict[str, Any]]:
     """Projection LISIBLE (API/admin) : [{packaging, size, unit, available_count}] — jamais seulement « 58 L »."""
     return [
@@ -232,4 +291,8 @@ __all__ = [
     "debit_stock_for_item",
     "restore_stock_for_item",
     "describe_variants",
+    "sells_by_package",
+    "variant_identity",
+    "merge_tiers_preserving_inventory",
+    "assert_package_inventory_consistency",
 ]
