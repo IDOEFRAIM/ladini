@@ -46,6 +46,7 @@ from ladini.domain.recurring_supply.digest import (
     build_digest_text,
     dedupe_key_for_digest,
     digest_counts,
+    digest_menu_actions,
     digest_signature,
 )
 from ladini.workers.outbox import templates
@@ -152,6 +153,9 @@ class RecurringSupplyDigestService:
                         "payload": {
                             "body": body,
                             "digest_signature": signature,
+                            # B20 : identité + actions du menu numéroté affiché (None : pas de menu) — lu par
+                            # `get_last_interactive_outbound` pour attribuer « 1 »/« voir les détails » à CE digest.
+                            "interactive": {"menu_id": signature, "actions": digest_menu_actions(needs)},
                             "occurrences": [
                                 {
                                     "recurring_need_id": str(r.get("recurring_need_id")) if r.get("recurring_need_id") else None,

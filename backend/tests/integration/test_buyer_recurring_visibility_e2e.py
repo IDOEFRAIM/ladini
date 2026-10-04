@@ -127,12 +127,13 @@ def test_all_six_phrasings_reach_the_list_when_the_llm_classifies_them(phrase: s
     assert st.get("current_goal") == "GET_MY_NEEDS"  # B13 : le goal reste vivant pour « 1 »
 
 
-def test_GAP_no_deterministic_route_without_the_llm_the_list_is_unreachable():
-    """FEATURE GAP : « mes besoins récurrents » n'a AUCUNE route déterministe — sans LLM (ou LLM en échec) le
-    Buyer n'atteint jamais sa liste. Contrairement à « mes commandes » / « mon panier »."""
+def test_B20_deterministic_route_reaches_the_list_even_without_the_llm():
+    """GAP FERMÉ (B20) : « mes besoins récurrents » est une navigation acheteur explicite, résolue sans LLM par l'arbitrage
+    de contexte (`interpreter/context_arbitration.py`) — comme « mes commandes » / « mon panier »."""
     c = Conv([_MILK], llm=_ListLLM(classify=False))
     st = c.say("mes besoins récurrents")
-    assert "Lait" not in _r(st) and "Vos approvisionnements" not in _r(st)
+    assert "list_my_recurring_needs" in c.rt.all_calls
+    assert "Vos approvisionnements" in _r(st) and "Lait" in _r(st)
 
 
 def test_visibility_does_not_depend_on_cron_state_A_active_need_without_occurrence():

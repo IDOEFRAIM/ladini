@@ -508,6 +508,10 @@ class ModerationGateway(_BaseGateway):
     async def get_account_status(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_account_status", phone=phone.strip())
 
+    async def get_last_interactive_outbound(self, phone: str) -> Dict[str, Any]:
+        """B20 — dernier message proactif interactif (attend une réponse nue) envoyé à `phone`."""
+        return await self._call("get_last_interactive_outbound", phone=phone.strip())
+
     async def get_prohibited_terms(self) -> Dict[str, Any]:
         return await self._call("get_prohibited_terms")
 

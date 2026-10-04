@@ -75,6 +75,18 @@ ORDER_CANCELLED_BY_PRODUCER_BUYER = "ORDER_CANCELLED_BY_PRODUCER_BUYER"
 ORDER_CONFIRMED_BY_PRODUCER_BUYER = "ORDER_CONFIRMED_BY_PRODUCER_BUYER"
 
 
+
+#: B20 — messages sortants qui ATTENDENT une réponse nue (« oui », « 1 », « voir les détails »...) : seuls ceux-ci
+#: deviennent propriétaires de la réponse suivante (`get_last_interactive_outbound`). Toute autre notification est
+#: INFORMATIONNELLE : elle ne supplante jamais un menu actif (contrat documenté, voir `context_arbitration.py`).
+#: Les invitations à commande explicite (`OFFRE <ref> <prix>`, `ACHETER <ref>`) portent leur propre commande
+#: auto-suffisante : elles ne sont pas des réponses nues.
+INTERACTIVE_TEMPLATE_OWNERS = {
+    RECURRING_SUPPLY_DIGEST_BUYER: "RECURRING_DIGEST",
+    RECURRING_SUPPLY_ORDER_DELIVERED_BUYER: "ORDER_RECEPTION",
+    PREORDER_RESERVED_PRODUCER: "PRODUCER_ORDER_CONFIRM",
+}
+
 def _render_auction_invite(p: Dict[str, Any]) -> str:
     product = p.get("product") or "un produit"
     qty = _fmt_num(p.get("quantity"))
