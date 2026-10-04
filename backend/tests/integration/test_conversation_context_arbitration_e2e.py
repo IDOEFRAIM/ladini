@@ -397,3 +397,21 @@ def test_unit_arbitration_decisions():
     # menu fantôme
     ghost = ca.resolve_conversation_context({"available_mapping": {"1": "x"}}, "bonjour", role="BUYER")
     assert ghost.kind == ca.ArbitrationKind.SUPERSEDE_STALE_CONTEXT and ghost.reason == "ghost_menu_without_live_pending"
+
+
+def test_unit_recurring_menu_replies_are_deterministic():
+    now = time.time()
+    st = _state("SELECTION_MENU", now - 5, working_memory={"recurring_need_menu": {
+        "mapping": {"1": "CONFIRM:n|o|3", "2": "REJECT:n|o|3", "3": "LIST"}, "created_at": now - 5,
+        "actions": {"1": "CONFIRM", "2": "REJECT", "3": "LIST"}}})
+    st["pending_interaction"]["goal"] = "GET_MY_NEEDS"
+    for text, index in (("1", 1), ("2", 2), ("Accepter les 250 kg", 1), ("refuser", 2), ("retour", 3)):
+        d = ca.resolve_conversation_context(st, text, role="BUYER")
+        assert d.kind == ca.ArbitrationKind.ACTIVE_MENU_ACTION and d.raw["extracted_entities"]["selection_index"] == index, text
+    # une navigation explicite garde la priorité sur les alias du menu
+    assert ca.resolve_conversation_context(st, "mes commandes", role="BUYER").raw["detected_intent"] == "BUYER_LIST_ORDERS"
+    # menu périmé (TTL) : plus de résolution déterministe
+    st["working_memory"]["recurring_need_menu"]["created_at"] = now - 10_000
+    assert ca.resolve_conversation_context(st, "accepter", role="BUYER").kind != ca.ArbitrationKind.ACTIVE_MENU_ACTION
+    # « mes approvisionnements récurrents » est une navigation déterministe
+    assert ca.resolve_conversation_context({}, "mes approvisionnements récurrents", role="BUYER").raw["detected_intent"] == "GET_MY_NEEDS"

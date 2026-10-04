@@ -695,6 +695,12 @@ class RecurringSupplyGateway(_BaseGateway):
     async def list_my_recurring_needs(self, phone: str) -> Dict[str, Any]:
         return await self._call("list_my_recurring_needs", phone=phone)
 
+    async def ensure_next_recurring_occurrence(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+        return await self._call("ensure_next_recurring_occurrence", phone=phone, recurring_need_id=recurring_need_id)
+
+    async def refresh_recurring_need_matching(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+        return await self._call("refresh_recurring_need_matching", phone=phone, recurring_need_id=recurring_need_id)
+
     async def get_recurring_need_detail(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
         return await self._call("get_recurring_need_detail", phone=phone, recurring_need_id=recurring_need_id)
 

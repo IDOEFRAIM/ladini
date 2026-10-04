@@ -965,7 +965,19 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     if resolved is not None:
         kind, target = resolved
         if kind == "DETAIL":
-            return await _show_need_detail(state, mc_runtime, target)
+            logger.info("RECURRING_SELF_SERVICE_OPENED")
+            return await _show_need_detail(state, mc_runtime, target, ensure=True)
+        if kind == "REFRESH":
+            return await _refresh_matching(state, mc_runtime, target)
+        if kind == "ORDERS":
+            from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
+                list_orders,
+            )
+
+            orders_screen: Dict[str, Any] = await list_orders(state, mc_runtime)
+            return orders_screen
+        if kind == "VIEW":
+            return await _show_need_detail(state, mc_runtime, target, ensure=True)
         if kind in ("CONFIRM", "REJECT"):
             need_id, occurrence_id, version = _split_match_target(target)
             return await _respond_to_match(
@@ -1007,6 +1019,8 @@ def _resolve_menu_reply(state: Dict[str, Any]):
 
     mapping: Dict[str, str] = menu.get("mapping") or {}
     chosen = mapping.get(index)
+    if chosen is None:
+        chosen = _chosen_by_text_alias(mapping, text_lower)
     if chosen is None and any(word in text_lower for word in _BACK_WORDS):
         chosen = "LIST"
     if chosen is None:
@@ -1015,10 +1029,32 @@ def _resolve_menu_reply(state: Dict[str, Any]):
         return ("LIST", None)
     # "CONFIRM:<recurring_need_id>" / "REJECT:<recurring_need_id>" (VS4) — préfixe fermé, jamais
     # deviné : une valeur de mapping mal formée retombe sur DETAIL, jamais sur une action muette.
-    for prefix, kind in (("CONFIRM:", "CONFIRM"), ("REJECT:", "REJECT")):
+    for prefix, kind in (("CONFIRM:", "CONFIRM"), ("REJECT:", "REJECT"), ("REFRESH:", "REFRESH"), ("VIEW:", "VIEW")):
         if chosen.startswith(prefix):
             return (kind, chosen[len(prefix):])
+    if chosen == "ORDERS":
+        return ("ORDERS", None)
     return ("DETAIL", chosen)
+
+
+def _chosen_by_text_alias(mapping: Dict[str, str], text_lower: str) -> Optional[str]:
+    """Valeur du menu visée par un alias textuel (« accepter les 250 kg », « rechercher maintenant »...), ou `None`.
+    Vocabulaire unique : `interpreter/context_arbitration.RECURRING_MENU_TEXT_ALIASES`."""
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+        RECURRING_MENU_TEXT_ALIASES,
+        fold,
+    )
+
+    norm = fold(text_lower)
+    if not norm:
+        return None
+    for action, aliases in RECURRING_MENU_TEXT_ALIASES.items():
+        starts = {"CONFIRM": "accepter ", "REJECT": "refuser "}.get(action)
+        if norm in aliases or (starts and norm.startswith(starts)):
+            for value in mapping.values():
+                if value == action or value.startswith(action + ":"):
+                    return value
+    return None
 
 
 async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *, notice: str = "") -> Dict[str, Any]:
@@ -1033,12 +1069,12 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
     if not items:
         return {"final_response": f"{notice}Vous n'avez pas encore de besoin récurrent enregistré.", "status": "COMPLETED"}
 
-    lines = [f"{notice}Vos approvisionnements :", ""]
+    lines = [f"{notice}🔁 Mes besoins récurrents", ""]
     mapping: Dict[str, str] = {}
     for i, item in enumerate(items, start=1):
-        lines.append(f"{i}. {_render_need_line(item)}")
+        lines += _render_need_block(i, item)
         mapping[str(i)] = str(item["recurring_need_id"])
-    lines += ["", "Répondez avec le numéro d'un besoin pour voir sa disponibilité."]
+    lines += ["Répondez avec le numéro du besoin."]
 
     return {
         "final_response": "\n".join(lines),
@@ -1046,9 +1082,63 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
         # (`nodes/cleanup.py::keep_selection_channel`). Avec COMPLETED le goal était effacé et le « 1 » suivant
         # retombait sur le menu générique : liste -> détail -> confirmer était INATTEIGNABLE en vraie conversation.
         "status": "WAITING_INPUT",
-        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time()}},
+        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time(),
+                                                   "actions": {k: "SELECT" for k in mapping}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
+
+
+_WEEKDAYS_FR = {1: "lundi", 2: "mardi", 3: "mercredi", 4: "jeudi", 5: "vendredi", 6: "samedi", 7: "dimanche"}
+_MONTHS_FR = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre",
+              "décembre"]
+
+
+def _frequency_label(item: Dict[str, Any]) -> str:
+    kind = item.get("recurrence_type")
+    days = [d for d in (item.get("weekly_days") or []) if d in _WEEKDAYS_FR]
+    if kind == "WEEKLY_DAYS" and days:
+        return "chaque " + " et ".join(_WEEKDAYS_FR[d] for d in days)
+    return {"DAILY": "chaque jour", "WEEKLY_DAYS": "chaque semaine", "WEEKLY": "chaque semaine",
+            "MONTHLY": "chaque mois", "ONE_OFF": "une seule fois"}.get(str(kind), "chaque jour")
+
+
+def _fmt_date_fr(iso: Any) -> Optional[str]:
+    try:
+        y, m, d = (int(x) for x in str(iso)[:10].split("-"))
+        return f"{d} {_MONTHS_FR[m - 1]}"
+    except (ValueError, IndexError):
+        return None
+
+
+def _need_status_label(status: Any) -> str:
+    return {"ACTIVE": "🟢 Actif", "PAUSED": "⏸ Suspendu"}.get(str(status), "⛔ Annulé")
+
+
+def _availability_label(status: Any, requested: Any, matched: Any, unit: Any) -> Optional[str]:
+    """Libellé de disponibilité d'une occurrence PROPOSABLE (jamais d'invention : `None` si l'info manque)."""
+    if status not in ("OPEN", "MATCHED") or requested is None or matched is None:
+        return None
+    if float(matched) <= 0:
+        return "aucune disponibilité trouvée pour le moment"
+    return f"{_fmt_qty(matched)} / {_fmt_qty(requested)} {unit}"
+
+
+def _render_need_block(index: int, item: Dict[str, Any]) -> List[str]:
+    lines = [f"{index}. {str(item.get('product') or '?').capitalize()}",
+             f"   {_fmt_qty(item.get('quantity'))} {item.get('unit')} {_frequency_label(item)}",
+             f"   {_need_status_label(item.get('status'))}"]
+    when = _fmt_date_fr(item.get("next_occurrence_date"))
+    if item.get("status") == "ACTIVE":
+        lines.append(f"   Prochaine livraison : {when or 'à planifier'}")
+        occ_status = item.get("next_occurrence_status") or ("OPEN" if item.get("next_occurrence_id") else None)
+        if occ_status in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
+            lines.append("   ✅ Approvisionnement accepté" if occ_status == "ACCEPTED" else "   ✅ Approvisionnement partiellement accepté")
+        else:
+            avail = _availability_label(occ_status, item.get("requested_quantity"), item.get("matched_quantity"), item.get("unit"))
+            if avail:
+                lines.append(f"   Disponibilité actuelle : {avail}")
+    lines.append("")
+    return lines
 
 
 def _render_need_line(item: Dict[str, Any]) -> str:
@@ -1068,7 +1158,9 @@ def _render_need_line(item: Dict[str, Any]) -> str:
     return label
 
 
-def _fmt_qty(value: float) -> str:
+def _fmt_qty(value: Any) -> str:
+    if value is None:
+        return "?"
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
@@ -1087,9 +1179,46 @@ def _split_match_target(target: Any) -> tuple[str, Optional[str], Optional[int]]
     return parts[0], None, None
 
 
-async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str) -> Dict[str, Any]:
+async def _refresh_matching(state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str) -> Dict[str, Any]:
+    """« Rechercher maintenant » : le VRAI moteur de matching (celui du cron) sur la prochaine occurrence, puis l'écran à
+    jour (nouvelle `version` si les allocations ont changé). N'envoie aucun digest."""
+    gw = RecurringSupplyGateway(mc_runtime)
+    logger.info("RECURRING_MANUAL_MATCH_TRIGGERED")
+    notice = ""
+    try:
+        res = await gw.refresh_recurring_need_matching(phone=str(state.get("user_phone")), recurring_need_id=recurring_need_id)
+    except MCPCallError:
+        res = {}
+        notice = "⚠️ La recherche n'a pas pu aboutir — réessayez dans un instant.\n\n"
+    outcome = (res or {}).get("outcome")
+    if outcome == "NO_AVAILABILITY":
+        notice = "🔎 Recherche terminée : aucune disponibilité trouvée pour le moment.\n\n"
+    elif outcome == "MATCHED":
+        notice = "🔎 Recherche terminée.\n\n"
+    elif outcome == "MATCH_ERROR":
+        notice = "⚠️ La recherche n'a pas pu aboutir — réessayez dans un instant.\n\n"
+    return await _show_need_detail(state, mc_runtime, recurring_need_id, notice=notice)
+
+
+def _coverage_note(requested: Any, matched: float, unit: str) -> str:
+    if requested is not None and matched >= float(requested) > 0:
+        return f"✅ Disponibilité complète : {_fmt_qty(matched)} {unit}"
+    return f"⚠️ {_fmt_qty(matched)} {unit} disponibles sur {_fmt_qty(requested)} {unit} demandés"
+
+
+async def _show_need_detail(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str, *, ensure: bool = False, notice: str = ""
+) -> Dict[str, Any]:
+    """Écran d'UN besoin + de sa PROCHAINE occurrence, selon l'état réel (self-service B21, aucun digest requis) :
+    absente (matérialisée à la demande) / OPEN sans offre (« Rechercher maintenant ») / proposition (accepter-refuser,
+    version et identité EXACTES) / déjà acceptée (commandes) / terminale (demandé vs reçu)."""
     phone = state.get("user_phone")
     gw = RecurringSupplyGateway(mc_runtime)
+    if ensure:
+        try:
+            await gw.ensure_next_recurring_occurrence(phone=str(phone), recurring_need_id=recurring_need_id)
+        except MCPCallError:
+            logger.warning("recurring_self_service.ensure_failed")  # le détail reste consultable
     try:
         detail = await gw.get_recurring_need_detail(phone=str(phone), recurring_need_id=recurring_need_id)
     except MCPCallError:
@@ -1097,37 +1226,81 @@ async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, re
     if not isinstance(detail, dict) or detail.get("status") != "success":
         return {"final_response": "Je n'ai pas pu récupérer ce détail.", "status": "COMPLETED"}
 
-    allocations = [
-        AllocationLine(
-            producer_label=a["producer_label"],
-            quantity=Decimal(str(a["quantity"])),
-            unit_price=Decimal(str(a["unit_price"])),
-            unit=a["unit"],
-        )
-        for a in detail.get("allocations") or []
+    unit = str(detail.get("unit") or "")
+    product = str(detail.get("product") or "").capitalize()
+    header = [
+        f"{notice}📦 {product}",
+        f"Besoin : {_fmt_qty(detail.get('requested_quantity'))} {unit} · {_frequency_label(detail)}",
+        f"Statut : {_need_status_label(detail.get('need_status'))}",
     ]
-    confirmable = bool(allocations)
-    text = build_detail_text(
-        product=detail["product"],
-        requested_quantity=Decimal(str(detail["requested_quantity"])),
-        unit=detail["unit"],
-        allocations=allocations,
-        confirmable=confirmable,
-    )
-    # B12 : la confirmation depuis cet écran vise l'occurrence ET la version AFFICHÉES (identité
-    # exacte, même service durci que la réponse au digest) — jamais « la prochaine ouverte ».
-    target = _join_match_target(recurring_need_id, detail.get("occurrence_id"), detail.get("occurrence_version"))
-    mapping = (
-        {"1": f"CONFIRM:{target}", "2": f"REJECT:{target}", "3": "LIST"}
-        if confirmable
-        else {"1": "LIST", "2": "LIST"}
-    )
+    occ_status = detail.get("occurrence_status")
+    when = _fmt_date_fr(detail.get("occurrence_date"))
+    back = {"1": "LIST"}
+
+    if detail.get("occurrence_date") is None:
+        lines = header + [""]
+        last = detail.get("last_occurrence")
+        if last:
+            lines += [f"Dernière livraison ({_fmt_date_fr(last.get('date')) or '—'}) :",
+                      f"Demandé : {_fmt_qty(last.get('requested_quantity'))} {last.get('unit') or unit}"]
+            if last.get("status") in ("FULFILLED", "PARTIALLY_FULFILLED", "UNFULFILLED"):
+                label = {"FULFILLED": "livré", "PARTIALLY_FULFILLED": "partiellement livré", "UNFULFILLED": "non livré"}[last["status"]]
+                lines += [f"Reçu : {_fmt_qty(last.get('quantity_delivered'))} {last.get('unit') or unit}", f"Résultat : {label}"]
+            elif last.get("status") in ("REJECTED", "EXPIRED"):
+                lines += ["Résultat : " + ("refusé" if last["status"] == "REJECTED" else "expiré")]
+            lines.append("")
+        lines.append("Aucune prochaine livraison planifiée pour le moment.")
+        lines += ["", "1. Retour"]
+        mapping = back
+    elif occ_status in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
+        orders = detail.get("orders") or []
+        lines = header + ["", f"📦 Livraison du {when}",
+                          f"Demandé : {_fmt_qty(detail.get('requested_quantity'))} {unit}",
+                          "Approvisionnement déjà accepté." if occ_status == "ACCEPTED" else f"Approvisionnement déjà accepté (partiellement : {_fmt_qty(detail.get('quantity_confirmed'))} sur {_fmt_qty(detail.get('requested_quantity'))} {unit}).",
+                          f"{len(orders)} commande(s) créée(s) — {_fmt_qty(detail.get('quantity_confirmed'))} {unit} :"]
+        lines += [f"- {o['producer_label']} : {_fmt_qty(o['quantity'])} {unit}" for o in orders]
+        lines += ["", "1. Voir les commandes", "2. Retour"]
+        mapping = {"1": "ORDERS", "2": "LIST"}
+    else:
+        allocations = [
+            AllocationLine(
+                producer_label=a["producer_label"], quantity=Decimal(str(a["quantity"])),
+                unit_price=Decimal(str(a["unit_price"])), unit=a["unit"],
+            )
+            for a in detail.get("allocations") or []
+        ]
+        confirmable = bool(allocations)
+        matched = float(detail.get("quantity_matched") or sum(float(a.quantity) for a in allocations))
+        logger.info("RECURRING_PROPOSAL_VIEWED")
+        if confirmable:
+            body = build_detail_text(
+                product=detail["product"], requested_quantity=Decimal(str(detail["requested_quantity"])), unit=detail["unit"],
+                allocations=allocations, confirmable=True,
+            )
+            # B12 : la confirmation depuis cet écran vise l'occurrence ET la version AFFICHÉES (identité exacte, même
+            # service durci que la réponse au digest) — jamais « la prochaine ouverte ».
+            target = _join_match_target(recurring_need_id, detail.get("occurrence_id"), detail.get("occurrence_version"))
+            mapping = {"1": f"CONFIRM:{target}", "2": f"REJECT:{target}", "3": "LIST"}
+            lines = header + [f"Prochaine livraison : {when}", _coverage_note(detail.get("requested_quantity"), matched, unit), "",
+                              body, "", "_Tapez *actualiser* pour relancer la recherche._"]
+        else:
+            lines = header + ["", f"📦 Livraison du {when}", f"Demandé : {_fmt_qty(detail.get('requested_quantity'))} {unit}",
+                              "Aucune disponibilité trouvée pour cette occurrence.", "",
+                              "1. Rechercher maintenant", "2. Retour"]
+            mapping = {"1": f"REFRESH:{recurring_need_id}", "2": "LIST"}
     return {
-        "final_response": text,
+        "final_response": "\n".join(lines),
         "status": "WAITING_INPUT",  # B13 : voir `_render_needs_list` (garde le goal vivant pour « 1/2/3 »)
-        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time()}},
+        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time(),
+                                                   "actions": {k: _menu_action_of(v) for k, v in mapping.items()}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
+
+
+def _menu_action_of(value: str) -> str:
+    """Action FERMÉE d'une entrée de menu récurrent (pour l'arbitrage de contexte : alias textuels déterministes)."""
+    head = str(value).split(":", 1)[0]
+    return head if head in {"CONFIRM", "REJECT", "REFRESH", "ORDERS", "VIEW", "LIST"} else "SELECT"
 
 
 # (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT" ; élargi 2026-09-26 au 2e call-site) : les DEUX

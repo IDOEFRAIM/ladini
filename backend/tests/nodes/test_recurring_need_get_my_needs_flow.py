@@ -66,8 +66,8 @@ def test_first_visit_renders_the_list_with_availability_and_sets_a_menu():
     state = make_state(current_goal="GET_MY_NEEDS")
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
 
-    assert "Tomate" in result["final_response"] and "40/40 KG" in result["final_response"]
-    assert "Poulet" in result["final_response"] and "0/30 UNITE" in result["final_response"]
+    assert "Tomate" in result["final_response"] and "Disponibilité actuelle : 40 / 40 KG" in result["final_response"]
+    assert "Poulet" in result["final_response"] and "aucune disponibilité trouvée" in result["final_response"]
     assert result["pending_interaction"]["kind"] == "SELECTION_MENU"
     assert result["pending_interaction"]["goal"] == "GET_MY_NEEDS"
     mapping = result["working_memory"]["recurring_need_menu"]["mapping"]
@@ -121,8 +121,9 @@ def test_the_detail_screen_offers_no_confirmation_when_nothing_is_available():
     pending_menu_state = _list_state_after_first_visit()
     empty_detail = {**_DETAIL_RESPONSE, "allocations": []}
     result = _run(pending_menu_state, {"get_recurring_need_detail": empty_detail})
-    assert "Confirmer" not in result["final_response"]
-    assert result["working_memory"]["recurring_need_menu"]["mapping"] == {"1": "LIST", "2": "LIST"}
+    assert "Confirmer" not in result["final_response"] and "Rechercher maintenant" in result["final_response"]
+    # B21 : sans disponibilité, l'action est « Rechercher maintenant » (matching à la demande), jamais « Accepter ».
+    assert result["working_memory"]["recurring_need_menu"]["mapping"] == {"1": "REFRESH:need-tomate", "2": "LIST"}
 
 
 # ── confirmer / refuser une proposition (VS4) ──────────────────────────────
@@ -176,7 +177,7 @@ def test_option_three_returns_to_the_list_without_calling_the_gateway():
     # Aucune réponse stubée pour accept_match_proposal : si le code l'appelait quand même,
     # StubRuntime lèverait — la réussite du test prouve que l'appel n'a jamais eu lieu.
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
-    assert "Vos approvisionnements" in result["final_response"]
+    assert "Mes besoins récurrents" in result["final_response"]
 
 
 # =====================================================================
@@ -311,7 +312,7 @@ def test_returning_from_the_detail_screen_shows_the_list_again():
         working_memory={"recurring_need_menu": {"mapping": {"1": "LIST", "2": "LIST"}, "created_at": time.time()}},
     )
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
-    assert "Vos approvisionnements" in result["final_response"]
+    assert "Mes besoins récurrents" in result["final_response"]
 
 
 def test_a_free_text_retour_reply_also_returns_to_the_list():
@@ -319,7 +320,7 @@ def test_a_free_text_retour_reply_also_returns_to_the_list():
     state["transaction_payload"] = {}
     state["normalized_text"] = "retour"
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
-    assert "Vos approvisionnements" in result["final_response"]
+    assert "Mes besoins récurrents" in result["final_response"]
 
 
 # ── protections ────────────────────────────────────────────────────────────
@@ -329,7 +330,7 @@ def test_an_invalid_index_re_renders_the_list_with_a_notice():
     state["transaction_payload"] = {"selection_index": "99"}
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
     assert "Je n'ai pas compris ce choix." in result["final_response"]
-    assert "Vos approvisionnements" in result["final_response"]
+    assert "Mes besoins récurrents" in result["final_response"]
 
 
 def test_a_stale_menu_past_the_ttl_is_treated_as_a_fresh_visit():
@@ -338,7 +339,7 @@ def test_a_stale_menu_past_the_ttl_is_treated_as_a_fresh_visit():
     state["pending_interaction"]["created_at"] = time.time() - 3600  # 1h — largement expiré
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
     # Une sélection périmée ne doit JAMAIS être appliquée : on retombe sur la liste, pas le détail.
-    assert "Vos approvisionnements" in result["final_response"]
+    assert "Mes besoins récurrents" in result["final_response"]
     assert "Coopérative A" not in result["final_response"]
 
 
@@ -352,7 +353,7 @@ def test_a_pending_interaction_from_an_unrelated_tunnel_is_never_touched():
         working_memory={},
     )
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
-    assert "Vos approvisionnements" in result["final_response"]
+    assert "Mes besoins récurrents" in result["final_response"]
 
 
 def _list_state_after_first_visit():
