@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from ladini.domain.models import (
     DemandSignal,
@@ -166,6 +166,61 @@ class ModerationMixin:
             "is_blocked": acc == "BLOCKED",
             "is_banned": acc == "BANNED",
             "blocked_reason": user.blocked_reason,
+        }
+
+    # ── Lecture : dernier message sortant INTERACTIF (attend une réponse nue) ───────────────────────────────
+    async def get_last_interactive_outbound(self, phone: str) -> Dict[str, Any]:
+        """B20 — le dernier message PROACTIF envoyé à `phone` qui attend une réponse (digest récurrent, réception de
+        livraison, confirmation producteur : `templates.INTERACTIVE_TEMPLATE_OWNERS`). Les notifications purement
+        informatives ne sont jamais retournées (elles ne supplantent aucun menu). Fenêtre = TTL du digest
+        (`RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS`, déjà la plus longue durée d'attente d'une réponse à un
+        message proactif). Lecture seule ; aucun contenu libre n'est retourné (identifiants et actions fermées)."""
+        from ladini.core.settings import settings
+        from ladini.workers.outbox.templates import INTERACTIVE_TEMPLATE_OWNERS
+
+        session = self.session
+        if session is None:
+            return {"status": "error", "message": "Session indisponible."}
+        norm = normalize_phone(phone, required=False)
+        if not norm:
+            return {"status": "success", "interactive": None}
+        row = (
+            await session.execute(
+                text(
+                    "select template_key, payload, sent_at, extract(epoch from sent_at at time zone 'UTC') as sent_epoch "
+                    "from intelligence.notification_outbox "
+                    "where recipient_phone = :phone and status = 'SENT' and sent_at is not null "
+                    "and template_key = any(:keys) "
+                    "and sent_at > (now() at time zone 'UTC') - make_interval(secs => :ttl) "
+                    "order by sent_at desc limit 1"
+                ),
+                {"phone": norm, "keys": list(INTERACTIVE_TEMPLATE_OWNERS),
+                 "ttl": float(settings.RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS)},
+            )
+        ).first()
+        if row is None:
+            return {"status": "success", "interactive": None}
+        template_key, payload, _sent_at, sent_epoch = row
+        body: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+        raw_meta = body.get("interactive")
+        meta: Dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        raw_actions = meta.get("actions")
+        actions: Optional[Dict[str, Any]] = raw_actions if isinstance(raw_actions, dict) else None
+        raw_occ = body.get("occurrences")
+        occurrences: List[Any] = raw_occ if isinstance(raw_occ, list) else []
+        return {
+            "status": "success",
+            "interactive": {
+                "template_key": template_key,
+                "owner_type": INTERACTIVE_TEMPLATE_OWNERS[template_key],
+                "sent_at": float(sent_epoch),
+                "menu_id": meta.get("menu_id"),
+                "actions": actions,
+                "recurring_need_ids": [str(o["recurring_need_id"]) for o in occurrences
+                                       if isinstance(o, dict) and o.get("recurring_need_id")],
+                "occurrence_ids": [str(o["occurrence_id"]) for o in occurrences
+                                   if isinstance(o, dict) and o.get("occurrence_id")],
+            },
         }
 
     # ── Lecture : liste des produits interdits (table + défauts) ────────

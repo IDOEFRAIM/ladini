@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Sequence
+from typing import Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -109,6 +109,21 @@ def build_digest_text(needs: Sequence[NeedAvailability]) -> str:
     else:
         lines += ["1. Voir les détails", "2. Mes besoins"]
     return "\n".join(lines)
+
+
+#: B20 — le menu numéroté d'un digest SANS proposition confirmable : numéro -> action (vocabulaire FERMÉ). Source unique du
+#: texte (`build_digest_text`) ET du descripteur d'interaction publié dans l'Outbox (`digest_menu_actions`) : le texte
+#: affiché et ce que la réponse « 1 »/« 2 »/« voir les détails » déclenche ne peuvent pas diverger.
+DIGEST_MENU_ACTIONS = {"1": "VIEW_DETAILS", "2": "MY_NEEDS"}
+
+
+def digest_menu_actions(needs: Sequence[NeedAvailability]) -> Optional[dict]:
+    """Actions du menu numéroté EFFECTIVEMENT affiché par `build_digest_text` pour ces besoins (`None` : pas de menu —
+    le digest propose alors « confirmer / modifier / pas demain », porté par le filet déterministe du digest)."""
+    if not needs:
+        return None
+    total_matched = sum((n.matched_quantity for n in needs), Decimal(0))
+    return dict(DIGEST_MENU_ACTIONS) if total_matched <= 0 else None
 
 
 def digest_counts(needs: Sequence[NeedAvailability]) -> dict:

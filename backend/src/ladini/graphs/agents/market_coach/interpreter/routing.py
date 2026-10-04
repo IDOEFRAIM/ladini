@@ -2252,6 +2252,59 @@ def _apply_packaged_stock_entities(raw: Dict[str, Any], state: Dict[str, Any], t
     return patched
 
 
+async def _fetch_interactive_outbound(mc_runtime: Any, state: Dict[str, Any], text: str):
+    """Dernier message sortant interactif (lecture DB), seulement quand il peut changer l'attribution de CE message :
+    contexte d'état présent, ou réponse courte/chiffre/alias de menu. Toute panne => `None` (jamais bloquant)."""
+    from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
+
+    norm = ca.fold(text)
+    could_matter = (
+        get_pending_interaction(state).kind != InteractionKind.NONE
+        or ca._has_ghost_menu(state)
+        or norm.isdigit()
+        or any(norm in aliases for aliases in ca.MENU_ACTION_ALIASES.values())
+    )
+    phone = str(state.get("user_phone") or "")
+    if not could_matter or not phone:
+        return None
+    try:
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            ModerationGateway,
+        )
+
+        return ca.InteractiveOutbound.from_tool_result(
+            await ModerationGateway(mc_runtime).get_last_interactive_outbound(phone)
+        )
+    except Exception as exc:  # pragma: no cover - la lecture sortante ne casse jamais un tour
+        logger.warning("get_last_interactive_outbound a échoué (%s) — arbitrage sans contexte sortant", type(exc).__name__)
+        return None
+
+
+async def _arbitrate_context(
+    state: Dict[str, Any], mc_runtime: Any, text: str, role_up: str, impl: Any
+) -> Optional[Dict[str, Any]]:
+    """Applique `resolve_conversation_context` ; retourne le patch d'état, ou `None` pour poursuivre le pipeline existant."""
+    from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
+
+    if state.get("is_onboarding") or not str(text or "").strip() or role_up not in {"BUYER", "PRODUCER"}:
+        return None
+    outbound = await _fetch_interactive_outbound(mc_runtime, state, text)
+    decision = ca.resolve_conversation_context(state, text, role=role_up, outbound=outbound)
+    if decision.kind in (ca.ArbitrationKind.ACTIVE_SLOT, ca.ArbitrationKind.GENERIC_CLASSIFICATION):
+        return None
+    ca.log_decision(decision, outbound=outbound)
+    purge = ca.stale_context_purge_patch(state) if decision.purge else {}
+    if decision.raw is not None:
+        patch = InterpreterResult.from_legacy_dict(decision.raw).to_state_patch()
+        return {**patch, **purge}
+    # Reclassification libre SANS l'ancien contexte (même idiome que BUYER_PRODUCT_SWITCH ci-dessous).
+    neutral = ca.neutral_state_view(state)
+    raw = await impl(neutral, mc_runtime)
+    raw = _apply_packaged_stock_entities(raw, neutral, text)
+    return {**InterpreterResult.from_legacy_dict(raw).to_state_patch(), **purge}
+
+
+
 def make_input_interpreter(role: str = "PRODUCER"):
     """Crée un nœud `input_interpreter`.
 
@@ -3723,6 +3776,12 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     same_raw
                 ).to_state_patch()
                 return same_patch
+            # B20 — ARBITRAGE DU CONTEXTE : à quel contexte interactif appartient ce message ? (menu sortant le plus
+            # récent > navigation/nouvelle demande explicite > slot actif > classification libre). Voir
+            # `interpreter/context_arbitration.py`. Aucun effet quand aucun contexte interactif n'existe.
+            arbitrated: Optional[Dict[str, Any]] = await _arbitrate_context(state, mc_runtime, text, role_up, _input_interpreter_impl)
+            if arbitrated is not None:
+                return arbitrated
             raw = await _input_interpreter_impl(state, mc_runtime)
             raw = _apply_packaged_stock_entities(raw, state, text)
             return InterpreterResult.from_legacy_dict(raw).to_state_patch()

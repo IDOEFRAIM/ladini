@@ -94,6 +94,7 @@ class AgriDatabaseService(
         # Moderation / anti-abuse reads
         "get_account_status",
         "get_prohibited_terms",
+        "get_last_interactive_outbound",
         # Escrow reads
         "list_producer_escrowed_orders",
         # Approvisionnement récurrent (Phase 2/4)

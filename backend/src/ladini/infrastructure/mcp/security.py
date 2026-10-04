@@ -119,6 +119,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "persist_conversation": PermissionScope.DB_DATA_WRITE,
     # Moderation / anti-abuse
     "get_account_status": PermissionScope.DB_READ_ONLY,
+    "get_last_interactive_outbound": PermissionScope.DB_READ_ONLY,
     "get_prohibited_terms": PermissionScope.DB_READ_ONLY,
     "record_moderation_strike": PermissionScope.DB_DATA_WRITE,
     "record_demand_signal": PermissionScope.DB_DATA_WRITE,

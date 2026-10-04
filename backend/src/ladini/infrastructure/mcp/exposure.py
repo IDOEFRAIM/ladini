@@ -71,6 +71,7 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         "create_user_profile",
         "get_user_by_phone",
         "get_account_status",
+        "get_last_interactive_outbound",
         "update_communication_prefs",
         "update_geo_location",
         # ── Exploitation (farm) ──────────────────────────────────────────

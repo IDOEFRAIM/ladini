@@ -950,6 +950,17 @@ def _render_update_confirmation(action: str, product_label: str) -> str:
 
 
 async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    # B20 : réponse « voir les détails » au menu d'un DIGEST (message proactif, donc sans menu en état) — attribuée par
+    # `interpreter/context_arbitration.py` à CE digest : un seul besoin notifié -> son détail ; plusieurs -> la liste avec
+    # disponibilité (qui propose ensuite le détail de chacun). « mes besoins » (digest_action=MY_NEEDS) = la liste.
+    _payload = state.get("transaction_payload") or {}
+    if _payload.get("digest_action") == "VIEW_DETAILS":
+        _ids = list(dict.fromkeys(str(i) for i in (_payload.get("recurring_need_ids") or []) if i))
+        if len(_ids) == 1:
+            return await _show_need_detail(state, mc_runtime, _ids[0])
+        return await _render_needs_list(state, mc_runtime)
+    if _payload.get("digest_action") == "MY_NEEDS":
+        return await _render_needs_list(state, mc_runtime)
     resolved = _resolve_menu_reply(state)
     if resolved is not None:
         kind, target = resolved
