@@ -189,6 +189,11 @@ def _is_bare_digit(norm: str) -> bool:
     return norm.isdigit()
 
 
+def is_recurring_navigation(norm: str) -> bool:
+    """`norm` (déjà `fold`é) est une navigation explicite vers la liste des besoins récurrents."""
+    return norm in NAVIGATION_INTENTS["GET_MY_NEEDS"]
+
+
 def resolve_menu_action(norm: str, actions: Mapping[str, str], *, allow_digits: bool) -> Optional[str]:
     """Action du menu propriétaire visée par `norm` (chiffre du menu ou alias fermé) ; `None` sinon."""
     if allow_digits and norm in actions:
@@ -274,8 +279,11 @@ def resolve_conversation_context(
     role: str,
     outbound: Optional[InteractiveOutbound] = None,
     now: Optional[float] = None,
+    buyer_capable: bool = False,
 ) -> ArbitrationDecision:
-    """Décide à quel contexte appartient `text`. Pure : `outbound` est fourni par l'appelant (lecture DB)."""
+    """Décide à quel contexte appartient `text`. Pure : `outbound` et `buyer_capable` sont fournis par l'appelant (lecture
+    DB). `buyer_capable` (B21.1) : l'acteur possède la CAPACITÉ acheteur (profil acheteur, ou administrateur) alors que le
+    graphe courant n'est pas le graphe BUYER — voir `is_recurring_navigation`."""
     now = time.time() if now is None else now
     norm = fold(text)
     pending = get_pending_interaction(dict(state))
@@ -343,6 +351,18 @@ def resolve_conversation_context(
                     raw=_raw(intent, {}, "context_arbitration_navigation", navigation=intent),
                     purge=bool(old_ctx), old_context=old_ctx, new_context=intent,
                 )
+    # B21.1 — « mes besoins » est une fonction ACHETEUR, pas une propriété du graphe courant : un utilisateur de profil
+    # ADMIN (graphe PRODUCER par défaut, voir `orchestrator._run_market`) ou producteur ET acheteur qui possède la
+    # capacité acheteur obtient la même route déterministe. Les autres navigations acheteur (« mes commandes »,
+    # ambiguë côté producteur) restent réservées au graphe BUYER. Un slot de données producteur (prix, quantité...) n'est
+    # jamais interrompu ici : seuls un menu ou l'absence de contexte le sont.
+    if norm and role_up != "BUYER" and buyer_capable and is_recurring_navigation(norm):
+        if ghost or not live or pending.kind in MENU_KINDS:
+            return ArbitrationDecision(
+                ArbitrationKind.INTERRUPT_WITH_NEW_GOAL, "explicit_navigation:GET_MY_NEEDS:buyer_capability",
+                raw=_raw("GET_MY_NEEDS", {}, "context_arbitration_navigation", navigation="GET_MY_NEEDS"),
+                purge=bool(old_ctx), old_context=old_ctx, new_context="GET_MY_NEEDS",
+            )
     if norm and interruptible and role_up in {"BUYER", "PRODUCER"}:
         if (ghost or pending.kind in GENERIC_MENU_KINDS) and (_NEW_GOAL_BUY.match(norm) or _NEW_GOAL_SELL.match(norm)):
             return ArbitrationDecision(
@@ -394,6 +414,7 @@ __all__ = [
     "ArbitrationDecision",
     "ArbitrationKind",
     "InteractiveOutbound",
+    "is_recurring_navigation",
     "log_decision",
     "neutral_state_view",
     "resolve_conversation_context",
