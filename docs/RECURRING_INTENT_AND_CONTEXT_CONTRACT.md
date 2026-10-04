@@ -78,9 +78,9 @@ Ne jamais mélanger « modifier le besoin » et « modifier une occurrence » : 
 | UPDATE / PAUSE / RESUME / CANCEL / SKIP / OVERRIDE | `UPDATE_RECURRING_NEED` + `action` | `_update_flow` | `update_recurring_need` |
 
 ## 9. Intents futurs (après B24)
-Exécutables par message libre depuis B24 : `CREATE`, `UPDATE` (quantité et/ou fréquence permanentes), `GET_MY_NEEDS`,
-`REFRESH_RECURRING_MATCHING` (« cherche pour mes bœufs »). Compris mais NON exécutés par texte libre (réponse honnête, rien n'est modifié) :
-`PAUSE`, `RESUME`, `SKIP_OCCURRENCE`, `OVERRIDE_OCCURRENCE` ; `CANCEL` déclenche la clarification « prochaine livraison seulement ou tout le besoin ? ».
+Exécutables par message libre : `CREATE`, `UPDATE` (quantité et/ou fréquence permanentes, appliqué directement : réponse « ancien → nouveau »),
+`GET_MY_NEEDS`, `REFRESH_RECURRING_MATCHING` (« cherche pour mes bœufs »). `PAUSE`, `RESUME`, `SKIP_OCCURRENCE`, `OVERRIDE_OCCURRENCE`, `CANCEL` sont
+exécutables **uniquement après une confirmation fermée** (§12) : le message ne produit qu'un menu portant l'ordre exact.
 Restent à faire : `ACCEPT/REJECT` en langage libre, `GET_RECURRING_HISTORY`, `GET_RECURRING_ORDERS`. Hors périmètre : multi-producteur, packages, paiement, frontend.
 
 ## 10. Invariants de sécurité
@@ -103,3 +103,30 @@ Restent à faire : `ACCEPT/REJECT` en langage libre, `GET_RECURRING_HISTORY`, `G
 8. Les clarifications sont ciblées (« quelle quantité pour votre besoin de Bœuf ? »), jamais le message générique.
 9. Seul ce que l'utilisateur dit CE tour (`entities_said_this_turn`) alimente une modification ; `transaction_payload` n'est jamais réappliqué.
 10. Chaque décision émet `INTENT_ARBITRATION` (relation_to_context, relation_to_expectation, target_type, target_resolution, selected_route, decision_reason) sans texte ni donnée personnelle.
+
+## 12. Correction, réponse fermée, cible, portée, mutation (B24-correction)
+
+**Correction vs New Task.** Une correction (« mets-en 3 », « finalement 3 », « plutôt chaque mois ») modifie la tâche/la cible affichée ; une
+nouvelle tâche (« j'ai besoin de 2 chèvres chaque semaine ») la remplace et neutralise l'ancien menu. Un produit nommé différent n'est jamais une
+correction du besoin affiché (nouvelle tâche ou clarification). Aucun mot-clé ne décide : l'interprétation sémantique + `derive_relation`.
+
+**Free-text vs Closed Reply.** Réponse fermée = le message ENTIER est un index (`1`, `01`, `1.`, `1)`, `option 1`, `choix 1`, `numéro 1`) ou un
+alias fermé du menu (`rechercher maintenant`, `actualiser`, `retour`, `confirmer`, `refuser`, `oui`, `non`) — `closed_menu_index`, zéro appel LLM.
+`je veux 1 chèvre`, `mets-en 1`, `j'en veux 1 de plus` ne sont PAS fermés. Une SELECTION issue du LLM sur du texte libre : action d'écran ou
+mutante → jamais exécutée (`free_text_selection_rejected` / `closed_reply_required`) ; choix d'entité de liste → seulement si le message l'étaye
+(mot du libellé affiché ou ordinal, `selection_is_evidenced`) — un chiffre dans une phrase est une quantité, pas un numéro d'écran.
+
+**Target Resolution.** Avant toute mutation : un `recurring_need_id` exact (0 → introuvable, 1 → exact, N → menu des candidats), et pour une
+livraison une `occurrence_date` lue du service (prochaine occurrence `OPEN`). L'index d'un menu ne sert qu'à retrouver l'id ; il n'est jamais envoyé au service.
+
+**Need vs Occurrence.** « je veux désormais 5 chaque semaine » → UPDATE du besoin ; « cette semaine mets-en 5 » → override d'UNE occurrence ;
+« pas cette semaine » → skip d'UNE occurrence ; « arrête complètement » → CANCEL du besoin. « annule … » est ambigu : menu fermé
+(1. ignorer la prochaine livraison · 2. arrêter complètement, avec seconde confirmation · 3. ne rien changer).
+
+**Ambiguity and Clarification.** Message trop vague sur un écran vivant → question ciblée (quantité / fréquence / prochaine livraison) ;
+deux besoins candidats → menu des seuls candidats ; ambiguïté destructive → menu fermé. Jamais le message générique tant qu'un écran récurrent est vivant.
+
+**Mutation Safety (qui garantit quoi).** Flow : action permise, cible exacte, quantité > 0, fréquence connue, jours requis, portée besoin/occurrence,
+ambiguïté levée, snapshot confirmé (menu = commande exacte, TTL 600 s, menu périmé = rien). Service `update_recurring_need` : propriété (`buyer_id`),
+besoin existant, occurrence `OPEN`, idempotence naturelle (rejouer un skip échoue). Pas de `expected_version` sur ce service (hors périmètre ; le
+snapshot daté et l'état `OPEN` en tiennent lieu). Le LLM n'est jamais l'autorité.

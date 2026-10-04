@@ -2901,7 +2901,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     context_arbitration as _ca,
                 )
 
-                _sel_result = _ca.guard_free_text_selection(state, _sel_result or {})
+                _sel_result = _ca.guard_free_text_selection(state, _sel_result or {}, text)
                 if (_sel_result.get("raw_analysis") or {}).get("guard") != _ca.GUARD_FREE_TEXT_ACTION:
                     return _sel_result
                 # B24 : une action d'écran (rechercher, retour...) « choisie » par le micro-prompt sur du langage LIBRE n'est pas

@@ -278,18 +278,18 @@ def test_annule_mes_boeufs_is_a_cancel_or_skip_clarification_never_executed(role
         with caplog.at_level(logging.INFO):
             t = h.send("annule mes boeufs", llm=ScriptLLM(new_task("UPDATE_RECURRING_NEED", 0.9, product="boeufs", update_action="CANCEL")))
         assert "update_recurring_need" not in t.mcp_tools(), t.mcp_tools()
-        assert "ignorer seulement la prochaine livraison" in t.response and "arrêter complètement" in t.response, t.response
+        assert "Ignorer seulement la prochaine livraison" in t.response and "Arrêter complètement" in t.response, t.response
         assert t.turn_value("relation_to_context") == "AMBIGUOUS"
-        assert any("decision_reason=ambiguous_destructive_action" in x for x in _arbitration_lines(caplog))
+        assert any("decision_reason=destructive_ambiguity" in x for x in _arbitration_lines(caplog))
 
 
-@pytest.mark.parametrize("action,needle", [("SKIP_OCCURRENCE", "ignorer une livraison"), ("OVERRIDE_OCCURRENCE", "une seule livraison")])
+@pytest.mark.parametrize("action,needle", [("SKIP_OCCURRENCE", "Ignorer seulement la livraison"), ("OVERRIDE_OCCURRENCE", "Changer seulement la livraison")])
 def test_occurrence_scoped_requests_are_understood_but_never_touch_the_durable_need(action, needle):
     with _conv("ADMIN") as h:
         _to_detail(h)
         t = h.send("pas cette semaine", llm=ScriptLLM(new_task("UPDATE_RECURRING_NEED", 0.9, update_action=action, quantity=5.0)))
         assert "update_recurring_need" not in t.mcp_tools(), t.mcp_tools()
-        assert needle in t.response and "rien n'a été modifié" in t.response, t.response
+        assert needle in t.response and "1. Oui" in t.response, t.response  # B24 : confirmation fermée, rien d'exécuté
 
 
 # ── 15. MESSAGE VAGUE ──────────────────────────────────────────────────────────────────────────────────────────────
