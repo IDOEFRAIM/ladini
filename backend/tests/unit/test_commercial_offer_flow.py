@@ -238,3 +238,12 @@ class TestStaleAliasesAreNulledWhenTheCanonicalIsCleared:
         _null_stale_aliases(payload, source)
         assert payload["quantite"] is None and payload["qty"] is None and payload["prix"] is None
         assert "produit" not in payload or payload["produit"] is not None  # canonique renseigné : intact
+
+
+def test_unit_before_price_is_the_price_basis():
+    from ladini.domain.commercial_offer_flow import price_unit_next_to_amount as p
+
+    assert p("j ai 225 kg d oignon;le kg coute 175 fcfa", 175) == "KG"
+    assert p("je veux vendre mes 355 kg de tomate;le kg coute 225fcfa", 225) == "KG"
+    # l'unité de la QUANTITÉ n'est jamais la base du prix
+    assert p("j ai 225 kg a 175", 175) is None

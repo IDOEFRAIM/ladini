@@ -749,6 +749,12 @@ _UNIT_AFTER_PRICE_RE = re.compile(
 )
 
 
+_UNIT_BEFORE_PRICE_RE = re.compile(
+    r"\b(?:le|la|un|une|du|par|chaque)\s+([a-z]+)\s*"
+    r"(?:(?:est|coute|coutent|vaut|valent|se vend|revient)\s*)?(?:a|au prix de|au tarif de|=|:)?\s*$"
+)
+
+
 #: Public alias (Phase B2b) — le motif « <montant> [FCFA] <marqueur de base> <unité> » est partagé avec le flux
 #: des bids (`domain/bid_pricing_flow.py`) plutôt que dupliqué.
 UNIT_AFTER_PRICE_RE = _UNIT_AFTER_PRICE_RE
@@ -779,6 +785,18 @@ def price_unit_next_to_amount(text: Any, amount: Optional[float]) -> Optional[st
             return str(canonical)
         if word in PACKAGING_WORDS:
             return "SAC"  # tout conditionnement est un « package » ; le mot exact vient de `extract_package_word`
+    # Unité AVANT le montant : « le kg coute 175 », « le kilo est à 225 », « prix du kg : 300 ».
+    # Strict : l'unité doit être introduite par un article/« par » (sinon « 225 kg à 175 » lirait la
+    # quantité comme base de prix) et suivie seulement d'un verbe/lien de prix.
+    for token in _AMOUNT_TOKEN_RE.finditer(ntext):
+        value = _to_float(token.group(0).strip().rstrip(".,").replace(" ", ""))
+        if value is None or abs(value - amount) > 1e-9:
+            continue
+        match = _UNIT_BEFORE_PRICE_RE.search(ntext[: token.start()])
+        if match:
+            canonical = normalize_unit(match.group(1))
+            if canonical:
+                return str(canonical)
     return None
 
 
