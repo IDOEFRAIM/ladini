@@ -86,8 +86,10 @@ from ladini.domain.models import (
 from ladini.domain.package_inventory import restore_stock_for_item, sells_by_package
 from ladini.domain.recurring_supply.recurrence import (
     OCCURRENCE_WINDOW_DAYS,
+    InvalidRecurrenceRule,
     RecurrenceRule,
     generate_occurrence_dates,
+    next_due_date,
 )
 
 from .base import BaseMixin
@@ -139,6 +141,14 @@ RECURRING_NEED_ACTIONS = (
 # métier différents, jamais mélangés dans le même enum d'action.
 MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")
 #: Statuts d'une occurrence « en cours » pour le Buyer (B21) : proposable ou déjà acceptée (commandes en cours).
+#: Contrat « prochaine livraison » (B22) — parmi les 12 statuts du CHECK `recurring_need_occurrences_status_chk` :
+#:   - COURANT/PROCHAIN (retenus, dans l'ordre des dates, à partir d'AUJOURD'HUI inclus) : OPEN, MATCHED (proposables),
+#:     ACCEPTED, PARTIALLY_ACCEPTED (acceptées, commandes en cours) ;
+#:   - JOUÉS/SAUTÉS (jamais « la prochaine » : la date suivante prend le relais) : REJECTED, EXPIRED, SKIPPED, CANCELLED,
+#:     FULFILLED, PARTIALLY_FULFILLED, UNFULFILLED ;
+#:   - PROPOSED : statut hérité du schéma, jamais produit par le moteur de matching actuel (OPEN/MATCHED) — non retenu.
+#: Une occurrence du jour reste « aujourd'hui » tant qu'elle est dans un statut retenu ; dès qu'elle est jouée, la
+#: prochaine échéance de la règle est affichée.
 ACTIONABLE_OCCURRENCE_STATUSES = ("OPEN", "MATCHED", "ACCEPTED", "PARTIALLY_ACCEPTED")
 
 # VS5 pilote — livraison/réception. `Order.delivery_status`/`Order.status` réutilisés tels quels
@@ -193,7 +203,7 @@ class RecurringSupplyMixin(BaseMixin):
         if row["status"] == "EXECUTED":
             stored = payload.get("execution_result")
             if isinstance(stored, dict):
-                logger.info("recurring_need.confirmation_replayed | draft_id=%s | version=%s", draft_id, draft_version)
+                logger.info("RECURRING_NEED_CREATE_REPLAYED | draft_id=%s | version=%s", draft_id, draft_version)
                 return {**stored, "replayed": True}, None
             raise BusinessRuleException("Demande déjà traitée.")
         if row["status"] not in _EXECUTABLE_DRAFT_STATUSES:
@@ -273,7 +283,7 @@ class RecurringSupplyMixin(BaseMixin):
 
         await self._close_confirmation(ledger, result)
         logger.info(
-            "recurring_need.created | recurring_need_id=%s | buyer_id=%s | occurrences=%s",
+            "RECURRING_NEED_CREATED | recurring_need_id=%s | buyer_id=%s | occurrences=%s",
             result["recurring_need_id"], buyer_profile.id, result["occurrences_created"],
         )
         return {"status": "success", **result}
@@ -343,7 +353,7 @@ class RecurringSupplyMixin(BaseMixin):
 
         await self._close_confirmation(ledger, {"items": created})
         logger.info(
-            "recurring_need.created_batch | buyer_id=%s | count=%s | recurring_need_ids=%s",
+            "RECURRING_NEED_CREATED | batch=true | buyer_id=%s | count=%s | recurring_need_ids=%s",
             buyer_profile.id, len(created), [c["recurring_need_id"] for c in created],
         )
         return {"status": "success", "items": created}
@@ -539,6 +549,22 @@ class RecurringSupplyMixin(BaseMixin):
             canonical_unit=resolve_subcategory_canonical_unit(SimpleNamespace(priority_unit=priority_unit)),
         )
 
+    async def _materialize_due_date(self, need: RecurringNeed, due: date, *, actor_id: Any = None) -> int:
+        """Matérialise UNE échéance précise (hors fenêtre J..J+7) — mêmes dimensions et même insertion idempotente que
+        `_ensure_window_for_need`."""
+        dims = await self._materialization_dims(need.id)
+        zone_id, priority_unit = dims.get(need.id, (None, None))
+        return await self._materialize_occurrences(
+            need,
+            self._recurrence_rule_for(need),
+            from_date=due,
+            to_date=due,
+            actor_type="BUYER",
+            actor_id=actor_id,
+            zone_id=zone_id,
+            canonical_unit=resolve_subcategory_canonical_unit(SimpleNamespace(priority_unit=priority_unit)),
+        )
+
     async def _next_actionable_occurrence(self, need_ids: List[Any]) -> Dict[Any, RecurringNeedOccurrence]:
         """Prochaine occurrence PERTINENTE de chaque besoin : la plus proche, à partir d'aujourd'hui, parmi OPEN /
         MATCHED / ACCEPTED / PARTIALLY_ACCEPTED. Jamais une occurrence REJECTED / EXPIRED / terminale (déjà jouée) tant
@@ -558,6 +584,36 @@ class RecurringSupplyMixin(BaseMixin):
         for occ in (await self._db().execute(stmt)).scalars().all():
             found.setdefault(occ.recurring_need_id, occ)
         return found
+
+    async def _planned_schedule(self, needs: List[RecurringNeed]) -> Dict[Any, tuple]:
+        """`{need_id: (schedule_state, next_due_date)}` pour des besoins SANS occurrence retenue (B22). Calculé par la fonction
+        pure `next_due_date`, en sautant les dates déjà jouées/sautées (une occurrence terminale ou SKIPPED occupe sa date).
+        `schedule_state` : `OK` (date calculée) / `ENDED` (règle terminée) / `INVALID` (planning incomplet ou incohérent).
+        Une seule requête pour toute la liste (pas de N+1) ; lecture seule."""
+        if not needs:
+            return {}
+        occupied: Dict[Any, set] = {}
+        rows = (
+            await self._db().execute(
+                select(RecurringNeedOccurrence.recurring_need_id, RecurringNeedOccurrence.occurrence_date).where(
+                    RecurringNeedOccurrence.recurring_need_id.in_([n.id for n in needs]),
+                    RecurringNeedOccurrence.status.notin_(ACTIONABLE_OCCURRENCE_STATUSES),
+                    RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
+                )
+            )
+        ).all()
+        for need_id, occurrence_date in rows:
+            occupied.setdefault(need_id, set()).add(occurrence_date.date())
+        planned: Dict[Any, tuple] = {}
+        for need in needs:
+            try:
+                rule = self._recurrence_rule_for(need)
+            except (InvalidRecurrenceRule, TypeError, ValueError, AttributeError):
+                planned[need.id] = ("INVALID", None)
+                continue
+            due = next_due_date(rule, from_date=_today(), skip=occupied.get(need.id, ()))
+            planned[need.id] = ("OK", due) if due is not None else ("ENDED", None)
+        return planned
 
     async def replenish_occurrence_windows(self) -> Dict[str, Any]:
         """Réapprovisionnement générique (Phase 3, mandat MONTHLY §17/§18) : rejoue
@@ -641,17 +697,25 @@ class RecurringSupplyMixin(BaseMixin):
             select(RecurringNeed, SubCategory.name)
             .join(SubCategory, RecurringNeed.sub_category_id == SubCategory.id)
             .where(RecurringNeed.buyer_id == buyer_id, RecurringNeed.status != "CANCELLED")
-            .order_by(RecurringNeed.created_at.asc())
+            # Ordre déterministe (B22) : création, puis id — deux besoins créés dans la même seconde ne s'échangent jamais.
+            .order_by(RecurringNeed.created_at.asc(), RecurringNeed.id.asc())
         )
         rows = (await current_session.execute(needs_stmt)).all()
         needs = [n for n, _ in rows]
         need_ids = [n.id for n in needs]
 
         next_occurrence_by_need = await self._next_actionable_occurrence(need_ids)
+        # B22 : un besoin ACTIF sans occurrence retenue garde une prochaine date CALCULÉE (jamais « à planifier » tant que
+        # sa règle est valide) ; PAUSED/CANCELLED ne sont jamais traités comme actifs (aucune date, aucune matérialisation).
+        planned = await self._planned_schedule(
+            [n for n in needs if n.status == "ACTIVE" and n.id not in next_occurrence_by_need]
+        )
 
         items = []
         for need, sub_category_name in rows:
             next_occ = next_occurrence_by_need.get(need.id)
+            schedule_state, planned_date = planned.get(need.id, ("OK" if need.status == "ACTIVE" else need.status, None))
+            next_date = next_occ.occurrence_date.date() if next_occ else planned_date
             items.append(
                 {
                     "recurring_need_id": str(need.id),
@@ -661,9 +725,13 @@ class RecurringSupplyMixin(BaseMixin):
                     "recurrence_type": need.recurrence_type,
                     "weekly_days": need.weekly_days,
                     "status": need.status,
-                    "next_occurrence_date": (
-                        next_occ.occurrence_date.date().isoformat() if next_occ else None
-                    ),
+                    "schedule_state": schedule_state,
+                    # Début et création : distinguent deux besoins par ailleurs identiques (engagements distincts).
+                    "starts_on": need.starts_at.date().isoformat() if need.starts_at else None,
+                    "created_on": need.created_at.date().isoformat() if need.created_at else None,
+                    "next_occurrence_materialized": next_occ is not None,
+                    "next_occurrence_is_today": next_date == _today() if next_date else False,
+                    "next_occurrence_date": next_date.isoformat() if next_date else None,
                     "next_occurrence_id": str(next_occ.id) if next_occ else None,
                     "next_occurrence_status": next_occ.status if next_occ else None,
                     "requested_quantity": float(next_occ.requested_quantity) if next_occ else None,
@@ -712,6 +780,12 @@ class RecurringSupplyMixin(BaseMixin):
             "weekly_days": need.weekly_days,
             "need_status": need.status,
         }
+        schedule_state, planned_date = (
+            (await self._planned_schedule([need])).get(need.id, ("OK", None)) if need.status == "ACTIVE" and occurrence is None
+            else ("OK" if need.status == "ACTIVE" else need.status, None)
+        )
+        need_info["schedule_state"] = schedule_state
+        need_info["starts_on"] = need.starts_at.date().isoformat() if need.starts_at else None
         if occurrence is None:
             last = await current_session.scalar(
                 select(RecurringNeedOccurrence)
@@ -726,6 +800,7 @@ class RecurringSupplyMixin(BaseMixin):
                 "requested_quantity": float(need.quantity),
                 "unit": need.unit,
                 "occurrence_date": None,
+                "planned_next_date": planned_date.isoformat() if planned_date else None,
                 "allocations": [],
                 "last_occurrence": (
                     {
@@ -793,6 +868,7 @@ class RecurringSupplyMixin(BaseMixin):
             "requested_quantity": float(occurrence.requested_quantity),
             "unit": occurrence.unit,
             "occurrence_date": occurrence.occurrence_date.date().isoformat(),
+            "occurrence_is_today": occurrence.occurrence_date.date() == _today(),
             "allocations": [
                 {
                     "producer_label": row["producer_label"],
@@ -822,14 +898,26 @@ class RecurringSupplyMixin(BaseMixin):
         user_obj, need = await self._owned_need(phone, recurring_need_id)
         created = 0
         existing = await self._next_actionable_occurrence([need.id])
+        source = "EXISTING" if need.id in existing else "NONE"
         if need.status == "ACTIVE" and need.id not in existing:
-            created = await self._ensure_window_for_need(need, actor_type="BUYER", actor_id=getattr(user_obj, "id", None))
+            actor_id = getattr(user_obj, "id", None)
+            created = await self._ensure_window_for_need(need, actor_type="BUYER", actor_id=actor_id)
             existing = await self._next_actionable_occurrence([need.id])
+            source = "WINDOW" if need.id in existing else "NONE"
+            if need.id not in existing:
+                # B22 : règle plus lente que la fenêtre J..J+7 (MENSUEL, échéance unique lointaine) — on matérialise
+                # LA prochaine échéance de la règle (une seule ligne, même `ON CONFLICT DO NOTHING` que le cron).
+                state, due = (await self._planned_schedule([need])).get(need.id, ("INVALID", None))
+                if state == "OK" and due is not None:
+                    created += await self._materialize_due_date(need, due, actor_id=actor_id)
+                    existing = await self._next_actionable_occurrence([need.id])
+                    source = "DUE_DATE" if need.id in existing else "NONE"
         occurrence = existing.get(need.id)
         logger.info(
             "RECURRING_OCCURRENCE_ENSURED | recurring_need_id=%s | created=%s | occurrence_status=%s",
             need.id, created, occurrence.status if occurrence else None,
         )
+        logger.info("RECURRING_NEXT_OCCURRENCE_RESOLVED | recurring_need_id=%s | source=%s", need.id, source)
         return {
             "status": "success",
             "recurring_need_id": str(need.id),

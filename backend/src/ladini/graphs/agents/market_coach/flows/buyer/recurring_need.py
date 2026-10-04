@@ -564,7 +564,16 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             )
             return _apply_response_plan(build_response_plan(outcome))
 
-    if interpreted_event in ("NEW_TASK", "INTERRUPTION"):
+    if (
+        interpreted_event in ("NEW_TASK", "INTERRUPTION")
+        and draft is not None
+        and draft.status == RecurringNeedDraftStatus.DRAFT
+        and _repeats_live_draft(draft, extracted)
+    ):
+        # B22 : la MÊME demande rejouée (double envoi, message re-livré sous un autre identifiant) n'est pas une
+        # nouvelle tâche — ni nouveau draft, ni nouveau récapitulatif : la confirmation déjà émise reste LA confirmation.
+        domain_event = "ANSWER"
+    elif interpreted_event in ("NEW_TASK", "INTERRUPTION"):
         if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT:
             # Nouvelle demande autonome : l'ancien draft éditable est CLOS durablement
             # (jamais laissé orphelin en DRAFT dans la table).
@@ -602,6 +611,24 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         if orphan_response is not None:
             return orphan_response
     return _apply_response_plan(build_response_plan(outcome))
+
+
+def _same_slot(a: Any, b: Any) -> bool:
+    if isinstance(a, str) and isinstance(b, str):
+        return a.strip().lower() == b.strip().lower()
+    return bool(a == b)
+
+
+def _repeats_live_draft(draft: RecurringNeedDraft, extracted: Dict[str, Any]) -> bool:
+    """Le message ne dit RIEN de plus que le draft en attente : produit, quantité, unité et fréquence identiques, et
+    aucun autre champ dit qui diffère. Un message plus pauvre (« chèvre 3 unités » sans fréquence) ou différent reste
+    une nouvelle tâche."""
+    if not draft.is_complete():
+        return False
+    core = ("product", "quantity", "unit", "recurrence_type")
+    if not all(slot_has_value(extracted.get(k)) and _same_slot(extracted.get(k), getattr(draft, k)) for k in core):
+        return False
+    return all(_same_slot(v, getattr(draft, k, None)) for k, v in extracted.items() if k not in core)
 
 
 def _said_this_turn(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1071,8 +1098,9 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
 
     lines = [f"{notice}🔁 Mes besoins récurrents", ""]
     mapping: Dict[str, str] = {}
+    twins = _indistinguishable_needs(items)
     for i, item in enumerate(items, start=1):
-        lines += _render_need_block(i, item)
+        lines += _render_need_block(i, item, show_start=str(item.get("recurring_need_id")) in twins)
         mapping[str(i)] = str(item["recurring_need_id"])
     lines += ["Répondez avec le numéro du besoin."]
 
@@ -1123,13 +1151,41 @@ def _availability_label(status: Any, requested: Any, matched: Any, unit: Any) ->
     return f"{_fmt_qty(matched)} / {_fmt_qty(requested)} {unit}"
 
 
-def _render_need_block(index: int, item: Dict[str, Any]) -> List[str]:
-    lines = [f"{index}. {str(item.get('product') or '?').capitalize()}",
-             f"   {_fmt_qty(item.get('quantity'))} {item.get('unit')} {_frequency_label(item)}",
-             f"   {_need_status_label(item.get('status'))}"]
+def _indistinguishable_needs(items: List[Dict[str, Any]]) -> set:
+    """Ids des besoins que rien ne distingue à l'affichage (même produit, quantité, unité, fréquence) : deux engagements
+    LÉGITIMES (ex. « 3 chèvres par semaine » démarré le 5, puis un autre le 10) — jamais fusionnés, mais datés."""
+    groups: Dict[tuple, List[str]] = {}
+    for item in items:
+        key = (str(item.get("product") or "").lower(), item.get("quantity"), item.get("unit"), _frequency_label(item),
+               item.get("status"))
+        groups.setdefault(key, []).append(str(item.get("recurring_need_id")))
+    return {need_id for ids in groups.values() if len(ids) > 1 for need_id in ids}
+
+
+def _delivery_line(item: Dict[str, Any], *, prefix: str = "") -> str:
+    """Ligne « prochaine livraison » d'un besoin ACTIF : date réelle, « aujourd'hui », ou un état de planning EXPLICITE —
+    jamais un « à planifier » ambigu (B22)."""
+    state = item.get("schedule_state")
     when = _fmt_date_fr(item.get("next_occurrence_date"))
+    if state == "OK" and when:
+        if item.get("next_occurrence_is_today") or item.get("occurrence_is_today"):
+            return f"{prefix}Livraison prévue aujourd'hui"
+        return f"{prefix}Prochaine livraison : {when}"
+    if state == "ENDED":
+        return f"{prefix}Terminé — aucune livraison à venir."
+    return f"{prefix}⚠️ Planning incomplet — date de prochaine livraison à préciser."
+
+
+def _render_need_block(index: int, item: Dict[str, Any], *, show_start: bool = False) -> List[str]:
+    started = _fmt_date_fr(item.get("starts_on"))
+    qty_line = f"   {_fmt_qty(item.get('quantity'))} {item.get('unit')} {_frequency_label(item)}"
+    if show_start and started:
+        qty_line += f" · démarré le {started}"
+    lines = [f"{index}. {str(item.get('product') or '?').capitalize()}",
+             qty_line,
+             f"   {_need_status_label(item.get('status'))}"]
     if item.get("status") == "ACTIVE":
-        lines.append(f"   Prochaine livraison : {when or 'à planifier'}")
+        lines.append(_delivery_line(item, prefix="   "))
         occ_status = item.get("next_occurrence_status") or ("OPEN" if item.get("next_occurrence_id") else None)
         if occ_status in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
             lines.append("   ✅ Approvisionnement accepté" if occ_status == "ACCEPTED" else "   ✅ Approvisionnement partiellement accepté")
@@ -1234,7 +1290,6 @@ async def _show_need_detail(
         f"Statut : {_need_status_label(detail.get('need_status'))}",
     ]
     occ_status = detail.get("occurrence_status")
-    when = _fmt_date_fr(detail.get("occurrence_date"))
     back = {"1": "LIST"}
 
     if detail.get("occurrence_date") is None:
@@ -1249,12 +1304,18 @@ async def _show_need_detail(
             elif last.get("status") in ("REJECTED", "EXPIRED"):
                 lines += ["Résultat : " + ("refusé" if last["status"] == "REJECTED" else "expiré")]
             lines.append("")
-        lines.append("Aucune prochaine livraison planifiée pour le moment.")
+        need_state = str(detail.get("need_status") or "")
+        if need_state == "PAUSED":
+            lines.append("Besoin suspendu — aucune livraison planifiée.")
+        elif need_state != "ACTIVE":
+            lines.append("Besoin annulé — aucune livraison planifiée.")
+        else:
+            lines.append(_delivery_line({**detail, "next_occurrence_date": detail.get("planned_next_date")}))
         lines += ["", "1. Retour"]
         mapping = back
     elif occ_status in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
         orders = detail.get("orders") or []
-        lines = header + ["", f"📦 Livraison du {when}",
+        lines = header + ["", "📦 " + _delivery_line({**detail, "schedule_state": "OK", "next_occurrence_date": detail.get("occurrence_date")}),
                           f"Demandé : {_fmt_qty(detail.get('requested_quantity'))} {unit}",
                           "Approvisionnement déjà accepté." if occ_status == "ACCEPTED" else f"Approvisionnement déjà accepté (partiellement : {_fmt_qty(detail.get('quantity_confirmed'))} sur {_fmt_qty(detail.get('requested_quantity'))} {unit}).",
                           f"{len(orders)} commande(s) créée(s) — {_fmt_qty(detail.get('quantity_confirmed'))} {unit} :"]
@@ -1281,11 +1342,12 @@ async def _show_need_detail(
             # service durci que la réponse au digest) — jamais « la prochaine ouverte ».
             target = _join_match_target(recurring_need_id, detail.get("occurrence_id"), detail.get("occurrence_version"))
             mapping = {"1": f"CONFIRM:{target}", "2": f"REJECT:{target}", "3": "LIST"}
-            lines = header + [f"Prochaine livraison : {when}", _coverage_note(detail.get("requested_quantity"), matched, unit), "",
+            lines = header + [_delivery_line({**detail, "schedule_state": "OK", "next_occurrence_date": detail.get("occurrence_date")}), _coverage_note(detail.get("requested_quantity"), matched, unit), "",
                               body, "", "_Tapez *actualiser* pour relancer la recherche._"]
         else:
-            lines = header + ["", f"📦 Livraison du {when}", f"Demandé : {_fmt_qty(detail.get('requested_quantity'))} {unit}",
-                              "Aucune disponibilité trouvée pour cette occurrence.", "",
+            lines = header + ["", _delivery_line({**detail, "schedule_state": "OK", "next_occurrence_date": detail.get("occurrence_date")}),
+                              f"Demandé : {_fmt_qty(detail.get('requested_quantity'))} {unit}",
+                              "Disponibilité : aucune offre disponible pour le moment", "",
                               "1. Rechercher maintenant", "2. Retour"]
             mapping = {"1": f"REFRESH:{recurring_need_id}", "2": "LIST"}
     return {

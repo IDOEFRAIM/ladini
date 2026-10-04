@@ -186,6 +186,7 @@ async def state_cleaner_node(
             "buyer_request_waiting_choice",
             "buyer_request_catalog_checked",
             "buyer_request_last_product",
+            "recurring_confirmation_emitted",
         ):
             wm_terminal[key] = None
         patch["working_memory"] = wm_terminal
