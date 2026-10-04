@@ -2280,6 +2280,27 @@ async def _fetch_interactive_outbound(mc_runtime: Any, state: Dict[str, Any], te
         return None
 
 
+async def _buyer_capability(mc_runtime: Any, state: Dict[str, Any]) -> bool:
+    """B21.1 — l'acteur possède-t-il la capacité acheteur (`permissions.can_buy` : profil acheteur rattaché, ou
+    administrateur — même modèle que `services/database/base.py::_serialize_user_entities`) ? Fail-closed : toute
+    erreur, profil absent ou réponse inattendue => `False` (le contrat existant s'applique)."""
+    phone = str(state.get("user_phone") or "")
+    if not phone:
+        return False
+    try:
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            ProfileGateway,
+        )
+
+        res = await ProfileGateway(mc_runtime).get_user_by_phone(phone)
+        data = res.get("data") if isinstance(res, dict) and str(res.get("status", "")).upper() == "SUCCESS" else None
+        perms = data.get("permissions") if isinstance(data, dict) else None
+        return bool(isinstance(perms, dict) and perms.get("can_buy") is True)
+    except Exception as exc:  # pragma: no cover - la lecture de capacité ne casse jamais un tour
+        logger.warning("capacité acheteur illisible (%s) — navigation recurring non élargie", type(exc).__name__)
+        return False
+
+
 async def _arbitrate_context(
     state: Dict[str, Any], mc_runtime: Any, text: str, role_up: str, impl: Any
 ) -> Optional[Dict[str, Any]]:
@@ -2289,7 +2310,16 @@ async def _arbitrate_context(
     if state.get("is_onboarding") or not str(text or "").strip() or role_up not in {"BUYER", "PRODUCER"}:
         return None
     outbound = await _fetch_interactive_outbound(mc_runtime, state, text)
-    decision = ca.resolve_conversation_context(state, text, role=role_up, outbound=outbound)
+    norm = ca.fold(text)
+    # Lecture de capacité UNIQUEMENT pour une navigation « mes besoins » hors graphe BUYER (vocabulaire fermé : coût nul
+    # pour tout autre message).
+    buyer_capable = role_up != "BUYER" and ca.is_recurring_navigation(norm) and await _buyer_capability(mc_runtime, state)
+    decision = ca.resolve_conversation_context(state, text, role=role_up, outbound=outbound, buyer_capable=buyer_capable)
+    if ca.is_recurring_navigation(norm):  # aucune PII : ni texte, ni téléphone, ni identifiant
+        logger.info(
+            "RECURRING_NAVIGATION_RESOLVED actor_role=%s buyer_capability=%s route=%s reason=%s",
+            role_up, buyer_capable or role_up == "BUYER", (decision.raw or {}).get("detected_intent") or "NONE", decision.reason,
+        )
     if decision.kind in (ca.ArbitrationKind.ACTIVE_SLOT, ca.ArbitrationKind.GENERIC_CLASSIFICATION):
         return None
     ca.log_decision(decision, outbound=outbound)
