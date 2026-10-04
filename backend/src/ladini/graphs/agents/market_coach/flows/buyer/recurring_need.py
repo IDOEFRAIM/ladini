@@ -87,7 +87,15 @@ logger = logging.getLogger("Ladini.Market.RecurringNeed")
 # (`nodes/confirmation_gate.py::_CONFIRMATION_TTL_SECONDS`) : passé ce délai, une réponse numérique
 # ne cible plus rien de fiable, on réaffiche la liste plutôt que d'appliquer un choix périmé.
 _MENU_TTL_SECONDS = 600.0
-_BACK_WORDS = ("retour", "besoin", "mes besoins")
+#: B23 — réponses TEXTUELLES FERMÉES (comparées en entier, jamais en sous-chaîne) qui ramènent à la liste. Avant B23 une
+#: sous-chaîne (« besoin ») capturait « j'ai besoin de 2 chèvres chaque semaine » comme un « retour ».
+_BACK_WORDS = frozenset({"retour", "mes besoins", "voir mes besoins", "liste de mes besoins", "mes besoins recurrents"})
+#: Libellés des entrées d'un menu (action -> libellé) : ils sont publiés avec le menu pour que l'interprétation d'un message
+#: libre voie CE que l'écran propose (le menu est une ATTENTE qui guide l'interprétation, jamais le moteur d'intention).
+_ACTION_LABELS = {
+    "REFRESH": "Rechercher maintenant", "LIST": "Retour", "CONFIRM": "Accepter la proposition",
+    "REJECT": "Refuser la proposition", "ORDERS": "Voir les commandes", "VIEW": "Voir la prochaine livraison",
+}
 
 _DRAFT_FIELDS = (
     "product",
@@ -904,6 +912,8 @@ async def _update_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     resolved = await _resolve_target_need(gw, phone, payload)
     if resolved is None:
         return {"final_response": "Vous n'avez aucun besoin actif pour l'instant.", "status": "COMPLETED"}
+    if isinstance(resolved, tuple) and len(resolved) == 2 and resolved[1] is True:  # B23 : clarification de cible (produit nommé inconnu)
+        return {"final_response": resolved[0], "status": "COMPLETED"}
     if isinstance(resolved, str):
         return {"final_response": resolved, "status": "WAITING_INPUT"}
     need_id, product_label = resolved
@@ -1006,6 +1016,12 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         if kind == "VIEW":
             return await _show_need_detail(state, mc_runtime, target, ensure=True)
         if kind in ("CONFIRM", "REJECT"):
+            if _payload.get("closed_reply_required"):
+                # B23 : une réponse en langage LIBRE (jamais un numéro/alias fermé du menu) ne valide ni ne refuse jamais une
+                # proposition — la mauvaise action vaut moins qu'une clarification. Le menu reste affiché.
+                logger.info("RECURRING_MUTATION_NEEDS_CLOSED_REPLY action=%s", kind)
+                return {"final_response": "Pour accepter ou refuser cette proposition, répondez « accepter » ou « refuser », "
+                                          "ou tapez le numéro affiché.", "status": "WAITING_INPUT"}
             need_id, occurrence_id, version = _split_match_target(target)
             return await _respond_to_match(
                 state, mc_runtime, recurring_need_id=need_id, action=kind,
@@ -1048,7 +1064,7 @@ def _resolve_menu_reply(state: Dict[str, Any]):
     chosen = mapping.get(index)
     if chosen is None:
         chosen = _chosen_by_text_alias(mapping, text_lower)
-    if chosen is None and any(word in text_lower for word in _BACK_WORDS):
+    if chosen is None and _fold_text(text_lower) in _BACK_WORDS:
         chosen = "LIST"
     if chosen is None:
         return ("INVALID", None)
@@ -1062,6 +1078,12 @@ def _resolve_menu_reply(state: Dict[str, Any]):
     if chosen == "ORDERS":
         return ("ORDERS", None)
     return ("DETAIL", chosen)
+
+
+def _fold_text(text: str) -> str:
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import fold
+
+    return str(fold(text))
 
 
 def _chosen_by_text_alias(mapping: Dict[str, str], text_lower: str) -> Optional[str]:
@@ -1110,8 +1132,10 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
         # (`nodes/cleanup.py::keep_selection_channel`). Avec COMPLETED le goal était effacé et le « 1 » suivant
         # retombait sur le menu générique : liste -> détail -> confirmer était INATTEIGNABLE en vraie conversation.
         "status": "WAITING_INPUT",
-        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time(),
-                                                   "actions": {k: "SELECT" for k in mapping}}},
+        "working_memory": {"recurring_need_menu": {
+            "mapping": mapping, "created_at": time.time(), "actions": {k: "SELECT" for k in mapping},
+            "title": "Liste de vos besoins récurrents (répondre avec le numéro du besoin)",
+            "labels": {str(i): _render_need_line(item) for i, item in enumerate(items, start=1)}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
 
@@ -1353,8 +1377,10 @@ async def _show_need_detail(
     return {
         "final_response": "\n".join(lines),
         "status": "WAITING_INPUT",  # B13 : voir `_render_needs_list` (garde le goal vivant pour « 1/2/3 »)
-        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time(),
-                                                   "actions": {k: _menu_action_of(v) for k, v in mapping.items()}}},
+        "working_memory": {"recurring_need_menu": {
+            "mapping": mapping, "created_at": time.time(), "actions": {k: _menu_action_of(v) for k, v in mapping.items()},
+            "title": f"Écran du besoin récurrent « {product} » (livraison {_fmt_date_fr(detail.get('occurrence_date')) or 'à venir'})",
+            "labels": {k: _ACTION_LABELS.get(_menu_action_of(v), v) for k, v in mapping.items()}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
 
@@ -1920,6 +1946,12 @@ async def _digest_skip_named_product(
     }
 
 
+def _same_product(hint: str, label: str) -> bool:
+    """Nom cité vs nom du besoin, insensible à la casse/accents/pluriel simple (« chèvres » ~ « chèvre »)."""
+    a, b = _fold_text(hint), _fold_text(label)
+    return bool(a and b and (a == b or a in b or b in a or a.rstrip("s") == b.rstrip("s")))
+
+
 async def _resolve_target_need(gw: RecurringSupplyGateway, phone: Any, payload: Dict[str, Any]):
     """Résout le besoin visé par nom de produit — jamais un UUID brut (même principe que
     `PROCUREMENT_UPDATE_REQUEST`). Retourne `(need_id, label)`, `None` (aucun besoin), ou une chaîne
@@ -1932,10 +1964,16 @@ async def _resolve_target_need(gw: RecurringSupplyGateway, phone: Any, payload: 
     active = [i for i in items if i.get("status") in ("ACTIVE", "PAUSED")]
     if not active:
         return None
-    if len(active) == 1:
-        return active[0]["recurring_need_id"], active[0]["product"]
-
     product_hint = str(payload.get("product") or "").strip().lower()
+    if len(active) == 1:
+        # B23 : un produit NOMMÉ qui n'est pas celui du seul besoin n'est pas une modification de CE besoin (« 2 chèvres » ne
+        # change jamais le besoin Bœuf) — clarification, jamais une mutation par défaut. Sans produit nommé : le besoin du contexte.
+        only = active[0]
+        if product_hint and not _same_product(product_hint, str(only.get("product") or "")):
+            return (f"Je ne trouve pas de besoin récurrent « {product_hint} » (vous avez : {only['product']}). "
+                    f"Pour en créer un nouveau, dites par exemple « j'ai besoin de 2 {product_hint} chaque semaine ».", True)
+        return only["recurring_need_id"], only["product"]
+
     if product_hint:
         matches = [i for i in active if product_hint in str(i.get("product") or "").lower()]
         if len(matches) == 1:

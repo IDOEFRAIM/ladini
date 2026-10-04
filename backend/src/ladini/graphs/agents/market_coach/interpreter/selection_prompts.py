@@ -20,7 +20,7 @@ from typing import List
 # (`prompt_version`), pour comparer AVANT/APRÈS un changement de prompt.
 # Distincte de `INTERPRETER_PROMPT_VERSION` (routing.py) — chaque famille de
 # micro-prompt a sa propre version (spec §19).
-SELECTION_PROMPT_VERSION = "selection_v2"
+SELECTION_PROMPT_VERSION = "selection_v3"
 
 SELECTION_SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -42,7 +42,11 @@ _USER_PROMPT_TEMPLATE = (
     "(\"le moins cher\", \"le gros bidon\", \"finalement le premier\").\n"
     "- INTERRUPTION : le message démarre clairement une demande DIFFÉRENTE, "
     "sans rapport avec les options proposées (ex: le menu liste des "
-    'commandes et le message dit "je veux vendre du maïs"). Un verbe '
+    'commandes et le message dit "je veux vendre du maïs"). Une nouvelle '
+    "demande COMPLÈTE (un produit, une quantité, une fréquence...) n'est "
+    "jamais une sélection, même quand le menu parle du même domaine ou du "
+    "même produit (ex: l'écran affiche le besoin « Bœuf » et le message "
+    'demande 2 chèvres chaque semaine). Un verbe '
     "d'action seul, qui ne décrit ni ne désigne AUCUNE des options "
     'affichées (ex: "confirmer", "annuler", "je confirme"), est TOUJOURS '
     "une interruption — même s'il n'y a qu'une seule option affichée, "
