@@ -24,10 +24,15 @@ from __future__ import annotations
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Sequence
+from typing import Container, Sequence
 
 # Fenêtre de matérialisation par défaut à la création/à l'extension quotidienne d'un besoin (mandat §8).
 OCCURRENCE_WINDOW_DAYS = 7
+
+#: Horizon de recherche de la PROCHAINE échéance d'une règle (B22). Sans lui, une règle dont la période dépasse
+#: `OCCURRENCE_WINDOW_DAYS` (MONTHLY, ONE_OFF lointain) n'a aucune occurrence matérialisée la plupart du temps : « mes
+#: besoins » affichait « à planifier » pour un besoin ACTIF et valide. 400 jours couvrent toute règle supportée.
+NEXT_DUE_HORIZON_DAYS = 400
 
 RECURRENCE_TYPES = ("DAILY", "WEEKLY_DAYS", "WEEKLY", "MONTHLY", "ONE_OFF")
 
@@ -126,3 +131,27 @@ def generate_occurrence_dates(
 def occurrence_window(*, from_date: date | datetime, window_days: int = OCCURRENCE_WINDOW_DAYS) -> date:
     """Borne supérieure de la fenêtre courte de matérialisation (mandat §8 : aujourd'hui → J+7)."""
     return _as_date(from_date) + timedelta(days=window_days)
+
+
+def next_due_date(
+    rule: RecurrenceRule,
+    *,
+    from_date: date | datetime,
+    skip: Container[date] = (),
+    horizon_days: int = NEXT_DUE_HORIZON_DAYS,
+) -> date | None:
+    """Première échéance de `rule` à partir de `from_date` (incluse), hors dates de `skip` (déjà jouées/sautées),
+    dans `horizon_days`. Fonction PURE : même sémantique de dates que `generate_occurrence_dates` (starts_at, ends_at,
+    exclusions, ancre mensuelle). `None` : aucune échéance restante (règle terminée) — jamais « à planifier »."""
+    start = _as_date(from_date)
+    lower = max(start, _as_date(rule.starts_at))
+    upper = start + timedelta(days=horizon_days)
+    if rule.ends_at is not None:
+        upper = min(upper, _as_date(rule.ends_at))
+    day = lower
+    one_day = timedelta(days=1)
+    while day <= upper:
+        if day not in skip and day.isoweekday() not in rule.excluded_weekdays and _is_due(rule, day):
+            return day
+        day += one_day
+    return None

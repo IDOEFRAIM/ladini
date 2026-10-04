@@ -50,7 +50,8 @@ class SimRt(_PreorderRt):
             return {"status": "success", "items": [{
                 "recurring_need_id": NEED_ID, "product": "tomate", "quantity": self.requested, "unit": "KG",
                 "recurrence_type": "WEEKLY_DAYS", "weekly_days": [5], "status": self.need_status,
-                "next_occurrence_date": "2026-10-09" if o else None, "next_occurrence_id": OCC_ID if o else None,
+                "schedule_state": "OK", "next_occurrence_materialized": bool(o), "starts_on": "2026-10-02",
+                "next_occurrence_date": "2026-10-09", "next_occurrence_id": OCC_ID if o else None,
                 "next_occurrence_status": o["status"] if o else None, "requested_quantity": self.requested if o else None,
                 "matched_quantity": self.matched() if o else None, "next_occurrence_version": o["version"] if o else None,
                 "next_occurrence_notified": False}]}
@@ -125,12 +126,13 @@ def test_full_cycle_partial_without_cron_or_digest():
     c = Conv(supply=[("Producteur A", 250.0, 500.0)])
     st = c.say("mes besoins")
     assert "Mes besoins récurrents" in _r(st) and "Tomate" in _r(st) and "350 KG chaque vendredi" in _r(st)
-    assert "Prochaine livraison : à planifier" in _r(st)  # aucune occurrence matérialisée, et pourtant consultable
+    assert "Prochaine livraison : 9 octobre" in _r(st)  # B22 : date CALCULÉE par la règle, même sans occurrence matérialisée
+    assert "à planifier" not in _r(st) and "Disponibilité actuelle" not in _r(st)
     assert "get_buyer_orders_dashboard" not in c.rt.calls  # « mes besoins » n'est JAMAIS les commandes
 
     st = c.say("1")  # sélection numérique du besoin (LLM aveugle)
     assert "ensure_next_recurring_occurrence" in c.rt.calls  # prochaine occurrence matérialisée à la demande
-    assert "Livraison du 9 octobre" in _r(st) and "Aucune disponibilité trouvée" in _r(st) and "1. Rechercher maintenant" in _r(st)
+    assert "Prochaine livraison : 9 octobre" in _r(st) and "aucune offre disponible" in _r(st) and "1. Rechercher maintenant" in _r(st)
     assert "Accepter" not in _r(st)
 
     st = c.say("1")  # « Rechercher maintenant » : le moteur de matching à la demande
@@ -163,7 +165,7 @@ def test_complete_availability_wording():
 def test_zero_availability_offers_no_accept_and_retry_works():
     c = Conv(supply=[])
     st = _to_proposal(c)
-    assert "Aucune disponibilité trouvée" in _r(st) and "1. Rechercher maintenant" in _r(st) and "Accepter" not in _r(st)
+    assert "aucune offre disponible" in _r(st) and "1. Rechercher maintenant" in _r(st) and "Accepter" not in _r(st)
     c.say("accepter")  # aucune action « accepter » n'existe dans ce menu
     assert c.rt.accept_calls == [] and c.rt.orders == []
     c.rt.supply = [("A", 100.0, 500.0)]

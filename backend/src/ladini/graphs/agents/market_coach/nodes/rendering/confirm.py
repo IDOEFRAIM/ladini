@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 from ladini.graphs.agents.market_coach.core.goals import (
     BUYER_PREORDER_GOALS as _BUYER_PREORDER_GOALS,
@@ -18,6 +18,10 @@ from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
 )
+from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
+    RecurringNeedDraft,
+    RecurringNeedDraftStatus,
+)
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraft,
     SalesPublishDraftStatus,
@@ -31,6 +35,45 @@ from ladini.graphs.agents.market_coach.services.ui.confirmation_summary import (
 )
 
 logger = logging.getLogger("Ladini.Market.Rendering.Confirm")
+
+
+#: Marqueur `working_memory[...]` : `(draft_id, version)` du besoin récurrent dont la confirmation interactive a déjà été
+#: montrée, et le message entrant qui l'a émise (distingue un retry du MÊME message — qui ré-émet, l'envoi étant
+#: dédupliqué par `ResponseDispatcher` — d'un message DIFFÉRENT). Hors du draft : le flow réécrit le draft à chaque tour.
+RECURRING_CONFIRMATION_MARKER = "recurring_confirmation_emitted"
+RECURRING_CONFIRMATION_REMINDER = (
+    "Le récapitulatif est juste au-dessus. Répondez *Confirmer* pour l'enregistrer, *Annuler* pour l'abandonner, "
+    "ou dites-moi ce qui doit changer."
+)
+
+
+def _recurring_confirmation_marker(state: Dict[str, Any], goal: Optional[str]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """B22 — UNE confirmation interactive par `(draft_id, version)` de besoin récurrent.
+
+    Ce rendu est la couche qui produit réellement le message sortant (il remplace le texte du flow) ET il est atteint par
+    tout message non compris pendant l'attente (`cognitive_guard` -> RECOVERY -> CONFIRMATION) : sans garde, chaque
+    message qui ne change pas le draft régénère le MÊME récapitulatif. Retourne `(déjà_montrée, marqueur)` : `marqueur`
+    est celui à écrire dans `working_memory` quand on émet pour de bon, `None` si ce n'est pas un draft récurrent en
+    cours d'édition."""
+    if goal != "CREATE_RECURRING_NEED":
+        return False, None
+    draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+    if draft is None or draft.status != RecurringNeedDraftStatus.DRAFT:
+        return False, None
+    sid = state.get("message_sid")
+    previous = (state.get("working_memory") or {}).get(RECURRING_CONFIRMATION_MARKER) or {}
+    already = previous.get("draft_id") == draft.draft_id and previous.get("version") == draft.version
+    retry_of_same_message = sid is not None and previous.get("message_sid") == sid
+    marker = {"draft_id": draft.draft_id, "version": draft.version, "message_sid": sid}
+    if already and not retry_of_same_message:
+        return True, previous
+    return False, marker
+
+
+def _with_marker(result: Dict[str, Any], marker: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if marker is not None:
+        result["working_memory"] = {**(result.get("working_memory") or {}), RECURRING_CONFIRMATION_MARKER: marker}
+    return result
 
 
 async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
@@ -81,6 +124,21 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
                 "ag_ui_component": None,
             },
         )
+
+    already_shown, recurring_marker = _recurring_confirmation_marker(state, ctx.goal)
+    if already_shown:
+        logger.info("RECURRING_CONFIRMATION_DEDUPED")
+        return _with_marker(apply_corrections(
+            state,
+            {
+                "final_response": RECURRING_CONFIRMATION_REMINDER,
+                # Ni CONFIRMATION ni WAITING_CONFIRMATION : `Orchestrator._interactive_hint` y verrait une demande de
+                # boutons et enverrait une SECONDE confirmation interactive. Le pending CONFIRM_ACTION reste intact.
+                "response_strategy": "CLARIFICATION",
+                "status": "WAITING_INPUT",
+                "ag_ui_component": None,
+            },
+        ), recurring_marker)
 
     # `confirmation_summary` est normalement posé par `confirmation_gate`
     # (source unique du récap). Le repli ci-dessous ne sert que si un chemin
@@ -169,7 +227,9 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
     if deviation_note:
         text_output = f"{deviation_note}\n\n{text_output}"
 
-    return apply_corrections(
+    if recurring_marker is not None:
+        logger.info("RECURRING_CONFIRMATION_EMITTED")
+    return _with_marker(apply_corrections(
         state,
         {
             "final_response": text_output,
@@ -193,4 +253,4 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
                 },
             },
         },
-    )
+    ), recurring_marker)

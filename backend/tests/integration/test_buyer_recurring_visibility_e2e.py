@@ -45,6 +45,7 @@ def _need(need_id: str, product: str, **over: Any) -> Dict[str, Any]:
         "next_occurrence_date": None, "next_occurrence_id": None, "requested_quantity": None,
         "matched_quantity": None, "next_occurrence_version": None, "next_occurrence_notified": False,
         "in_latest_digest": False, "digest_occurrence_version": None,
+        "schedule_state": "OK", "next_occurrence_materialized": False, "starts_on": "2026-10-02",
     }
     base.update(over)
     return base
@@ -109,7 +110,7 @@ def _r(st) -> str:
     return str(st.get("final_response") or "")
 
 
-_MILK = _need("N-MILK", "lait")
+_MILK = _need("N-MILK", "lait", next_occurrence_date="2026-10-09")  # prochaine échéance CALCULÉE, rien de matérialisé
 _DETAIL_MATCHED = {
     "status": "success", "occurrence_id": "O-1", "occurrence_version": 4, "product": "lait",
     "requested_quantity": 20, "unit": "L", "occurrence_date": "2026-10-09",
@@ -141,7 +142,7 @@ def test_visibility_does_not_depend_on_cron_state_A_active_need_without_occurren
     r = _r(st)
     assert "Lait" in r and "20 L chaque semaine" in r and "🟢 Actif" in r
     assert "Disponibilité actuelle" not in r  # aucune occurrence : pas de disponibilité inventée
-    assert "Prochaine livraison : à planifier" in r
+    assert "Prochaine livraison : 9 octobre" in r and "à planifier" not in r  # B22 : jamais un « à planifier » ambigu
 
 
 def test_visibility_state_B_open_occurrence_shows_availability_label_hardcoded_demain():
