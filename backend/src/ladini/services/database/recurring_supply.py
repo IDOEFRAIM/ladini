@@ -958,7 +958,7 @@ class RecurringSupplyMixin(BaseMixin):
                 product = await current_session.get(Product, alloc.product_id, with_for_update=True)
                 if product is None:
                     raise BusinessRuleException("Produit introuvable pour une allocation.")
-                if sells_by_package(product.pricing_tiers):
+                if sells_by_package(getattr(product, "pricing_tiers", None)):
                     raise BusinessRuleException(
                         f"« {product.name} » se vend par conditionnement : non disponible en approvisionnement "
                         "récurrent.",

@@ -43,7 +43,7 @@ class _Session:
     async def execute(self, _stmt):
         return _Result(self.allocations)
 
-    async def get(self, _model, pk):
+    async def get(self, _model, pk, **_kw):  # accepte with_for_update comme SQLAlchemy
         return self.products.get(pk)
 
     def add(self, obj):
