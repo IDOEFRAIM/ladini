@@ -286,6 +286,25 @@ def _send_via_twilio(
         kind = interactive.get("kind")
         interactive_enabled = bool(getattr(settings, "TWILIO_INTERACTIVE_ENABLED", False))
 
+        # Le template Twilio (`TWILIO_CONFIRM_CONTENT_SID`) est figé sur
+        # « Confirmer / Annuler » : il ne sait PAS porter des boutons
+        # personnalisés (ex. clarification « mettre en vente / enregistrer
+        # en stock »). L'envoyer tel quel affichait un « Confirmer » sans
+        # objet, et son tap bouclait sur la même question. On bascule donc
+        # ces menus en texte numéroté (« 1 », « 2 » résolus côté agent).
+        custom_buttons = [
+            b for b in (interactive.get("buttons") or [])
+            if isinstance(b, dict) and str(b.get("id") or "").upper() not in ("CONFIRM", "REJECT")
+        ]
+        if kind == "quick_reply" and custom_buttons:
+            final_text = (
+                str(final_text).rstrip()
+                + "\n"
+                + "\n".join(f"{i}. {b.get('title')}" for i, b in enumerate(custom_buttons, 1))
+                + "\nRépondez par le numéro de votre choix."
+            )
+            kind = None
+
         if kind in ("confirm", "quick_reply") and interactive_enabled:
             confirm_sid = str(
                 getattr(settings, "TWILIO_CONFIRM_CONTENT_SID", "") or ""

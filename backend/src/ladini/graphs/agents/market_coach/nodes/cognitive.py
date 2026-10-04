@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
@@ -296,6 +297,17 @@ def _select_clarified_goal(
     appartient déjà à `candidate_goals` (jamais un goal injecté hors de la
     liste proposée à l'utilisateur — invariants I3/I4)."""
     folded = _fold_text(text)
+    # Menu texte numéroté (canal Twilio, sans boutons personnalisés) :
+    # « 1 » / « 2 » / « option 2 » désignent le N-ième candidat, dans
+    # l'ordre exact où le menu les a listés.
+    numbered = re.fullmatch(r"(?:option|choix|numero)?\s*(\d)\s*[.)]?", folded.strip())
+    if numbered:
+        index = int(numbered.group(1)) - 1
+        if 0 <= index < len(candidate_goals):
+            return candidate_goals[index]
+    # Payload d'un bouton natif (Meta) : l'id du bouton EST le goal.
+    if folded.strip().upper() in candidate_goals:
+        return folded.strip().upper()
     lexical_matches = [
         goal
         for goal in candidate_goals
