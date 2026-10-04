@@ -391,7 +391,8 @@ class TestPromptSizeGuard:
             _ctx(), "je veux vendre 20 sacs de mais a 250 le kilo"
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
-        assert 800 <= total_tokens <= 2650
+        # B24 : +~30 tokens (champ `update_action` du schéma JSON) ; le garde anti-5000 tokens ci-dessus reste à 2650.
+        assert 800 <= total_tokens <= 2700
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

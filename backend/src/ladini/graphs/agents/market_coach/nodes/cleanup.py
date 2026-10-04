@@ -110,6 +110,8 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "should_interrupt": False,
     "interruption_detected": False,
     "interruption_unresolved": False,
+    "relation_to_context": None,
+    "context_target": None,
     "interruption_type": None,
     "security_reason": None,
     "requires_human": False,

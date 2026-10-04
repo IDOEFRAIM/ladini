@@ -36,7 +36,8 @@ def test_the_three_new_intents_are_buyer_only():
 def test_the_three_new_intents_share_the_recurring_need_tunnel():
     for goal in NEW_GOALS:
         assert INTENT_CONFIG[goal]["tunnel"] == "recurring_need", goal
-    assert set(NEW_GOALS) == set(BUYER_RECURRING_NEED_GOALS)
+    # B24 : REFRESH_RECURRING_MATCHING (relance par message) partage le même tunnel.
+    assert set(NEW_GOALS) | {"REFRESH_RECURRING_MATCHING"} == set(BUYER_RECURRING_NEED_GOALS)
 
 
 def test_create_recurring_need_requires_the_minimal_slots_only():
