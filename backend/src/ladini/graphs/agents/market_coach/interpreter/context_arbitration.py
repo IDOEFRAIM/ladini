@@ -129,7 +129,8 @@ RECURRING_MENU_TEXT_ALIASES: Dict[str, FrozenSet[str]] = {
     "CONFIRM": frozenset({"accepter", "j accepte", "accepter la proposition", "confirmer"}),
     "REJECT": frozenset({"refuser", "je refuse", "refuser la proposition", "pas cette fois"}),
     "REFRESH": frozenset({"actualiser", "rechercher", "rechercher maintenant", "rechercher a nouveau", "chercher maintenant"}),
-    "VIEW": frozenset({"voir la prochaine livraison", "prochaine livraison"}),
+    "VIEW": frozenset({"voir la prochaine livraison", "prochaine livraison", "non", "non merci", "ne rien changer"}),
+    "EXEC": frozenset({"oui", "confirmer", "je confirme", "oui je confirme"}),
     "ORDERS": frozenset({"voir les commandes", "voir la commande"}),
     "LIST": frozenset({"retour"}),
 }
@@ -211,8 +212,21 @@ def _has_ghost_menu(state: Mapping[str, Any]) -> bool:
     return bool(state.get("available_mapping") or state.get("expected_candidates"))
 
 
+_CLOSED_INDEX = re.compile(r"^(?:(?:option|choix|numero|n)\s+)?(\d{1,2})$")
+
+
+def closed_menu_index(norm: str) -> Optional[str]:
+    """B24 — DÉTECTEUR DE RÉPONSE FERMÉE : l'index de menu visé par `norm` (déjà `fold`é), ou `None`.
+
+    Fermé = le message ENTIER est un numéro (« 1 », « 01 », « 1. », « 1) ») ou « option/choix/numéro N ». Tout le reste —
+    « je veux 1 chèvre », « mets-en 1 », « j'en veux 1 de plus » — contient un chiffre mais N'EST PAS une réponse fermée :
+    il passe par l'interprétation sémantique. Jamais un « contient un chiffre »."""
+    match = _CLOSED_INDEX.match(norm or "")
+    return str(int(match.group(1))) if match else None
+
+
 def _is_bare_digit(norm: str) -> bool:
-    return norm.isdigit()
+    return closed_menu_index(norm) is not None
 
 
 def is_recurring_navigation(norm: str) -> bool:
@@ -222,8 +236,9 @@ def is_recurring_navigation(norm: str) -> bool:
 
 def resolve_menu_action(norm: str, actions: Mapping[str, str], *, allow_digits: bool) -> Optional[str]:
     """Action du menu propriétaire visée par `norm` (chiffre du menu ou alias fermé) ; `None` sinon."""
-    if allow_digits and norm in actions:
-        return str(actions[norm])
+    index = closed_menu_index(norm)
+    if allow_digits and index is not None and index in actions:
+        return str(actions[index])
     allowed = set(actions.values())
     for action, aliases in MENU_ACTION_ALIASES.items():
         if action in allowed and norm in aliases:
@@ -286,8 +301,9 @@ def _recurring_menu_selection(state: Mapping[str, Any], pending: Any, norm: str)
     if time.time() - float(menu.get("created_at") or 0) > _RECURRING_MENU_TTL_SECONDS:
         return None
     actions: Mapping[str, str] = menu["actions"]
-    if norm.isdigit():
-        return (int(norm), str(actions[norm])) if norm in actions else None
+    index = closed_menu_index(norm)
+    if index is not None:
+        return (int(index), str(actions[index])) if index in actions else None
     for action, aliases in RECURRING_MENU_TEXT_ALIASES.items():
         starts = {"CONFIRM": "accepter ", "REJECT": "refuser "}.get(action)
         if norm in aliases or (starts and norm.startswith(starts)):
@@ -325,24 +341,48 @@ def live_menu_view(
 
 #: Actions d'un menu récurrent qui MODIFIENT l'état métier (accepter/refuser une proposition) : jamais déclenchées par une
 #: réponse en langage libre — uniquement par un numéro ou un alias FERMÉ du menu (étape 1b de l'arbitrage).
-MUTATING_MENU_ACTIONS: FrozenSet[str] = frozenset({"CONFIRM", "REJECT"})
+MUTATING_MENU_ACTIONS: FrozenSet[str] = frozenset({"CONFIRM", "REJECT", "EXEC"})
 #: Actions d'écran à effet de bord ou de navigation (recherche = moteur de matching, retour/commandes = changement d'écran) :
 #: en langage LIBRE, une « sélection » du micro-prompt ne suffit pas à les déclencher — la relation avec l'attente doit être
 #: justifiée par l'interprétation sémantique (reclassification NEW_TASK, B24). Un numéro/alias fermé reste direct (1b).
-FREE_TEXT_GUARDED_ACTIONS: FrozenSet[str] = frozenset({"REFRESH", "LIST", "ORDERS", "VIEW"})
+FREE_TEXT_GUARDED_ACTIONS: FrozenSet[str] = frozenset({"REFRESH", "LIST", "ORDERS", "VIEW", "ASK"})
 
 GUARD_MUTATION_CLOSED_REPLY = "mutation_requires_closed_reply"
 GUARD_FREE_TEXT_ACTION = "free_text_selection_rejected"
 
 
-def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+_ORDINALS: Mapping[str, int] = {
+    "premier": 1, "premiere": 1, "1er": 1, "deuxieme": 2, "second": 2, "seconde": 2, "troisieme": 3, "quatrieme": 4,
+    "cinquieme": 5,
+}
+
+
+def selection_is_evidenced(view: Mapping[str, Any], index: Any, text: str) -> bool:
+    """B24 — un choix d'entité en langage LIBRE (« le boeuf », « le premier ») est ÉTAYÉ par le texte : il nomme un mot
+    significatif du libellé affiché pour cet index, ou un ordinal qui désigne cet index. Un chiffre isolé dans une phrase
+    (« mets-en 3 ») n'est PAS une preuve : c'est une quantité, pas un numéro d'écran. Ce n'est pas un routeur métier : c'est la
+    vérification, hors LLM, qu'un index proposé par le micro-prompt est bien justifié par le message."""
+    norm = fold(text)
+    tokens = set(norm.split())
+    if any(_ORDINALS.get(t) == int(index) for t in tokens if str(index).isdigit()):
+        return True
+    keys = [str(k) for k in view["actions"]]
+    labels = view["labels"]
+    if str(index) not in keys:
+        return False
+    label_tokens = {t for t in fold(labels[keys.index(str(index))]).split() if len(t) >= 4 and not t.isdigit()}
+    return bool(label_tokens & tokens)
+
+
+def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any], text: str = "") -> Dict[str, Any]:
     """Fail-safe B23/B24 : une SÉLECTION issue du micro-prompt (donc d'un langage LIBRE : les entrées fermées sont résolues
     avant, par l'arbitrage 1b) sur un menu récurrent vivant n'est JAMAIS exécutée à l'aveugle.
 
-    * entrée MUTANTE (accepter/refuser)            -> `closed_reply_required` (le flow demande un numéro/alias fermé) ;
+    * entrée MUTANTE (accepter/refuser/exécuter)   -> `closed_reply_required` (le flow demande un numéro/alias fermé) ;
     * action d'écran (rechercher, retour, ...)     -> marquée `free_text_selection_rejected` : l'appelant reclassifie le
       message par l'interprétation sémantique (NEW_TASK) au lieu d'exécuter l'index ;
-    * choix d'une entité de la liste (SELECT)       -> inchangé (navigation sans effet de bord).
+    * choix d'une entité de la liste (SELECT)       -> accepté seulement s'il est ÉTAYÉ par le texte (`selection_is_evidenced`),
+      sinon `free_text_selection_rejected` comme une action d'écran.
     Hors menu récurrent vivant : `result` inchangé."""
     if str(result.get("interpreted_event") or "").upper() != "SELECTION":
         return result
@@ -355,7 +395,7 @@ def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any]) 
     if action in MUTATING_MENU_ACTIONS:
         return {**result, "extracted_entities": {**result["extracted_entities"], "closed_reply_required": True},
                 "raw_analysis": {**raw, "guard": GUARD_MUTATION_CLOSED_REPLY}}
-    if action in FREE_TEXT_GUARDED_ACTIONS:
+    if action in FREE_TEXT_GUARDED_ACTIONS or (action == "SELECT" and text and not selection_is_evidenced(view, index, text)):
         return {**result, "raw_analysis": {**raw, "guard": GUARD_FREE_TEXT_ACTION}}
     return result
 
@@ -588,7 +628,9 @@ __all__ = [
     "GUARD_FREE_TEXT_ACTION",
     "GUARD_MUTATION_CLOSED_REPLY",
     "RelationToContext",
+    "closed_menu_index",
     "derive_relation",
+    "selection_is_evidenced",
     "live_menu_target",
     "targeted_menu_clarification",
     "MUTATING_MENU_ACTIONS",

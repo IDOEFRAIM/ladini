@@ -126,7 +126,7 @@ def test_a_named_other_product_and_a_destructive_ambiguity_never_change_the_data
         conv.send("mes besoins", llm=UNKNOWN)
         conv.send("1", llm=UNKNOWN)
         t = conv.send("annule mes boeufs", llm=ScriptLLM(new_task("UPDATE_RECURRING_NEED", 0.9, product="boeufs", update_action="CANCEL")))
-        assert "ignorer seulement la prochaine livraison" in t.response and "update_recurring_need" not in t.mcp_tools()
+        assert "Ignorer seulement la prochaine livraison" in t.response and "update_recurring_need" not in t.mcp_tools()
         assert _rows(real_db, account) == before and before[0][3] == "ACTIVE"
         conv.send("mes besoins", llm=ScriptLLM(new_task("GET_MY_NEEDS", 0.95)))
         assert "Boeuf" in conv.send("1", llm=UNKNOWN).response
