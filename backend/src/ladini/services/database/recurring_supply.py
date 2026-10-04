@@ -83,7 +83,7 @@ from ladini.domain.models import (
     SubCategory,
     User,
 )
-from ladini.domain.package_inventory import restore_stock_for_item
+from ladini.domain.package_inventory import restore_stock_for_item, sells_by_package
 from ladini.domain.recurring_supply.recurrence import (
     OCCURRENCE_WINDOW_DAYS,
     RecurrenceRule,
@@ -952,9 +952,18 @@ class RecurringSupplyMixin(BaseMixin):
 
             order_total = 0.0
             for alloc in allocs:
-                product = await current_session.get(Product, alloc.product_id)
+                # B17 : verrou d'écriture (le débit lit-puis-écrit le stock) ET refus d'un produit à conditionnements —
+                # le récurrent alloue en UNITÉ DE BASE à un prix par unité ; il ne sait ni débiter le compte d'une
+                # variante ni facturer un prix par sachet/bidon (voir `need_matching_service._CANDIDATES_SQL`).
+                product = await current_session.get(Product, alloc.product_id, with_for_update=True)
                 if product is None:
                     raise BusinessRuleException("Produit introuvable pour une allocation.")
+                if sells_by_package(getattr(product, "pricing_tiers", None)):
+                    raise BusinessRuleException(
+                        f"« {product.name} » se vend par conditionnement : non disponible en approvisionnement "
+                        "récurrent.",
+                        reason="recurring_package_product_unsupported",
+                    )
                 available = float(product.quantity_for_sale or 0.0)
                 debit = float(alloc.quantity)
                 if available < debit:

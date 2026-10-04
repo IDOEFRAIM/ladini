@@ -41,6 +41,7 @@ from ladini.domain.package_inventory import (
     check_variant_availability,
     debit_stock_for_item,
     restore_stock_for_item,
+    sells_by_package,
 )
 from ladini.domain.pricing_tiers import (
     PricingTierError,
@@ -691,7 +692,7 @@ class BuyerMixin(BaseMixin):
                 base_unit_quantity = computed.base_unit_quantity
                 stock_debit = base_unit_quantity
             else:
-                if _has_uncertified_tiers(product):
+                if _has_uncertified_tiers(product) or sells_by_package(product.pricing_tiers):
                     # `Product.price` d'un produit à paliers est un shadow legacy : sans palier choisi,
                     # il n'existe AUCUN prix à facturer (ni 700 FCFA/L, ni un palier au hasard).
                     raise BusinessRuleException(
@@ -1473,7 +1474,9 @@ class BuyerMixin(BaseMixin):
                     "unit": response_unit,
                     # B16 : un produit à paliers n'a PAS de prix unitaire — `Product.price` n'en est que le shadow
                     # legacy ; ne jamais l'exposer comme un prix par unité (None = « choisir un conditionnement »).
-                    "unit_price": None if _has_uncertified_tiers(product) else float(product.price or 0.0),
+                    "unit_price": None
+                    if (_has_uncertified_tiers(product) or sells_by_package(product.pricing_tiers))
+                    else float(product.price or 0.0),
                     "producer_id": str(product.producer_id)
                     if product.producer_id
                     else None,
@@ -1923,7 +1926,7 @@ class BuyerMixin(BaseMixin):
                     f"{product.name} (x{int(qty)} {tier.packaging or tier.unit})"
                 )
             else:
-                if _has_uncertified_tiers(product):
+                if _has_uncertified_tiers(product) or sells_by_package(product.pricing_tiers):
                     logger.warning(
                         "create_preorder_draft: produit %s à paliers sans tier_id — article ignoré "
                         "(Product.price est un shadow legacy, jamais un prix de commande)",
