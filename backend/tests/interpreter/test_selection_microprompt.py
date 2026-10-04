@@ -637,7 +637,7 @@ class TestSelectionPromptNeverLeaksTheFullCatalog:
         # (2026-09-13) : v2 — clarification INTERRUPTION pour un verbe
         # d'action seul (incident réel double-rôle "confirmer"/"annuler"
         # mal classé SELECTION face à un menu à une seule option).
-        assert SELECTION_PROMPT_VERSION == "selection_v2"
+        assert SELECTION_PROMPT_VERSION == "selection_v3"
         assert SELECTION_PROMPT_VERSION != "interpreter_v1"
 
 

@@ -155,12 +155,25 @@ async def run_selection_microprompt(
     candidates: List[str] = [
         str(c) for c in (state.get("expected_candidates") or [])
     ]
+    last_agent_question = state.get("last_agent_question")
+    if not candidates:
+        # B23 : le menu récurrent (liste des besoins / écran d'un besoin) ne publie pas `expected_candidates` — le modèle
+        # voyait « (aucune option listée) » et « choisissait » au hasard. L'écran vivant est une ATTENTE : on montre ce
+        # qu'il propose, le modèle tranche (réponse / interruption / ambigu) et Python valide les bornes ci-dessous.
+        from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+            live_menu_view,
+        )
+
+        _view = live_menu_view(state)
+        if _view is not None:
+            candidates = list(_view["labels"])
+            last_agent_question = last_agent_question or _view["title"]
     message_sid = state.get("message_sid")
 
     system_prompt = SELECTION_SYSTEM_PROMPT
     user_prompt = build_selection_user_prompt(
         current_goal=locked_goal or "AUCUN",
-        last_agent_question=state.get("last_agent_question") or "—",
+        last_agent_question=last_agent_question or "—",
         candidates=candidates,
         normalized_text=text,
     )

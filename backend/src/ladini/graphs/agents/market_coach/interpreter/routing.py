@@ -2323,6 +2323,13 @@ async def _arbitrate_context(
     if decision.kind in (ca.ArbitrationKind.ACTIVE_SLOT, ca.ArbitrationKind.GENERIC_CLASSIFICATION):
         return None
     ca.log_decision(decision, outbound=outbound)
+    ca.log_intent_arbitration(
+        state,
+        semantic_intent=(decision.raw or {}).get("detected_intent") or ("reclassify" if decision.reclassify else None),
+        relation="ANSWER" if decision.kind == ca.ArbitrationKind.ACTIVE_MENU_ACTION else "NEW_TASK",
+        route=decision.kind.value,
+        reason=decision.reason,
+    )
     purge = ca.stale_context_purge_patch(state) if decision.purge else {}
     if decision.raw is not None:
         patch = InterpreterResult.from_legacy_dict(decision.raw).to_state_patch()
@@ -2834,6 +2841,20 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 _sel_outcome, _sel_result = SelectionOutcome.LEGACY_FALLBACK, None
 
             if _sel_outcome == SelectionOutcome.RESULT:
+                from ladini.graphs.agents.market_coach.interpreter import (
+                    context_arbitration as _ca,
+                )
+
+                _sel_result = _ca.guard_free_text_selection(state, _sel_result or {})
+                if _ca.live_menu_view(state) is not None:
+                    _ca.log_intent_arbitration(
+                        state,
+                        semantic_intent=_sel_result.get("detected_intent"),
+                        relation="ANSWER" if str(_sel_result.get("interpreted_event")).upper() == "SELECTION" else "UNRESOLVED",
+                        route="selection_microprompt",
+                        reason=(_sel_result.get("raw_analysis") or {}).get("guard")
+                        or str(_sel_result.get("interpreted_event") or "").lower(),
+                    )
                 return _sel_result
             if _sel_outcome == SelectionOutcome.INTERRUPTION:
                 # Le micro-prompt a confirmé que ce N'EST PAS une réponse au
@@ -3031,6 +3052,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 # jamais une intention devinée par substitution.
                 _nt_event = str(_nt_result.get("interpreted_event") or "").upper()
                 _nt_intent = _nt_result.get("detected_intent")
+                if _deviation_reclass:
+                    from ladini.graphs.agents.market_coach.interpreter import (
+                        context_arbitration as _ca2,
+                    )
+
+                    # B23 : l'attente (menu/slot) a été jugée non pertinente ; l'intention sémantique décide la tâche.
+                    _ca2.log_intent_arbitration(
+                        state,
+                        semantic_intent=_nt_intent,
+                        relation="UNRELATED" if _nt_event in ("UNKNOWN", "OUT_OF_SCOPE") else "NEW_TASK",
+                        route="new_task_microprompt",
+                        reason="expectation_superseded",
+                    )
                 if (
                     _deviation_reclass
                     and _nt_event in ("CONFIRM", "REJECT")

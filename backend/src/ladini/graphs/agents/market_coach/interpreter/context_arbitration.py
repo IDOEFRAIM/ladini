@@ -271,6 +271,47 @@ def _recurring_menu_selection(state: Mapping[str, Any], pending: Any, norm: str)
     return None
 
 
+def live_menu_view(state: Mapping[str, Any], *, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """B23 — le menu récurrent VIVANT vu comme une ATTENTE : `{"title", "labels": [...], "actions": {index: action}}`.
+
+    Il guide l'interprétation d'un message libre (le micro-prompt SELECTION voit ce que l'écran propose) ; il ne décide
+    jamais de l'intention. `None` : pas de menu récurrent vivant (autre goal, périmé, ou aucun)."""
+    pending = get_pending_interaction(dict(state))
+    if pending.kind != InteractionKind.SELECTION_MENU or str(pending.goal or "") != "GET_MY_NEEDS":
+        return None
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    if not isinstance(menu, dict) or not isinstance(menu.get("actions"), dict):
+        return None
+    now = time.time() if now is None else now
+    if now - float(menu.get("created_at") or 0) > _RECURRING_MENU_TTL_SECONDS:
+        return None
+    labels: Dict[str, Any] = menu["labels"] if isinstance(menu.get("labels"), dict) else {}
+    ordered = sorted((k for k in menu["actions"] if str(k).isdigit()), key=int)
+    return {
+        "title": str(menu.get("title") or ""),
+        "labels": [str(labels.get(k) or menu["actions"][k]) for k in ordered],
+        "actions": {str(k): str(menu["actions"][k]) for k in ordered},
+    }
+
+
+#: Actions d'un menu récurrent qui MODIFIENT l'état métier (accepter/refuser une proposition) : jamais déclenchées par une
+#: réponse en langage libre — uniquement par un numéro ou un alias FERMÉ du menu (étape 1b de l'arbitrage).
+MUTATING_MENU_ACTIONS: FrozenSet[str] = frozenset({"CONFIRM", "REJECT"})
+
+
+def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """Fail-safe B23 : une SÉLECTION issue du micro-prompt (langage libre) qui désigne une entrée MUTANTE d'un menu récurrent
+    est marquée `closed_reply_required` (le flow demande alors un numéro/alias fermé). Hors cas : `result` inchangé."""
+    if str(result.get("interpreted_event") or "").upper() != "SELECTION":
+        return result
+    view = live_menu_view(state)
+    index = (result.get("extracted_entities") or {}).get("selection_index")
+    if view is None or index is None or view["actions"].get(str(index)) not in MUTATING_MENU_ACTIONS:
+        return result
+    return {**result, "extracted_entities": {**result["extracted_entities"], "closed_reply_required": True},
+            "raw_analysis": {**(result.get("raw_analysis") or {}), "guard": "mutation_requires_closed_reply"}}
+
+
 # ── La primitive centrale ───────────────────────────────────────────────────────────────────────────────────────────
 def resolve_conversation_context(
     state: Mapping[str, Any],
@@ -410,8 +451,28 @@ def log_decision(decision: ArbitrationDecision, *, outbound: Optional[Interactiv
         logger.info("MENU_CONTEXT_CONSUMED owner=%s", decision.new_context)
 
 
+def log_intent_arbitration(state: Mapping[str, Any], *, semantic_intent: Any, relation: str, route: str, reason: str) -> None:
+    """B23 — journal de décision STRUCTURÉ « attente vs intention » (aucune PII : jamais le texte, seulement des codes).
+
+    `relation` : ANSWER (réponse à l'attente) | NEW_TASK (nouvelle intention qui supersede le menu) | UNRELATED (hors
+    domaine) | UNRESOLVED (clarification). `expected_action` : ce que l'écran actif attend."""
+    pending = get_pending_interaction(dict(state))
+    view = live_menu_view(state)
+    expected = "|".join(sorted(set(view["actions"].values()))) if view else pending.kind.value
+    goal = state.get("current_goal") or pending.goal or "NONE"
+    logger.info(
+        "INTENT_ARBITRATION current_goal=%s expected_action=%s semantic_intent=%s relation_to_expectation=%s "
+        "selected_route=%s reason=%s",
+        goal, expected, semantic_intent or "UNKNOWN", relation, route, reason,
+    )
+
+
 __all__ = [
     "ArbitrationDecision",
+    "MUTATING_MENU_ACTIONS",
+    "guard_free_text_selection",
+    "live_menu_view",
+    "log_intent_arbitration",
     "ArbitrationKind",
     "InteractiveOutbound",
     "is_recurring_navigation",
