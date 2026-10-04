@@ -2301,6 +2301,66 @@ async def _buyer_capability(mc_runtime: Any, state: Dict[str, Any]) -> bool:
         return False
 
 
+def _screen_context_hint(state: Dict[str, Any]) -> Optional[str]:
+    """B24 — description (générée par l'application, jamais le texte utilisateur) de l'écran récurrent vivant, donnée au
+    micro-prompt NEW_TASK pour qu'il juge la RELATION du message avec l'écran (corriger la cible affichée, ou nouvelle tâche)."""
+    from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
+
+    view = ca.live_menu_view(state)
+    if view is None:
+        return None
+    parts = [view["title"]] if view["title"] else []
+    target = ca.live_menu_target(state)
+    if target is not None:
+        parts.append(
+            f"cible affichée : besoin récurrent « {target.get('product') or '?'} » "
+            f"({target.get('quantity')} {target.get('unit') or ''}, {target.get('frequency') or 'fréquence inconnue'})"
+        )
+    parts.append("options affichées : " + " ; ".join(view["labels"]))
+    return " — ".join(parts)
+
+
+def _annotate_interpretation(state: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """B24 — UNIQUE point d'annotation/journalisation de l'arbitrage sémantique : ajoute `relation_to_context` et (pour une
+    intention qui vise l'écran affiché) la cible contextuelle `context_target`, puis émet `INTENT_ARBITRATION` (sans PII)."""
+    from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
+
+    relation = ca.derive_relation(state, patch)
+    intent = str(patch.get("detected_intent") or "UNKNOWN").upper()
+    target = ca.live_menu_target(state) if intent in ca.CONTEXT_TARGETED_INTENTS else None
+    out = {**patch, "relation_to_context": relation.value}
+    if target is not None:
+        out["context_target"] = target
+    analysis = patch.get("raw_analysis") or {}
+    path = str(analysis.get("path") or "")
+    if ca.live_menu_view(state) is None and not path.startswith("context_arbitration"):
+        return out
+    reason = analysis.get("decision_reason") or analysis.get("guard")
+    if path == "context_arbitration_recurring_menu":
+        reason = "closed_menu_answer"
+    elif path.startswith("context_arbitration_navigation"):
+        reason = "explicit_navigation"
+    elif not reason or reason == "expectation_superseded":
+        if relation == ca.RelationToContext.CORRECTION:
+            reason = "contextual_correction"
+        elif relation == ca.RelationToContext.ANSWER and target is not None:
+            reason = "contextual_command"
+        elif relation == ca.RelationToContext.NEW_TASK:
+            reason = "explicit_new_task"
+        else:
+            reason = reason or str(patch.get("interpreted_event") or "unknown").lower()
+    ca.log_intent_arbitration(
+        state,
+        semantic_intent=intent,
+        relation=relation,
+        route=path or "interpreter",
+        reason=str(reason),
+        target_type=str(target["type"]) if target is not None else None,
+        target_resolution="context" if target is not None else None,
+    )
+    return out
+
+
 async def _arbitrate_context(
     state: Dict[str, Any], mc_runtime: Any, text: str, role_up: str, impl: Any
 ) -> Optional[Dict[str, Any]]:
@@ -2323,21 +2383,16 @@ async def _arbitrate_context(
     if decision.kind in (ca.ArbitrationKind.ACTIVE_SLOT, ca.ArbitrationKind.GENERIC_CLASSIFICATION):
         return None
     ca.log_decision(decision, outbound=outbound)
-    ca.log_intent_arbitration(
-        state,
-        semantic_intent=(decision.raw or {}).get("detected_intent") or ("reclassify" if decision.reclassify else None),
-        relation="ANSWER" if decision.kind == ca.ArbitrationKind.ACTIVE_MENU_ACTION else "NEW_TASK",
-        route=decision.kind.value,
-        reason=decision.reason,
-    )
     purge = ca.stale_context_purge_patch(state) if decision.purge else {}
     if decision.raw is not None:
-        patch = InterpreterResult.from_legacy_dict(decision.raw).to_state_patch()
+        tagged = {**decision.raw, "raw_analysis": {**(decision.raw.get("raw_analysis") or {}), "decision_reason": decision.reason}}
+        patch = InterpreterResult.from_legacy_dict(tagged).to_state_patch()
         return {**patch, **purge}
     # Reclassification libre SANS l'ancien contexte (même idiome que BUYER_PRODUCT_SWITCH ci-dessous).
     neutral = ca.neutral_state_view(state)
     raw = await impl(neutral, mc_runtime)
     raw = _apply_packaged_stock_entities(raw, neutral, text)
+    raw = {**raw, "raw_analysis": {**(raw.get("raw_analysis") or {}), "decision_reason": decision.reason}}
     return {**InterpreterResult.from_legacy_dict(raw).to_state_patch(), **purge}
 
 
@@ -2815,6 +2870,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # InterpretationRoute.NEW_TASK` (le cas "aucun tunnel actif dès le
         # départ") car les deux empruntent le même classifieur ensuite.
         _deviation_reclass = False
+        _reclass_reason: Optional[str] = None  # B24 : pourquoi l'attente a été écartée (journal INTENT_ARBITRATION)
         from ladini.graphs.agents.market_coach.interpreter.state_router import (
             InterpretationRoute,
             choose_interpretation_route,
@@ -2846,17 +2902,15 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 )
 
                 _sel_result = _ca.guard_free_text_selection(state, _sel_result or {})
-                if _ca.live_menu_view(state) is not None:
-                    _ca.log_intent_arbitration(
-                        state,
-                        semantic_intent=_sel_result.get("detected_intent"),
-                        relation="ANSWER" if str(_sel_result.get("interpreted_event")).upper() == "SELECTION" else "UNRESOLVED",
-                        route="selection_microprompt",
-                        reason=(_sel_result.get("raw_analysis") or {}).get("guard")
-                        or str(_sel_result.get("interpreted_event") or "").lower(),
-                    )
-                return _sel_result
-            if _sel_outcome == SelectionOutcome.INTERRUPTION:
+                if (_sel_result.get("raw_analysis") or {}).get("guard") != _ca.GUARD_FREE_TEXT_ACTION:
+                    return _sel_result
+                # B24 : une action d'écran (rechercher, retour...) « choisie » par le micro-prompt sur du langage LIBRE n'est pas
+                # une réponse prouvée à l'attente — l'index n'est pas exécuté, l'interprétation sémantique (NEW_TASK) tranche.
+                logger.info("[Interpreter SELECTION] sélection en langage libre sur une action d'écran — reclassification NEW_TASK")
+                _reclass_reason = _ca.GUARD_FREE_TEXT_ACTION
+                expected_input = "NONE"
+                _deviation_reclass = True
+            elif _sel_outcome == SelectionOutcome.INTERRUPTION:
                 # Le micro-prompt a confirmé que ce N'EST PAS une réponse au
                 # menu — reprend le message ORIGINAL et le fait passer par
                 # le classifier NEW_TASK existant (spec §12/§13/§18) : on ne
@@ -2993,6 +3047,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 producer_order_action_pending=_producer_order_action_pending_signal(
                     state
                 ),
+                screen_context=_screen_context_hint(state) if _deviation_reclass else None,
             )
             _nt_catalog = {
                 intent_key: INTENT_CONFIG[intent_key].get("label", intent_key)
@@ -3053,18 +3108,12 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 _nt_event = str(_nt_result.get("interpreted_event") or "").upper()
                 _nt_intent = _nt_result.get("detected_intent")
                 if _deviation_reclass:
-                    from ladini.graphs.agents.market_coach.interpreter import (
-                        context_arbitration as _ca2,
-                    )
-
-                    # B23 : l'attente (menu/slot) a été jugée non pertinente ; l'intention sémantique décide la tâche.
-                    _ca2.log_intent_arbitration(
-                        state,
-                        semantic_intent=_nt_intent,
-                        relation="UNRELATED" if _nt_event in ("UNKNOWN", "OUT_OF_SCOPE") else "NEW_TASK",
-                        route="new_task_microprompt",
-                        reason="expectation_superseded",
-                    )
+                    # B23/B24 : l'attente (menu/slot) a été jugée non pertinente ; l'intention sémantique décide la tâche.
+                    # La raison alimente le journal INTENT_ARBITRATION (émis une seule fois, à la sortie de l'interpréteur).
+                    _nt_result["raw_analysis"] = {
+                        **(_nt_result.get("raw_analysis") or {}),
+                        "decision_reason": _reclass_reason or "expectation_superseded",
+                    }
                 if (
                     _deviation_reclass
                     and _nt_event in ("CONFIRM", "REJECT")
@@ -3078,7 +3127,16 @@ def make_input_interpreter(role: str = "PRODUCER"):
                         _nt_intent,
                     )
                     _legacy_fallback = True
-                elif _deviation_reclass and _nt_event in ("UNKNOWN", "OUT_OF_SCOPE"):
+                elif _deviation_reclass and (
+                    _nt_event in ("UNKNOWN", "OUT_OF_SCOPE")
+                    or (_nt_event == "AMBIGUOUS" and _screen_context_hint(state) is not None)
+                ):
+                    # B24 : « ambigu » face à un écran récurrent vivant = non résolu ; la clarification est celle de
+                    # l'écran (ciblée), pas un menu d'intentions génériques.
+                    if _nt_event == "AMBIGUOUS":
+                        _nt_result = {**_nt_result, "interpreted_event": "UNKNOWN", "detected_intent": "UNKNOWN",
+                                      "unknown_reason": "AMBIGUOUS"}
+                        _nt_result.pop("candidate_goals", None)
                     # (2026-09-14, incident WhatsApp #9) : la route SELECTION
                     # a déjà tranché que ce message est SANS RAPPORT avec le
                     # menu affiché — si la reclassification NEW_TASK ne
@@ -3786,6 +3844,8 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # est lié au message.
         if _deviation_reclass and raw_event in ("UNKNOWN", "OUT_OF_SCOPE"):
             _legacy_result["interruption_unresolved"] = True
+        if _deviation_reclass:
+            _legacy_result["raw_analysis"]["decision_reason"] = _reclass_reason or "expectation_superseded"
         return _legacy_result
 
     async def input_interpreter(
@@ -3845,10 +3905,10 @@ def make_input_interpreter(role: str = "PRODUCER"):
             # `interpreter/context_arbitration.py`. Aucun effet quand aucun contexte interactif n'existe.
             arbitrated: Optional[Dict[str, Any]] = await _arbitrate_context(state, mc_runtime, text, role_up, _input_interpreter_impl)
             if arbitrated is not None:
-                return arbitrated
+                return _annotate_interpretation(state, arbitrated)
             raw = await _input_interpreter_impl(state, mc_runtime)
             raw = _apply_packaged_stock_entities(raw, state, text)
-            return InterpreterResult.from_legacy_dict(raw).to_state_patch()
+            return _annotate_interpretation(state, InterpreterResult.from_legacy_dict(raw).to_state_patch())
 
         # B4 (2026-10-02) — CHANGEMENT DE PRODUIT EXPLICITE pendant un tunnel quantité Buyer :
         # le message n'est PAS une réponse au slot, donc le micro-parser du tunnel

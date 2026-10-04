@@ -156,7 +156,7 @@ def decide_active_draft_reply(
     cas, voir `_interpret_fast_path`) et le `detected_intent` qu'il a extrait,
     contre le `current_goal` déjà résolu par l'appelant. Un signal fort et déjà
     existant qu'une tâche est isolée et complète — `recurrence_type` présent
-    dans `said_entities` — l'emporte : mandat §9 cas (E)/(F) (« je veux 30
+    dans `said_entities` AVEC un `product` — l'emporte : mandat §9 cas (E)/(F) (« je veux 30
     poulets chaque semaine » pendant une confirmation ne doit jamais voler son
     nombre au draft en cours). Sans ce signal, seule une divergence claire entre
     l'intent détecté et le goal actif justifie CLARIFY plutôt que CORRECT —
@@ -186,7 +186,11 @@ def decide_active_draft_reply(
     if event not in ("NEW_TASK", "INTERRUPTION"):
         return TurnAction.ANSWER_PENDING
 
-    if not said_entities or said_entities.get("recurrence_type"):
+    if not said_entities:
+        return TurnAction.NEW_TASK
+    # Une fréquence dite AVEC un produit signale une tâche isolée et complète. Une fréquence SEULE (« plutôt chaque mois »)
+    # n'est pas une tâche : elle corrige la fréquence du draft en cours (B24) — la nouvelle tâche porte son propre produit.
+    if said_entities.get("recurrence_type") and said_entities.get("product"):
         return TurnAction.NEW_TASK
 
     intent_up = str(detected_intent or "").upper().strip()

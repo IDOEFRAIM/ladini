@@ -82,6 +82,19 @@ async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
         }:
             field = expected_input
 
+    # B24 : un écran récurrent vivant connaît ce qu'il attend — clarification métier ciblée, pas la question de champ générique.
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+        targeted_menu_clarification,
+    )
+
+    targeted = targeted_menu_clarification(state)
+    if targeted is not None and retry_count < _RECOVERY_MAX_RETRIES:
+        return {
+            "final_response": targeted,
+            "retry_count": retry_next,
+            "ag_ui_component": status_component("warning", message=targeted),
+        }
+
     label = label_for_field(goal or "", field)
     goal_label = (
         (INTENT_CONFIG.get(goal or "") or {}).get(

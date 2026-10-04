@@ -498,6 +498,13 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # une interruption RÉUSSIE, un changement de but effectif).
     interruption_unresolved: Annotated[bool, replace_value]
 
+    # B24 — arbitrage sémantique : comment CE message se rapporte à l'attente/tâche courante (ANSWER | CORRECTION |
+    # NEW_TASK | INTERRUPTION | UNRELATED | AMBIGUOUS, voir `interpreter/context_arbitration.py::RelationToContext`) et la
+    # CIBLE métier de l'écran vivant quand l'intention la vise (`{"type", "id", "product", ...}`) — un indice de résolution
+    # que le flow revalide (propriété) contre la base. Mono-tour : jamais conservés au tour suivant.
+    relation_to_context: Annotated[Optional[str], replace_value]
+    context_target: Annotated[Optional[Dict[str, Any]], replace_value]
+
     interruption_type: Annotated[Optional[str], replace_value]
 
     interruption_payload: Annotated[Dict[str, Any], merge_dict]

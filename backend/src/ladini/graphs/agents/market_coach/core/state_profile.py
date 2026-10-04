@@ -182,6 +182,8 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     # ── 9. INTERRUPTIONS / MULTI-TASK ─────────────────────────────
     FieldSpec("interruption_detected", FieldLifecycle.EPHEMERAL, reset_value=False),
     FieldSpec("interruption_unresolved", FieldLifecycle.EPHEMERAL, reset_value=False),
+    FieldSpec("relation_to_context", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("context_target", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("interruption_type", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec(
         "interruption_payload",

@@ -58,6 +58,32 @@ class ArbitrationKind(str, Enum):
     GENERIC_CLASSIFICATION = "GENERIC_CLASSIFICATION"
 
 
+class RelationToContext(str, Enum):
+    """B24 — comment CE message se rapporte à la tâche courante. Dérivé de signaux STRUCTURÉS (événement, intention, cible),
+    jamais d'une liste de phrases. Mêmes concepts que l'existant (SELECTION/ANSWER, UPDATE, NEW_TASK, INTERRUPTION,
+    OUT_OF_SCOPE, UNKNOWN), nommés une seule fois :
+
+    ``ANSWER``       réponse directe à l'attente courante (index/alias fermé, action contextuelle sur la cible affichée) ;
+    ``CORRECTION``   modifie une information du goal/de la cible courants (« finalement 5 », « plutôt chaque mois ») ;
+    ``NEW_TASK``     nouvelle tâche métier indépendante — supersede l'attente ;
+    ``INTERRUPTION`` navigation explicite qui quitte le flux courant ;
+    ``UNRELATED``    hors domaine ;
+    ``AMBIGUOUS``    plusieurs lectures raisonnables : on clarifie, on ne choisit pas."""
+
+    ANSWER = "ANSWER"
+    CORRECTION = "CORRECTION"
+    NEW_TASK = "NEW_TASK"
+    INTERRUPTION = "INTERRUPTION"
+    UNRELATED = "UNRELATED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+#: Intentions qui s'appliquent à la CIBLE de l'écran affiché (pas de produit à redonner) -> relation implicite.
+CONTEXT_TARGETED_INTENTS: Dict[str, RelationToContext] = {
+    "UPDATE_RECURRING_NEED": RelationToContext.CORRECTION,
+    "REFRESH_RECURRING_MATCHING": RelationToContext.ANSWER,
+}
+
 #: Kinds qui sont des MENUS (l'utilisateur choisit parmi des options affichées).
 MENU_KINDS: FrozenSet[InteractionKind] = frozenset(
     {
@@ -271,14 +297,17 @@ def _recurring_menu_selection(state: Mapping[str, Any], pending: Any, norm: str)
     return None
 
 
-def live_menu_view(state: Mapping[str, Any], *, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+def live_menu_view(
+    state: Mapping[str, Any], *, now: Optional[float] = None, require_pending: bool = True
+) -> Optional[Dict[str, Any]]:
     """B23 — le menu récurrent VIVANT vu comme une ATTENTE : `{"title", "labels": [...], "actions": {index: action}}`.
 
     Il guide l'interprétation d'un message libre (le micro-prompt SELECTION voit ce que l'écran propose) ; il ne décide
     jamais de l'intention. `None` : pas de menu récurrent vivant (autre goal, périmé, ou aucun)."""
-    pending = get_pending_interaction(dict(state))
-    if pending.kind != InteractionKind.SELECTION_MENU or str(pending.goal or "") != "GET_MY_NEEDS":
-        return None
+    if require_pending:  # `False` : au rendu d'un flow, le pending est déjà consommé — le menu (daté) fait foi
+        pending = get_pending_interaction(dict(state))
+        if pending.kind != InteractionKind.SELECTION_MENU or str(pending.goal or "") != "GET_MY_NEEDS":
+            return None
     menu = (state.get("working_memory") or {}).get("recurring_need_menu")
     if not isinstance(menu, dict) or not isinstance(menu.get("actions"), dict):
         return None
@@ -297,19 +326,90 @@ def live_menu_view(state: Mapping[str, Any], *, now: Optional[float] = None) -> 
 #: Actions d'un menu récurrent qui MODIFIENT l'état métier (accepter/refuser une proposition) : jamais déclenchées par une
 #: réponse en langage libre — uniquement par un numéro ou un alias FERMÉ du menu (étape 1b de l'arbitrage).
 MUTATING_MENU_ACTIONS: FrozenSet[str] = frozenset({"CONFIRM", "REJECT"})
+#: Actions d'écran à effet de bord ou de navigation (recherche = moteur de matching, retour/commandes = changement d'écran) :
+#: en langage LIBRE, une « sélection » du micro-prompt ne suffit pas à les déclencher — la relation avec l'attente doit être
+#: justifiée par l'interprétation sémantique (reclassification NEW_TASK, B24). Un numéro/alias fermé reste direct (1b).
+FREE_TEXT_GUARDED_ACTIONS: FrozenSet[str] = frozenset({"REFRESH", "LIST", "ORDERS", "VIEW"})
+
+GUARD_MUTATION_CLOSED_REPLY = "mutation_requires_closed_reply"
+GUARD_FREE_TEXT_ACTION = "free_text_selection_rejected"
 
 
 def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
-    """Fail-safe B23 : une SÉLECTION issue du micro-prompt (langage libre) qui désigne une entrée MUTANTE d'un menu récurrent
-    est marquée `closed_reply_required` (le flow demande alors un numéro/alias fermé). Hors cas : `result` inchangé."""
+    """Fail-safe B23/B24 : une SÉLECTION issue du micro-prompt (donc d'un langage LIBRE : les entrées fermées sont résolues
+    avant, par l'arbitrage 1b) sur un menu récurrent vivant n'est JAMAIS exécutée à l'aveugle.
+
+    * entrée MUTANTE (accepter/refuser)            -> `closed_reply_required` (le flow demande un numéro/alias fermé) ;
+    * action d'écran (rechercher, retour, ...)     -> marquée `free_text_selection_rejected` : l'appelant reclassifie le
+      message par l'interprétation sémantique (NEW_TASK) au lieu d'exécuter l'index ;
+    * choix d'une entité de la liste (SELECT)       -> inchangé (navigation sans effet de bord).
+    Hors menu récurrent vivant : `result` inchangé."""
     if str(result.get("interpreted_event") or "").upper() != "SELECTION":
         return result
     view = live_menu_view(state)
     index = (result.get("extracted_entities") or {}).get("selection_index")
-    if view is None or index is None or view["actions"].get(str(index)) not in MUTATING_MENU_ACTIONS:
+    if view is None or index is None:
         return result
-    return {**result, "extracted_entities": {**result["extracted_entities"], "closed_reply_required": True},
-            "raw_analysis": {**(result.get("raw_analysis") or {}), "guard": "mutation_requires_closed_reply"}}
+    action = view["actions"].get(str(index))
+    raw = result.get("raw_analysis") or {}
+    if action in MUTATING_MENU_ACTIONS:
+        return {**result, "extracted_entities": {**result["extracted_entities"], "closed_reply_required": True},
+                "raw_analysis": {**raw, "guard": GUARD_MUTATION_CLOSED_REPLY}}
+    if action in FREE_TEXT_GUARDED_ACTIONS:
+        return {**result, "raw_analysis": {**raw, "guard": GUARD_FREE_TEXT_ACTION}}
+    return result
+
+
+def live_menu_target(
+    state: Mapping[str, Any], *, now: Optional[float] = None, require_pending: bool = True
+) -> Optional[Dict[str, Any]]:
+    """B24 — la CIBLE métier de l'écran récurrent vivant (`{"type": "RECURRING_NEED", "id", "product", ...}`), publiée par
+    l'écran de détail dans `recurring_need_menu.target`. `None` : pas d'écran de détail vivant (liste, périmé, autre goal).
+    C'est un *indice de résolution* : le flow la revalide (propriété) contre la base avant toute action ; jamais un index."""
+    if live_menu_view(state, now=now, require_pending=require_pending) is None:
+        return None
+    target = ((state.get("working_memory") or {}).get("recurring_need_menu") or {}).get("target")
+    if isinstance(target, dict) and target.get("id"):
+        return {str(k): v for k, v in target.items()}
+    return None
+
+
+def targeted_menu_clarification(state: Mapping[str, Any], *, require_pending: bool = True) -> Optional[str]:
+    """B24 — clarification MÉTIER (au lieu du « j'ai juste besoin de cette information » générique) quand un message n'a pu
+    être rattaché ni à l'écran récurrent vivant ni à une autre tâche : on rappelle ce que l'écran propose et ce qui peut y
+    être modifié. `None` : pas d'écran récurrent vivant (la clarification générique s'applique)."""
+    view = live_menu_view(state, require_pending=require_pending)
+    if view is None:
+        return None
+    target = live_menu_target(state, require_pending=require_pending)
+    options = "\n".join(f"{k}. {label}" for k, label in zip(view["actions"], view["labels"], strict=False))
+    if target is None:
+        return f"Je n'ai pas compris ce choix.\n\n{view['title']}\n{options}\n\nRépondez avec un numéro, ou dites « mes commandes »."
+    return (
+        f"Je n'ai pas bien compris votre demande pour le besoin de {target.get('product') or 'ce besoin'}.\n\n{options}\n\n"
+        "Répondez avec un numéro, ou dites ce que vous voulez modifier : la quantité, la fréquence ou la prochaine livraison."
+    )
+
+
+def derive_relation(state: Mapping[str, Any], result: Mapping[str, Any]) -> RelationToContext:
+    """B24 — relation du message à l'attente, déduite des signaux STRUCTURÉS du résultat d'interprétation (pas du texte)."""
+    event = str(result.get("interpreted_event") or "UNKNOWN").upper()
+    intent = str(result.get("detected_intent") or "UNKNOWN").upper()
+    if result.get("interruption_unresolved") or event in {"UNKNOWN", "AMBIGUOUS"}:
+        return RelationToContext.AMBIGUOUS
+    if event == "OUT_OF_SCOPE":
+        return RelationToContext.UNRELATED
+    if str((result.get("raw_analysis") or {}).get("path") or "") == "context_arbitration_outbound_menu":
+        return RelationToContext.ANSWER  # réponse à l'action d'un message sortant interactif (digest)
+    if event in {"SELECTION", "CONFIRM", "REJECT", "ANSWER"}:
+        return RelationToContext.ANSWER
+    if event == "UPDATE":
+        return RelationToContext.CORRECTION
+    if intent in NAVIGATION_INTENTS:
+        return RelationToContext.INTERRUPTION
+    if intent in CONTEXT_TARGETED_INTENTS and live_menu_target(state) is not None:
+        return CONTEXT_TARGETED_INTENTS[intent]
+    return RelationToContext.NEW_TASK
 
 
 # ── La primitive centrale ───────────────────────────────────────────────────────────────────────────────────────────
@@ -451,24 +551,46 @@ def log_decision(decision: ArbitrationDecision, *, outbound: Optional[Interactiv
         logger.info("MENU_CONTEXT_CONSUMED owner=%s", decision.new_context)
 
 
-def log_intent_arbitration(state: Mapping[str, Any], *, semantic_intent: Any, relation: str, route: str, reason: str) -> None:
-    """B23 — journal de décision STRUCTURÉ « attente vs intention » (aucune PII : jamais le texte, seulement des codes).
+def log_intent_arbitration(
+    state: Mapping[str, Any],
+    *,
+    semantic_intent: Any,
+    relation: Any,
+    route: str,
+    reason: str,
+    target_type: Optional[str] = None,
+    target_resolution: Optional[str] = None,
+) -> None:
+    """B23/B24 — journal de décision STRUCTURÉ « attente vs intention » (aucune PII : jamais le texte ni un identifiant,
+    seulement des codes).
 
-    `relation` : ANSWER (réponse à l'attente) | NEW_TASK (nouvelle intention qui supersede le menu) | UNRELATED (hors
-    domaine) | UNRESOLVED (clarification). `expected_action` : ce que l'écran actif attend."""
+    `relation` : une `RelationToContext` (ANSWER | CORRECTION | NEW_TASK | INTERRUPTION | UNRELATED | AMBIGUOUS).
+    `expected_action` : ce que l'écran actif attend. `target_type`/`target_resolution` : nature de la cible visée
+    (RECURRING_NEED...) et issue de sa résolution (context | by_name | not_unique | not_found | none).
+    `relation_to_expectation` = ancien nom B23 de `relation_to_context`, conservé pour les tableaux de bord existants."""
     pending = get_pending_interaction(dict(state))
     view = live_menu_view(state)
     expected = "|".join(sorted(set(view["actions"].values()))) if view else pending.kind.value
     goal = state.get("current_goal") or pending.goal or "NONE"
+    rel = relation.value if isinstance(relation, RelationToContext) else str(relation)
     logger.info(
-        "INTENT_ARBITRATION current_goal=%s expected_action=%s semantic_intent=%s relation_to_expectation=%s "
-        "selected_route=%s reason=%s",
-        goal, expected, semantic_intent or "UNKNOWN", relation, route, reason,
+        "INTENT_ARBITRATION current_goal=%s expected_action=%s semantic_intent=%s relation_to_context=%s "
+        "relation_to_expectation=%s target_type=%s target_resolution=%s selected_route=%s decision_reason=%s reason=%s",
+        goal, expected, semantic_intent or "UNKNOWN", rel, rel, target_type or "NONE", target_resolution or "none",
+        route, reason, reason,
     )
 
 
 __all__ = [
     "ArbitrationDecision",
+    "CONTEXT_TARGETED_INTENTS",
+    "FREE_TEXT_GUARDED_ACTIONS",
+    "GUARD_FREE_TEXT_ACTION",
+    "GUARD_MUTATION_CLOSED_REPLY",
+    "RelationToContext",
+    "derive_relation",
+    "live_menu_target",
+    "targeted_menu_clarification",
     "MUTATING_MENU_ACTIONS",
     "guard_free_text_selection",
     "live_menu_view",

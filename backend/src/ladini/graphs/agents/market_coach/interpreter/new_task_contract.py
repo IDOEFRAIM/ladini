@@ -196,6 +196,10 @@ class NewTaskEntities(BaseModel):
     # remplacer, « ITEM » = un produit nommé). Validée par le domaine
     # (`domain/recurring_need_draft.py::plan_correction`), jamais appliquée à l'aveugle.
     correction_scope: Optional[Literal["ALL", "ITEM"]] = None
+    # UPDATE_RECURRING_NEED (B24) : l'ACTION demandée sur un besoin récurrent EXISTANT quand ce n'est pas un simple
+    # changement de quantité/fréquence — PROPOSÉE par le LLM, jamais exécutée sur sa seule foi : le flow la valide
+    # (cible exacte, propriété, ambiguïté arrêter/ignorer). `null` pour « change la quantité/la fréquence ».
+    update_action: Optional[Literal["PAUSE", "RESUME", "CANCEL", "SKIP_OCCURRENCE", "OVERRIDE_OCCURRENCE"]] = None
 
 
 class NewTaskInterpretation(BaseModel):
@@ -302,6 +306,10 @@ class NewTaskPromptContext:
     #: doit structurellement échoer `locked_goal` et ne peut donc jamais
     #: introduire un nouveau but).
     producer_order_action_pending: bool = False
+    #: B24 — écran récurrent actuellement affiché (décrit par l'APPLICATION, jamais le texte utilisateur) : sert à juger la
+    #: RELATION du message avec l'écran (corriger la cible affichée ou nouvelle tâche). Rempli uniquement quand l'attente
+    #: d'un écran vivant a été écartée par la route SELECTION.
+    screen_context: Optional[str] = None
 
 
 def adapt_new_task_to_canonical(

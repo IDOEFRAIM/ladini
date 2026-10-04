@@ -427,6 +427,21 @@ INTENT_CONFIG = {
             "occurrence_date": "date concernée",
         },
     },
+    # (B24) Relance, À LA DEMANDE, la recherche de disponibilité d'un besoin récurrent EXISTANT (même moteur que l'entrée
+    # « Rechercher maintenant » de l'écran du besoin). Intention SÉMANTIQUE : la cible (quel besoin) est résolue par le
+    # contexte/le produit nommé et revalidée côté acheteur — jamais un identifiant fourni par le LLM.
+    "REFRESH_RECURRING_MATCHING": {
+        "tool_name": "refresh_recurring_need_matching",
+        "required": [],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": (
+            "Relance la recherche de disponibilité d'un besoin récurrent EXISTANT "
+            "(ex: \"cherche pour mes boeufs\", \"relance la recherche\") — PAS une création (CREATE_RECURRING_NEED)"
+        ),
+        "label_map": {"product": "produit du besoin (seulement s'il est nommé)"},
+    },
     "GET_MY_NEEDS": {
         "tool_name": "list_my_recurring_needs",
         "required": [],
@@ -992,6 +1007,7 @@ _TUNNEL_ASSIGNMENTS = {
     "CREATE_RECURRING_NEED": "recurring_need",
     "UPDATE_RECURRING_NEED": "recurring_need",
     "GET_MY_NEEDS": "recurring_need",
+    "REFRESH_RECURRING_MATCHING": "recurring_need",
     # PRODUCER — intents entièrement pris en charge par
     # producer_auction_resolver (jamais confirmation_gate/mcp_tool_executor).
     "MARKET_BROWSE_REQUESTS": "producer_auction",
@@ -1110,6 +1126,7 @@ INTENT_ROLE = {
     "CREATE_RECURRING_NEED": "BUYER",
     "UPDATE_RECURRING_NEED": "BUYER",
     "GET_MY_NEEDS": "BUYER",
+    "REFRESH_RECURRING_MATCHING": "BUYER",
     "BUYER_REQUEST": "BUYER",
     # BUYER transactional tunnel (Panier → Précommande → Négociation)
     "BUYER_ADD_TO_CART": "BUYER",

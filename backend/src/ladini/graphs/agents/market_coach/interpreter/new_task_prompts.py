@@ -24,7 +24,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # À incrémenter à CHAQUE changement comportemental — composante de la clé de
 # cache LLM ET dimension Langfuse (`prompt_version`), même discipline que
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
-NEW_TASK_PROMPT_VERSION = "new_task_v10"
+NEW_TASK_PROMPT_VERSION = "new_task_v11"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -176,7 +176,8 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \
 "unit": "<str|null>", "candidates": ["<str>", ...]}, ...], \
 "orphan_quantities": [{"quantity": <float|null>, "unit": "<str|null>"}, ...], \
-"correction_scope": "ALL|ITEM|null"}}
+"correction_scope": "ALL|ITEM|null", "update_action": \
+"PAUSE|RESUME|CANCEL|SKIP_OCCURRENCE|OVERRIDE_OCCURRENCE|null"}}
 """
 
 
@@ -234,6 +235,18 @@ def build_new_task_user_prompt(
             f"commande reçue alors que le but précédent était une simple "
             f"consultation), classe ce nouveau but, jamais un CONFIRM/"
             f"REJECT visant le but précédent lui-même."
+        )
+    if context.screen_context:
+        lines.append(
+            f"Écran récurrent affiché à l'utilisateur : {context.screen_context}. Juge la RELATION du message avec cet "
+            "écran : (a) il modifie la cible affichée sans nommer d'autre produit (nouvelle quantité, nouvelle "
+            "fréquence, « change/modifie ça ») = UPDATE_RECURRING_NEED, produit laissé `null` ; un message trop vague "
+            "pour savoir QUOI modifier = UPDATE_RECURRING_NEED sans quantité ni fréquence ni action, jamais une "
+            "valeur inventée ; (b) il demande une recherche/actualisation d'un besoin = REFRESH_RECURRING_MATCHING "
+            "(`product` seulement s'il est NOMMÉ) ; (c) il exprime un NOUVEAU besoin complet (produit + quantité + "
+            "fréquence) = CREATE_RECURRING_NEED, même si l'écran affiche un autre produit ; (d) une demande d'achat, "
+            "de vente ou de navigation = son intention propre. Un produit nommé DIFFÉRENT de la cible n'est jamais "
+            "une modification de la cible."
         )
     lines.append(f'Message utilisateur :\n"""{normalized_text}"""')
     lines.append("\nRetourne le JSON strict.")

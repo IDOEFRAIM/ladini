@@ -77,10 +77,11 @@ Ne jamais mélanger « modifier le besoin » et « modifier une occurrence » : 
 | ACCEPT / REJECT_RECURRING_PROPOSAL | entrées de menu `CONFIRM:` / `REJECT:` ; digest | `_respond_to_match` | `accept_match_proposal` |
 | UPDATE / PAUSE / RESUME / CANCEL / SKIP / OVERRIDE | `UPDATE_RECURRING_NEED` + `action` | `_update_flow` | `update_recurring_need` |
 
-## 9. Intents futurs (non implémentés par B23)
-`REFRESH_RECURRING_MATCHING` et `ACCEPT/REJECT` comme intents nommés en langage libre (« cherche pour mes bœufs »), `GET_RECURRING_HISTORY`,
-`GET_RECURRING_ORDERS` en tant qu'intent, correction de quantité *dans l'écran détail* (« mets plutôt 5 »), clarification « annuler mes
-tomates » (skip vs annulation), cible par nom dans la liste. Hors périmètre : multi-producteur, packages recurring, paiement, frontend.
+## 9. Intents futurs (après B24)
+Exécutables par message libre depuis B24 : `CREATE`, `UPDATE` (quantité et/ou fréquence permanentes), `GET_MY_NEEDS`,
+`REFRESH_RECURRING_MATCHING` (« cherche pour mes bœufs »). Compris mais NON exécutés par texte libre (réponse honnête, rien n'est modifié) :
+`PAUSE`, `RESUME`, `SKIP_OCCURRENCE`, `OVERRIDE_OCCURRENCE` ; `CANCEL` déclenche la clarification « prochaine livraison seulement ou tout le besoin ? ».
+Restent à faire : `ACCEPT/REJECT` en langage libre, `GET_RECURRING_HISTORY`, `GET_RECURRING_ORDERS`. Hors périmètre : multi-producteur, packages, paiement, frontend.
 
 ## 10. Invariants de sécurité
 1. Le LLM ne modifie ni la base, ni une proposition, ni une commande : il produit intention + entités.
@@ -90,3 +91,15 @@ tomates » (skip vs annulation), cible par nom dans la liste. Hors périmètre :
 5. Une mauvaise action destructive ou métier vaut moins qu'une clarification.
 6. Les garanties B20 (menu périmé, dernier message interactif, navigation déterministe, TTL) restent en vigueur.
 7. Les logs de décision ne contiennent aucune donnée personnelle ni le texte de l'utilisateur.
+
+## 11. Semantic Arbitration Contract (B24)
+1. Une attente (menu, écran, brouillon) **guide** l'interprétation ; elle ne la décide pas (menu ≠ routeur sémantique).
+2. L'intention sémantique identifie la tâche ; la `relation_to_context` (ANSWER, CORRECTION, NEW_TASK, INTERRUPTION, UNRELATED, AMBIGUOUS) dit comment le message se rapporte à la tâche en cours.
+3. Les entrées fermées (« 1 », « 2 », « confirmer », « retour ») restent déterministes et ne passent pas par le LLM.
+4. Un texte libre n'est jamais exécuté comme SELECTION aveugle : une SELECTION issue du LLM sur du texte libre est requalifiée en NEW_TASK (garde `guard_free_text_selection`).
+5. Cible : 0 candidat → introuvable ; 1 → identifiant exact ; N → NEED_SELECTION (menu des seuls candidats). Un identifiant venant du contexte, d'un menu périmé ou forgé n'est cible que s'il figure dans la liste de l'acheteur courant.
+6. Le validateur et le service restent seuls juges des invariants (propriété par `buyer_id`, ADMIN `can_buy` via capacités, jamais `if role == ADMIN`) ; le LLM ne produit que l'intention et les entités.
+7. Besoin ≠ occurrence : modifier le besoin (permanent) n'est pas modifier une livraison ; l'ambiguïté destructive est clarifiée.
+8. Les clarifications sont ciblées (« quelle quantité pour votre besoin de Bœuf ? »), jamais le message générique.
+9. Seul ce que l'utilisateur dit CE tour (`entities_said_this_turn`) alimente une modification ; `transaction_payload` n'est jamais réappliqué.
+10. Chaque décision émet `INTENT_ARBITRATION` (relation_to_context, relation_to_expectation, target_type, target_resolution, selected_route, decision_reason) sans texte ni donnée personnelle.

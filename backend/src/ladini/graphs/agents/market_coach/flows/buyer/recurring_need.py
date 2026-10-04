@@ -495,6 +495,8 @@ async def recurring_need_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) 
         return await _update_flow(state, mc_runtime)
     if goal == "GET_MY_NEEDS":
         return await _get_my_needs_flow(state, mc_runtime)
+    if goal == "REFRESH_RECURRING_MATCHING":
+        return await _refresh_by_message(state, mc_runtime)
     logger.warning("recurring_need_flow: goal inattendu %s", goal)
     return {"status": "PLANNING", "final_response": "", "ag_ui_component": None}
 
@@ -565,12 +567,25 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             current_goal=resolve_current_goal(state),
         )
         if _turn_action == TurnAction.CORRECT:
-            return await _correct(draft, said, state, conversation_id)
+            # B24 : « finalement 5 », « plutôt chaque mois » — même goal, MÊME draft (aucun nouveau goal/draft).
+            _arbitration_log(state, intent="CREATE_RECURRING_NEED", relation="CORRECTION", reason="contextual_correction",
+                             resolution="current_draft", route="recurring_create", target_type="RECURRING_NEED_DRAFT")
+            corrected = await _correct(draft, said, state, conversation_id)
+            corrected["relation_to_context"] = "CORRECTION"
+            return corrected
         if _turn_action == TurnAction.CLARIFY:
+            _arbitration_log(state, intent="CREATE_RECURRING_NEED", relation="AMBIGUOUS",
+                             reason="ambiguous_correction_vs_new_task", resolution="current_draft",
+                             route="recurring_create", target_type="RECURRING_NEED_DRAFT")
             outcome = apply_domain_action(
                 draft, NoRecurringNeedAction(reason="ambiguous_correction_vs_new_task")
             )
-            return _apply_response_plan(build_response_plan(outcome))
+            clarify_patch = _apply_response_plan(build_response_plan(outcome))
+            clarify_patch["relation_to_context"] = "AMBIGUOUS"
+            return clarify_patch
+        if _turn_action == TurnAction.NEW_TASK:
+            _arbitration_log(state, intent="CREATE_RECURRING_NEED", relation="NEW_TASK", reason="explicit_new_task",
+                             resolution="superseded_draft", route="recurring_create", target_type="RECURRING_NEED_DRAFT")
 
     if (
         interpreted_event in ("NEW_TASK", "INTERRUPTION")
@@ -867,7 +882,6 @@ def _apply_response_plan(plan) -> Dict[str, Any]:
 
 
 async def _update_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
-    phone = state.get("user_phone")
     payload: Dict[str, Any] = state.get("transaction_payload") or {}
 
     # Tours SUIVANTS du mini-flow "modifier -> menu -> quantité -> override" (mandat digest
@@ -908,70 +922,193 @@ async def _update_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     if _payload_action == "DIGEST_SKIP_PRODUCT":
         return await _digest_skip_named_product(state, mc_runtime, str(payload.get("product") or ""))
 
+    return await _update_from_message(state, mc_runtime)
+
+
+# B24 — UPDATE depuis un message libre : intention (LLM) -> cible (contexte, revalidée) -> validation -> service.
+# Le service `update_recurring_need` reste la seule autorité qui modifie la base ; il reçoit un ordre déterministe
+# (`recurring_need_id`, action, valeurs validées), jamais le texte.
+_UPDATE_FIELDS = ("product", "quantity", "recurrence_type", "weekly_days", "excluded_weekdays", "update_action")
+_NOT_EXECUTABLE_BY_MESSAGE = {
+    "PAUSE": "suspendre ce besoin", "RESUME": "reprendre ce besoin",
+    "SKIP_OCCURRENCE": "ignorer une livraison", "OVERRIDE_OCCURRENCE": "changer la quantité d'une seule livraison",
+}
+_PERMANENT_RECURRENCES = ("DAILY", "WEEKLY", "MONTHLY", "WEEKLY_DAYS")
+
+
+def _update_request(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Ce que l'utilisateur dit dans CE message (jamais `transaction_payload`, qui accumule les tours précédents : une
+    ancienne quantité y survit et serait réappliquée à l'aveugle)."""
+    said = entities_said_this_turn(state)
+    return {k: said[k] for k in _UPDATE_FIELDS if slot_has_value(said.get(k))}
+
+
+def _arbitration_log(
+    state: Dict[str, Any], *, intent: str, relation: str, reason: str, resolution: str, route: str = "recurring_flow",
+    target_type: str = "RECURRING_NEED",
+) -> None:
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+        log_intent_arbitration,
+    )
+
+    log_intent_arbitration(
+        state, semantic_intent=intent, relation=relation, route=route, reason=reason,
+        target_type=target_type, target_resolution=resolution,
+    )
+
+
+def _active_needs(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [i for i in items if i.get("status") in ("ACTIVE", "PAUSED")]
+
+
+def _pick_need(active: List[Dict[str, Any]], *, product_hint: str, context_target: Any) -> tuple[str, Any]:
+    """Cible métier d'une modification/relance. `(kind, valeur)` :
+    ``("context"|"name"|"single", item)`` cible exacte ; ``("not_found", libellés)`` produit nommé inconnu ;
+    ``("not_unique", items)`` plusieurs candidats — jamais une devinette. Les `items` viennent de la liste de l'acheteur
+    courant : un identifiant (du contexte, d'un menu périmé, forgé) qui n'y figure pas n'est JAMAIS une cible."""
+    hint = str(product_hint or "").strip().lower()
+    if hint:
+        matches = [i for i in active if _same_product(hint, str(i.get("product") or ""))]
+        if len(matches) == 1:
+            return "name", matches[0]
+        if len(matches) > 1:
+            return "not_unique", matches
+        return "not_found", [str(i.get("product") or "") for i in active]
+    ctx_id = str((context_target or {}).get("id") or "") if isinstance(context_target, dict) else ""
+    if ctx_id:
+        for item in active:
+            if str(item.get("recurring_need_id")) == ctx_id:
+                return "context", item
+    if len(active) == 1:
+        return "single", active[0]
+    return "not_unique", active
+
+
+async def _need_choice_menu(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, items: List[Dict[str, Any]], question: str
+) -> Dict[str, Any]:
+    """NEED_SELECTION : le menu des SEULS besoins candidats (le choix ouvre l'écran du besoin choisi)."""
+    patch = await _render_needs_list(
+        state, mc_runtime, notice=f"{question}\n\n", only_ids={str(i["recurring_need_id"]) for i in items}
+    )
+    # Le choix est une réponse de menu de la LISTE (goal GET_MY_NEEDS) : la réponse « 2 » ouvre l'écran du besoin choisi,
+    # elle ne rejoue ni la modification ni la relance qui ont produit ce menu.
+    patch["current_goal"] = "GET_MY_NEEDS"
+    patch["response_strategy"] = "CLARIFICATION"  # le texte du flow fait foi (pas le rendu générique d'interruption)
+    return patch
+
+
+def _unknown_product_reply(hint: str, labels: List[str]) -> str:
+    owned = ", ".join(labels)
+    return (f"Je ne trouve pas de besoin récurrent « {hint} » (vous avez : {owned}). "
+            f"Pour en créer un nouveau, dites par exemple « j'ai besoin de 2 {hint} chaque semaine ».")
+
+
+async def _update_from_message(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    intent = "UPDATE_RECURRING_NEED"
+    phone = state.get("user_phone")
+    request = _update_request(state)
     gw = RecurringSupplyGateway(mc_runtime)
-    resolved = await _resolve_target_need(gw, phone, payload)
-    if resolved is None:
-        return {"final_response": "Vous n'avez aucun besoin actif pour l'instant.", "status": "COMPLETED"}
-    if isinstance(resolved, tuple) and len(resolved) == 2 and resolved[1] is True:  # B23 : clarification de cible (produit nommé inconnu)
-        return {"final_response": resolved[0], "status": "COMPLETED"}
-    if isinstance(resolved, str):
-        return {"final_response": resolved, "status": "WAITING_INPUT"}
-    need_id, product_label = resolved
-
-    action, kwargs = _resolve_update_action(payload)
-    if action is None:
-        return {
-            "final_response": "Je n'ai pas compris ce que vous voulez changer sur ce besoin.",
-            "status": "WAITING_INPUT",
-        }
-
     try:
-        result = await gw.update_recurring_need(phone=str(phone), recurring_need_id=need_id, action=action, **kwargs)
-    except MCPCallError as exc:
-        logger.warning("recurring_need.update_failed | need=%s | action=%s | %s", need_id, action, exc)
-        return {"final_response": "Je n'ai pas pu appliquer ce changement.", "status": "COMPLETED"}
+        listing = await gw.list_my_recurring_needs(phone=str(phone))
+    except MCPCallError:
+        return {"final_response": "Je n'ai pas pu récupérer vos besoins.", "status": "COMPLETED"}
+    active = _active_needs(listing.get("items") or [])
+    if not active:
+        return {"final_response": "Vous n'avez aucun besoin actif pour l'instant.", "status": "COMPLETED"}
 
-    return {"final_response": _render_update_confirmation(action, product_label), "status": "COMPLETED", "result": result}
+    product_hint = str(request.get("product") or "")
+    kind, picked = _pick_need(active, product_hint=product_hint, context_target=state.get("context_target"))
+    if kind == "not_found":
+        # Un produit NOMMÉ qui n'est aucun des besoins n'est pas une modification de l'un d'eux (« 2 chèvres » ne change
+        # jamais le besoin Bœuf) : clarification, jamais une mutation par défaut.
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="named_product_not_owned", resolution="not_found")
+        return {"final_response": _unknown_product_reply(product_hint, picked), "status": "COMPLETED",
+                "relation_to_context": "AMBIGUOUS"}
+    if kind == "not_unique":
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="target_not_unique", resolution="not_unique")
+        label = str(picked[0].get("product") or "") if product_hint else ""
+        question = (f"J'ai trouvé {len(picked)} besoins récurrents de {label}. Lequel voulez-vous modifier ?" if label
+                    else "Vous avez plusieurs besoins actifs — lequel voulez-vous modifier ?")
+        patch = await _need_choice_menu(state, mc_runtime, picked, question)
+        patch["relation_to_context"] = "AMBIGUOUS"
+        return patch
+    need = picked
+    need_id, product_label = str(need["recurring_need_id"]), str(need.get("product") or "")
+    resolution = {"context": "context", "name": "by_name", "single": "single"}[kind]
+
+    action = request.get("update_action")
+    if action == "CANCEL":
+        # Annuler un besoin dont une livraison est à venir : « ignorer la prochaine » ou « tout arrêter » ? Jamais décidé
+        # par le modèle seul, jamais exécuté ici (action destructive ambiguë).
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="ambiguous_destructive_action", resolution=resolution)
+        return {"final_response": (f"Voulez-vous ignorer seulement la prochaine livraison de {product_label} "
+                                   "ou arrêter complètement ce besoin récurrent ? Dites-moi lequel."),
+                "response_strategy": "CLARIFICATION", "status": "WAITING_INPUT", "relation_to_context": "AMBIGUOUS"}
+    if action in _NOT_EXECUTABLE_BY_MESSAGE:
+        _arbitration_log(state, intent=intent, relation="CORRECTION", reason="understood_not_executable", resolution=resolution)
+        return {"final_response": (f"J'ai compris : {_NOT_EXECUTABLE_BY_MESSAGE[action]} ({product_label}). Je ne peux pas encore "
+                                   "l'appliquer par message — rien n'a été modifié."),
+                "response_strategy": "CLARIFICATION", "status": "COMPLETED", "relation_to_context": "CORRECTION"}
+
+    steps, problem = _plan_permanent_changes(request)
+    if problem is not None:
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="invalid_or_missing_change", resolution=resolution)
+        return {"final_response": problem.format(product=product_label), "response_strategy": "CLARIFICATION",
+                "status": "WAITING_INPUT", "relation_to_context": "AMBIGUOUS"}
+
+    _arbitration_log(state, intent=intent, relation="CORRECTION", reason="contextual_correction", resolution=resolution)
+    result: Dict[str, Any] = {}
+    for service_action, kwargs in steps:
+        try:
+            result = await gw.update_recurring_need(phone=str(phone), recurring_need_id=need_id, action=service_action, **kwargs)
+        except MCPCallError as exc:
+            logger.warning("recurring_need.update_failed | need=%s | action=%s | %s", need_id, service_action, exc)
+            return {"final_response": "Je n'ai pas pu appliquer ce changement.", "status": "COMPLETED"}
+    return {"final_response": _render_update_summary(need, steps), "status": "COMPLETED", "result": result,
+            "relation_to_context": "CORRECTION"}
 
 
-def _resolve_update_action(payload: Dict[str, Any]):
-    """Mandat §6 : UNE action structurée, jamais un intent séparé par verbe."""
-    action_hint = str(payload.get("action") or "").upper().strip()
-    occurrence_date = payload.get("occurrence_date")
-    quantity = payload.get("quantity")
+def _plan_permanent_changes(request: Dict[str, Any]):
+    """Changements PERMANENTS du besoin (quantité et/ou fréquence) validés hors du LLM. `(étapes, None)` ou
+    `(None, message_de_clarification)`. Quantité > 0 ; fréquence connue ; WEEKLY_DAYS exige les jours."""
+    steps: List[tuple[str, Dict[str, Any]]] = []
+    quantity = request.get("quantity")
+    if slot_has_value(quantity):
+        try:
+            value = float(quantity)
+        except (TypeError, ValueError):
+            value = 0.0
+        if not 0 < value < float("inf"):
+            return None, "Quelle nouvelle quantité souhaitez-vous pour votre besoin de {product} ? (un nombre supérieur à 0)"
+        steps.append(("PERMANENT_QUANTITY", {"quantity": value}))
+    recurrence = str(request.get("recurrence_type") or "").upper()
+    if recurrence:
+        if recurrence not in _PERMANENT_RECURRENCES:
+            return None, "Quelle fréquence souhaitez-vous pour votre besoin de {product} : chaque jour, chaque semaine ou chaque mois ?"
+        days = request.get("weekly_days") or None
+        if recurrence == "WEEKLY_DAYS" and not days:
+            return None, "Quels jours de la semaine souhaitez-vous pour votre besoin de {product} ?"
+        steps.append(("PERMANENT_FREQUENCY", {
+            "recurrence_type": recurrence, "weekly_days": days, "excluded_weekdays": request.get("excluded_weekdays") or None}))
+    if not steps:
+        return None, ("Que voulez-vous modifier pour votre besoin de {product} : la quantité, la fréquence "
+                      "ou la prochaine livraison ?")
+    return steps, None
 
-    if action_hint == "PAUSE" or payload.get("pause"):
-        return "PAUSE", {"paused_until": payload.get("paused_until")}
-    if action_hint == "RESUME" or payload.get("resume"):
-        return "RESUME", {}
-    if action_hint == "CANCEL" or payload.get("cancel"):
-        return "CANCEL", {}
-    if action_hint == "OCCURRENCE_SKIP" or (occurrence_date and payload.get("skip")):
-        return "OCCURRENCE_SKIP", {"occurrence_date": occurrence_date}
-    if action_hint == "OCCURRENCE_OVERRIDE" or (occurrence_date and slot_has_value(quantity)):
-        return "OCCURRENCE_OVERRIDE", {"occurrence_date": occurrence_date, "quantity": quantity}
-    if action_hint == "PERMANENT_FREQUENCY" or payload.get("recurrence_type"):
-        return "PERMANENT_FREQUENCY", {
-            "recurrence_type": payload.get("recurrence_type"),
-            "weekly_days": payload.get("weekly_days"),
-            "excluded_weekdays": payload.get("excluded_weekdays"),
-        }
-    if action_hint == "PERMANENT_QUANTITY" or slot_has_value(quantity):
-        return "PERMANENT_QUANTITY", {"quantity": quantity}
-    return None, {}
 
-
-def _render_update_confirmation(action: str, product_label: str) -> str:
-    labels = {
-        "PERMANENT_QUANTITY": f"C'est noté, la quantité de {product_label} est mise à jour.",
-        "PERMANENT_FREQUENCY": f"C'est noté, la fréquence de {product_label} est mise à jour.",
-        "PAUSE": f"D'accord, {product_label} est suspendu.",
-        "RESUME": f"D'accord, {product_label} a repris.",
-        "CANCEL": f"D'accord, {product_label} est annulé.",
-        "OCCURRENCE_OVERRIDE": "C'est noté pour cette date.",
-        "OCCURRENCE_SKIP": "D'accord, pas de livraison à cette date.",
-    }
-    return labels.get(action, "C'est fait.")
+def _render_update_summary(need: Dict[str, Any], steps: List[tuple[str, Dict[str, Any]]]) -> str:
+    """Confirmation avec ancienne -> nouvelle valeur : l'utilisateur voit exactement ce qui a changé."""
+    product = str(need.get("product") or "")
+    unit = str(need.get("unit") or "")
+    parts: List[str] = []
+    for action, kwargs in steps:
+        if action == "PERMANENT_QUANTITY":
+            parts.append(f"quantité {_fmt_qty(need.get('quantity'))} → {_fmt_qty(kwargs['quantity'])} {unit}".rstrip())
+        elif action == "PERMANENT_FREQUENCY":
+            new = {"recurrence_type": kwargs["recurrence_type"], "weekly_days": kwargs.get("weekly_days")}
+            parts.append(f"fréquence : {_frequency_label(need)} → {_frequency_label(new)}")
+    return f"C'est noté, votre besoin de {product} est mis à jour ({' ; '.join(parts)})."
 
 
 # =====================================================================
@@ -1028,6 +1165,14 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
                 occurrence_id=occurrence_id, expected_version=version,
             )
         if kind == "INVALID":
+            from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+                live_menu_target,
+                targeted_menu_clarification,
+            )
+
+            if live_menu_target(state, require_pending=False) is not None:  # B24 : écran d'un besoin — clarification ciblée
+                return {"final_response": targeted_menu_clarification(state, require_pending=False), "status": "WAITING_INPUT",
+                        **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS")}  # l'écran reste actif
             return await _render_needs_list(state, mc_runtime, notice="Je n'ai pas compris ce choix.\n\n")
         # kind == "LIST" (retour / mes besoins) — retombe sur la liste fraîche ci-dessous.
     return await _render_needs_list(state, mc_runtime)
@@ -1106,7 +1251,9 @@ def _chosen_by_text_alias(mapping: Dict[str, str], text_lower: str) -> Optional[
     return None
 
 
-async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *, notice: str = "") -> Dict[str, Any]:
+async def _render_needs_list(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, *, notice: str = "", only_ids: Optional[set] = None
+) -> Dict[str, Any]:
     phone = state.get("user_phone")
     gw = RecurringSupplyGateway(mc_runtime)
     try:
@@ -1115,6 +1262,8 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
         return {"final_response": "Je n'ai pas pu récupérer vos besoins.", "status": "COMPLETED"}
 
     items: List[Dict[str, Any]] = result.get("items") or []
+    if only_ids is not None:  # B24 : choix parmi les SEULS besoins candidats (cible non unique)
+        items = [i for i in items if str(i.get("recurring_need_id")) in only_ids]
     if not items:
         return {"final_response": f"{notice}Vous n'avez pas encore de besoin récurrent enregistré.", "status": "COMPLETED"}
 
@@ -1135,6 +1284,7 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
         "working_memory": {"recurring_need_menu": {
             "mapping": mapping, "created_at": time.time(), "actions": {k: "SELECT" for k in mapping},
             "title": "Liste de vos besoins récurrents (répondre avec le numéro du besoin)",
+            "target": None,  # `working_memory` fusionne en profondeur : une cible d'écran précédente ne doit pas survivre à la liste
             "labels": {str(i): _render_need_line(item) for i, item in enumerate(items, start=1)}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
@@ -1280,6 +1430,41 @@ async def _refresh_matching(state: Dict[str, Any], mc_runtime: MarketRuntime, re
     return await _show_need_detail(state, mc_runtime, recurring_need_id, notice=notice)
 
 
+async def _refresh_by_message(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    """B24 — « cherche pour mes boeufs » : intention sémantique REFRESH_RECURRING_MATCHING -> cible métier exacte
+    (écran affiché, ou produit nommé parmi les besoins de l'acheteur courant) -> le même moteur que « Rechercher
+    maintenant ». 0 cible : introuvable ; N cibles : choix explicite (jamais une devinette, jamais un index périmé)."""
+    intent = "REFRESH_RECURRING_MATCHING"
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        listing = await gw.list_my_recurring_needs(phone=str(state.get("user_phone")))
+    except MCPCallError:
+        return {"final_response": "Je n'ai pas pu récupérer vos besoins.", "status": "COMPLETED"}
+    active = _active_needs(listing.get("items") or [])
+    if not active:
+        return {"final_response": "Vous n'avez aucun besoin actif pour l'instant.", "status": "COMPLETED"}
+    hint = str(entities_said_this_turn(state).get("product") or "")
+    kind, picked = _pick_need(active, product_hint=hint, context_target=state.get("context_target"))
+    if kind == "not_found":
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="target_not_found", resolution="not_found")
+        return {"final_response": f"Je ne trouve pas de besoin récurrent « {hint} » (vous avez : {', '.join(picked)}).",
+                "status": "COMPLETED", "relation_to_context": "AMBIGUOUS"}
+    if kind == "not_unique":
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="target_not_unique", resolution="not_unique")
+        label = str(picked[0].get("product") or "") if hint else ""
+        question = (f"J'ai trouvé {len(picked)} besoins récurrents de {label}. Lequel voulez-vous relancer ?" if label
+                    else "Vous avez plusieurs besoins actifs — pour lequel voulez-vous relancer la recherche ?")
+        patch = await _need_choice_menu(state, mc_runtime, picked, question)
+        patch["relation_to_context"] = "AMBIGUOUS"
+        return patch
+    _arbitration_log(state, intent=intent, relation="ANSWER", reason="contextual_command",
+                     resolution={"context": "context", "name": "by_name", "single": "single"}[kind])
+    patch = await _refresh_matching(state, mc_runtime, str(picked["recurring_need_id"]))
+    patch["relation_to_context"] = "ANSWER"
+    patch["response_strategy"] = "CLARIFICATION"  # l'écran rendu par le flow fait foi (pas « Je passe à… »)
+    return patch
+
+
 def _coverage_note(requested: Any, matched: float, unit: str) -> str:
     if requested is not None and matched >= float(requested) > 0:
         return f"✅ Disponibilité complète : {_fmt_qty(matched)} {unit}"
@@ -1380,6 +1565,10 @@ async def _show_need_detail(
         "working_memory": {"recurring_need_menu": {
             "mapping": mapping, "created_at": time.time(), "actions": {k: _menu_action_of(v) for k, v in mapping.items()},
             "title": f"Écran du besoin récurrent « {product} » (livraison {_fmt_date_fr(detail.get('occurrence_date')) or 'à venir'})",
+            # B24 : la CIBLE métier de l'écran (indice de résolution pour « mets-en 3 », « cherche pour mes boeufs » ; revalidée
+            # contre la liste de l'acheteur avant toute action — jamais un index de menu, jamais une preuve).
+            "target": {"type": "RECURRING_NEED", "id": str(recurring_need_id), "product": product,
+                       "quantity": _fmt_qty(detail.get("requested_quantity")), "unit": unit, "frequency": _frequency_label(detail)},
             "labels": {k: _ACTION_LABELS.get(_menu_action_of(v), v) for k, v in mapping.items()}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
@@ -1758,7 +1947,7 @@ async def _digest_modify_flow_start(state: Dict[str, Any], mc_runtime: MarketRun
 
     if len(entries) == 1:
         # Un seul besoin actionnable : mandat §5 n'exige un menu QUE s'il faut choisir — même
-        # esprit que `_resolve_target_need`, qui saute la question quand un seul besoin existe.
+        # esprit que `_pick_need`, qui saute la question quand un seul besoin existe.
         chosen = entries[0]
         return {
             "final_response": _digest_quantity_prompt(chosen["product"]),
@@ -1950,37 +2139,6 @@ def _same_product(hint: str, label: str) -> bool:
     """Nom cité vs nom du besoin, insensible à la casse/accents/pluriel simple (« chèvres » ~ « chèvre »)."""
     a, b = _fold_text(hint), _fold_text(label)
     return bool(a and b and (a == b or a in b or b in a or a.rstrip("s") == b.rstrip("s")))
-
-
-async def _resolve_target_need(gw: RecurringSupplyGateway, phone: Any, payload: Dict[str, Any]):
-    """Résout le besoin visé par nom de produit — jamais un UUID brut (même principe que
-    `PROCUREMENT_UPDATE_REQUEST`). Retourne `(need_id, label)`, `None` (aucun besoin), ou une chaîne
-    (question de clarification, ambiguïté)."""
-    try:
-        result = await gw.list_my_recurring_needs(phone=str(phone))
-    except MCPCallError:
-        return "Je n'ai pas pu récupérer vos besoins."
-    items: List[Dict[str, Any]] = result.get("items") or []
-    active = [i for i in items if i.get("status") in ("ACTIVE", "PAUSED")]
-    if not active:
-        return None
-    product_hint = str(payload.get("product") or "").strip().lower()
-    if len(active) == 1:
-        # B23 : un produit NOMMÉ qui n'est pas celui du seul besoin n'est pas une modification de CE besoin (« 2 chèvres » ne
-        # change jamais le besoin Bœuf) — clarification, jamais une mutation par défaut. Sans produit nommé : le besoin du contexte.
-        only = active[0]
-        if product_hint and not _same_product(product_hint, str(only.get("product") or "")):
-            return (f"Je ne trouve pas de besoin récurrent « {product_hint} » (vous avez : {only['product']}). "
-                    f"Pour en créer un nouveau, dites par exemple « j'ai besoin de 2 {product_hint} chaque semaine ».", True)
-        return only["recurring_need_id"], only["product"]
-
-    if product_hint:
-        matches = [i for i in active if product_hint in str(i.get("product") or "").lower()]
-        if len(matches) == 1:
-            return matches[0]["recurring_need_id"], matches[0]["product"]
-
-    names = ", ".join(i["product"] for i in active)
-    return f"Vous avez plusieurs besoins actifs ({names}) — lequel voulez-vous modifier ?"
 
 
 __all__ = ["recurring_need_flow"]
