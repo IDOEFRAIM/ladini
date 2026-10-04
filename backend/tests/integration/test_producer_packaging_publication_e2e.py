@@ -161,7 +161,10 @@ def test_cas1_confirmation_persists_50_L_and_a_package_tier_not_a_per_ml_price()
     c.say("oui")
     sent = c.created()
     assert sent["quantity_for_sale"] == 50.0 and sent["unit"] == "LITRE"
-    assert sent["pricing_tiers"] == [{"quantity": 0.5, "unit": "LITRE", "price": 500.0, "packaging": "sachet"}]
+    # B16 : le COMPTE de sachets est désormais persisté (source de vérité de l'inventaire par conditionnement).
+    assert sent["pricing_tiers"] == [
+        {"quantity": 0.5, "unit": "LITRE", "price": 500.0, "packaging": "sachet", "available_count": 100}
+    ]
     assert sent["price"] != 0.5 and sent["price"] != 500.0 * 1.0 / 1000.0  # jamais « 0,5 FCFA/ml » ni 500 FCFA/ml
 
 

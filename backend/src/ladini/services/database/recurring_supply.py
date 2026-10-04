@@ -83,7 +83,7 @@ from ladini.domain.models import (
     SubCategory,
     User,
 )
-from ladini.domain.pricing_tiers import resolve_stock_debit
+from ladini.domain.package_inventory import restore_stock_for_item
 from ladini.domain.recurring_supply.recurrence import (
     OCCURRENCE_WINDOW_DAYS,
     RecurrenceRule,
@@ -1225,7 +1225,7 @@ class RecurringSupplyMixin(BaseMixin):
                 product = products.get(item.product_id)
                 if product is not None:
                     previous = float(product.quantity_for_sale or 0.0)
-                    product.quantity_for_sale = previous + resolve_stock_debit(item)
+                    restore_stock_for_item(product, item)  # B16 : stock physique ET compte d'une variante éventuelle
                     await BusinessEventEmitter(current_session).emit_product_quantity_changed(
                         product, previous_quantity=previous, source="recurring_confirmation_expired_recredit"
                     )

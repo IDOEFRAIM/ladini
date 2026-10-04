@@ -757,6 +757,8 @@ class CartDomainService:
             quantity=stock_check_qty,
             unit=ref.get("unit"),
             buyer_phone=phone,
+            tier_id=selected_tier.tier_id if selected_tier is not None else None,
+            package_count=tier_pack_count if selected_tier is not None else None,
         )
 
         # Defensive unwrap: some transports wrap the DB dict inside an execution
@@ -801,6 +803,11 @@ class CartDomainService:
                     check.get("message")
                     or f"Le produit « {display_name} » n'existe plus dans le catalogue."
                 )
+            elif reason == "insufficient_package_stock":
+                # B16 : refus PAR VARIANTE (« seulement 40 bidons de 500 ml sur 41 ») — le stock global en litres
+                # n'est PAS le bon chiffre à montrer, et aucune « prise directe » en unité de base n'a de sens.
+                msg = f"📉 {check.get('message')}"
+                available = None
             elif available is not None:
                 # Audit 2026-09-01 : ce message comparait la disponibilité (en
                 # unité de BASE) au `qty` brut — qui, sur un palier, est un
