@@ -122,7 +122,7 @@ def test_all_six_phrasings_reach_the_list_when_the_llm_classifies_them(phrase: s
     c = Conv([_MILK])
     st = c.say(phrase)
     assert "list_my_recurring_needs" in c.rt.all_calls
-    assert "Lait" in _r(st) and "20.0 L/semaine" in _r(st)  # UX GAP : « 20.0 » (décimale brute)
+    assert "Lait" in _r(st) and "20 L chaque semaine" in _r(st)  # B21 : fréquence lisible, quantité sans décimale brute
     assert st.get("pending_interaction", {}).get("kind") == "SELECTION_MENU"
     assert st.get("current_goal") == "GET_MY_NEEDS"  # B13 : le goal reste vivant pour « 1 »
 
@@ -133,22 +133,23 @@ def test_B20_deterministic_route_reaches_the_list_even_without_the_llm():
     c = Conv([_MILK], llm=_ListLLM(classify=False))
     st = c.say("mes besoins récurrents")
     assert "list_my_recurring_needs" in c.rt.all_calls
-    assert "Vos approvisionnements" in _r(st) and "Lait" in _r(st)
+    assert "Mes besoins récurrents" in _r(st) and "Lait" in _r(st)
 
 
 def test_visibility_does_not_depend_on_cron_state_A_active_need_without_occurrence():
     st = Conv([_MILK]).say("mes besoins récurrents")
     r = _r(st)
-    assert "Lait — 20.0 L/semaine — actif" in r
-    assert "disponibles demain" not in r  # aucune occurrence : pas de disponibilité affichée
+    assert "Lait" in r and "20 L chaque semaine" in r and "🟢 Actif" in r
+    assert "Disponibilité actuelle" not in r  # aucune occurrence : pas de disponibilité inventée
+    assert "Prochaine livraison : à planifier" in r
 
 
 def test_visibility_state_B_open_occurrence_shows_availability_label_hardcoded_demain():
     open_need = _need("N-MILK", "lait", next_occurrence_date="2026-10-09", next_occurrence_id="O-1",
                       requested_quantity=20.0, matched_quantity=0.0, next_occurrence_version=1)
     r = _r(Conv([open_need]).say("mes besoins récurrents"))
-    # OBSERVABILITY GAP : « demain » est codé en dur, la date réelle de l'occurrence (2026-10-09) n'est jamais affichée.
-    assert "❌ 0/20 L disponibles demain" in r and "2026-10-09" not in r
+    # B21 : la date RÉELLE de l'occurrence est affichée (plus de « demain » codé en dur).
+    assert "Prochaine livraison : 9 octobre" in r and "aucune disponibilité trouvée" in r
 
 
 def test_visibility_state_C_matched_before_digest_proposal_is_visible_and_confirmable_from_detail():
@@ -156,7 +157,7 @@ def test_visibility_state_C_matched_before_digest_proposal_is_visible_and_confir
                     requested_quantity=20.0, matched_quantity=20.0, next_occurrence_version=4,
                     next_occurrence_notified=False)  # AUCUN digest envoyé
     c = Conv([matched], detail={"N-MILK": _DETAIL_MATCHED})
-    assert "✅ 20/20 L disponibles demain" in _r(c.say("mes besoins récurrents"))
+    assert "Disponibilité actuelle : 20 / 20 L" in _r(c.say("mes besoins récurrents"))
     detail = c.say("1")
     assert "Ferme A" in _r(detail) and "700 FCFA/L" in _r(detail) and "1. Confirmer" in _r(detail)
     # La date/version/statut d'occurrence NE sont PAS affichés (GAP) mais la confirmation vise l'identité exacte :
@@ -198,4 +199,4 @@ def test_cancelled_needs_are_never_listed_status_label_annule_is_dead_code():
     """BUG EXISTANT (mineur) : le service exclut CANCELLED (`status != 'CANCELLED'`) ; la branche « annulé » du
     rendu est donc inatteignable avec le vrai service. Ici on fournit un item CANCELLED pour figer le rendu."""
     r = _r(Conv([_need("N-X", "tomate", status="CANCELLED")]).say("mes besoins récurrents"))
-    assert "annulé" in r
+    assert "Annulé" in r

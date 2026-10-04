@@ -98,10 +98,23 @@ MENU_ACTION_ALIASES: Dict[str, FrozenSet[str]] = {
     ),
 }
 
+#: Alias textuels des actions d'un menu RÉCURRENT vivant (`working_memory.recurring_need_menu.actions`) — B21.
+RECURRING_MENU_TEXT_ALIASES: Dict[str, FrozenSet[str]] = {
+    "CONFIRM": frozenset({"accepter", "j accepte", "accepter la proposition", "confirmer"}),
+    "REJECT": frozenset({"refuser", "je refuse", "refuser la proposition", "pas cette fois"}),
+    "REFRESH": frozenset({"actualiser", "rechercher", "rechercher maintenant", "rechercher a nouveau", "chercher maintenant"}),
+    "VIEW": frozenset({"voir la prochaine livraison", "prochaine livraison"}),
+    "ORDERS": frozenset({"voir les commandes", "voir la commande"}),
+    "LIST": frozenset({"retour"}),
+}
+_RECURRING_MENU_TTL_SECONDS = 600.0  # = `flows/buyer/recurring_need._MENU_TTL_SECONDS`
+
 #: Navigation explicite ACHETEUR -> intent. Phrases complètes uniquement (jamais une sous-chaîne).
 NAVIGATION_INTENTS: Dict[str, FrozenSet[str]] = {
     "GET_MY_NEEDS": frozenset(
-        {"mes besoins", "voir mes besoins", "liste de mes besoins", "mes besoins recurrents", "voir les besoins"}
+        {"mes besoins", "voir mes besoins", "liste de mes besoins", "mes besoins recurrents", "voir les besoins",
+         "mes approvisionnements", "mes approvisionnements recurrents", "voir mes besoins recurrents",
+         "voir mes approvisionnements"}
     ),
     "BUYER_LIST_ORDERS": frozenset(
         {"mes commandes", "voir mes commandes", "liste de mes commandes", "suivi de mes commandes",
@@ -232,6 +245,27 @@ def _raw(intent: str, entities: Dict[str, Any], path: str, **analysis: Any) -> D
     }
 
 
+def _recurring_menu_selection(state: Mapping[str, Any], pending: Any, norm: str) -> Optional[tuple]:
+    """`(index, action)` si `norm` désigne une entrée du menu récurrent VIVANT (menu de CE tour : même goal, TTL respecté)."""
+    if pending.kind != InteractionKind.SELECTION_MENU or str(pending.goal or "") != "GET_MY_NEEDS" or not norm:
+        return None
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    if not isinstance(menu, dict) or not isinstance(menu.get("actions"), dict):
+        return None
+    if time.time() - float(menu.get("created_at") or 0) > _RECURRING_MENU_TTL_SECONDS:
+        return None
+    actions: Mapping[str, str] = menu["actions"]
+    if norm.isdigit():
+        return (int(norm), str(actions[norm])) if norm in actions else None
+    for action, aliases in RECURRING_MENU_TEXT_ALIASES.items():
+        starts = {"CONFIRM": "accepter ", "REJECT": "refuser "}.get(action)
+        if norm in aliases or (starts and norm.startswith(starts)):
+            for key, value in actions.items():
+                if value == action:
+                    return int(key), action
+    return None
+
+
 # ── La primitive centrale ───────────────────────────────────────────────────────────────────────────────────────────
 def resolve_conversation_context(
     state: Mapping[str, Any],
@@ -284,6 +318,19 @@ def resolve_conversation_context(
                 ArbitrationKind.SUPERSEDE_STALE_CONTEXT, "newer_interactive_outbound", reclassify=True, purge=True,
                 old_context=old_ctx, new_context=outbound.owner_type,
             )
+
+    # 1b. Menu RÉCURRENT vivant (liste des besoins / écran d'un besoin) : chiffre ou alias fermé -> l'entrée du menu,
+    #     SANS LLM. Une navigation explicite (« mes commandes ») garde la priorité sur les alias (voir 2).
+    recurring = _recurring_menu_selection(state, pending, norm) if live else None
+    if recurring is not None and norm not in {p for ps in NAVIGATION_INTENTS.values() for p in ps}:
+        index, action = recurring
+        return ArbitrationDecision(
+            ArbitrationKind.ACTIVE_MENU_ACTION, f"recurring_menu_reply:{action}",
+            raw={"interpreted_event": "SELECTION", "detected_intent": "GET_MY_NEEDS", "interpreter_confidence": 0.99,
+                 "extracted_entities": {"selection_index": index},
+                 "raw_analysis": {"path": "context_arbitration_recurring_menu", "action": action}},
+            old_context=old_ctx, new_context="RECURRING_MENU",
+        )
 
     # 2. Navigation / nouvelle demande EXPLICITE. Une navigation acheteur (« mes besoins », « mes commandes ») est
     #    déterministe QUEL QUE SOIT le contexte : elle interrompt un ancien menu/slot, et évite sinon un jugement LLM.

@@ -138,6 +138,8 @@ RECURRING_NEED_ACTIONS = (
 # REJECT répondent à une PROPOSITION déjà calculée (allocations `PROPOSED`, Phase 3) — deux moments
 # métier différents, jamais mélangés dans le même enum d'action.
 MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")
+#: Statuts d'une occurrence « en cours » pour le Buyer (B21) : proposable ou déjà acceptée (commandes en cours).
+ACTIONABLE_OCCURRENCE_STATUSES = ("OPEN", "MATCHED", "ACCEPTED", "PARTIALLY_ACCEPTED")
 
 # VS5 pilote — livraison/réception. `Order.delivery_status`/`Order.status` réutilisés tels quels
 # (texte libre, aucune contrainte CHECK) : seules de NOUVELLES VALEURS s'y ajoutent, aucune
@@ -484,6 +486,79 @@ class RecurringSupplyMixin(BaseMixin):
             )
         return len(inserted)
 
+    def _db(self) -> Any:
+        session = self.session
+        if session is None:
+            raise BusinessRuleException("Session indisponible.")
+        return session
+
+    # ── Matérialisation d'UN besoin : MÊME primitive pour le cron et pour le self-service Buyer (B21) ──────────
+    @staticmethod
+    def _recurrence_rule_for(need: RecurringNeed) -> RecurrenceRule:
+        return RecurrenceRule(
+            recurrence_type=need.recurrence_type,
+            weekly_days=need.weekly_days or (),
+            excluded_weekdays=need.excluded_weekdays or (),
+            starts_at=need.starts_at,
+            ends_at=need.ends_at,
+        )
+
+    async def _materialization_dims(self, need_id: Any) -> Dict[Any, Any]:
+        """`{need_id: (zone_id, priority_unit)}` — pour TOUS les besoins actifs (`need_id=None`, cron) ou pour UN
+        besoin (self-service) : une seule requête, jamais un lookup par besoin."""
+        stmt = (
+            select(
+                RecurringNeed.id.label("need_id"),
+                User.zone_id.label("zone_id"),
+                SubCategory.priority_unit.label("priority_unit"),
+            )
+            .join(BuyerProfile, BuyerProfile.id == RecurringNeed.buyer_id)
+            .join(User, User.id == BuyerProfile.user_id)
+            .join(SubCategory, SubCategory.id == RecurringNeed.sub_category_id)
+        )
+        stmt = stmt.where(RecurringNeed.status == "ACTIVE") if need_id is None else stmt.where(RecurringNeed.id == need_id)
+        return {row.need_id: (row.zone_id, row.priority_unit) for row in (await self._db().execute(stmt)).all()}
+
+    async def _ensure_window_for_need(
+        self, need: RecurringNeed, *, dims: Optional[Dict[Any, Any]] = None, actor_type: str = "SYSTEM", actor_id: Any = None
+    ) -> int:
+        """Matérialise la fenêtre `[aujourd'hui, aujourd'hui + OCCURRENCE_WINDOW_DAYS]` d'UN besoin. Idempotent et
+        sûr en concurrence : `ON CONFLICT (recurring_need_id, occurrence_date) DO NOTHING` (contrainte d'unicité en
+        base) — cron et Buyer simultanés produisent exactement UNE occurrence par date."""
+        if dims is None:
+            dims = await self._materialization_dims(need.id)
+        zone_id, priority_unit = dims.get(need.id, (None, None))
+        return await self._materialize_occurrences(
+            need,
+            self._recurrence_rule_for(need),
+            from_date=_today(),
+            to_date=_today() + timedelta(days=OCCURRENCE_WINDOW_DAYS),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            zone_id=zone_id,
+            canonical_unit=resolve_subcategory_canonical_unit(SimpleNamespace(priority_unit=priority_unit)),
+        )
+
+    async def _next_actionable_occurrence(self, need_ids: List[Any]) -> Dict[Any, RecurringNeedOccurrence]:
+        """Prochaine occurrence PERTINENTE de chaque besoin : la plus proche, à partir d'aujourd'hui, parmi OPEN /
+        MATCHED / ACCEPTED / PARTIALLY_ACCEPTED. Jamais une occurrence REJECTED / EXPIRED / terminale (déjà jouée) tant
+        qu'une occurrence future pertinente existe. Source unique de la liste ET du détail (B21)."""
+        if not need_ids:
+            return {}
+        stmt = (
+            select(RecurringNeedOccurrence)
+            .where(
+                RecurringNeedOccurrence.recurring_need_id.in_(need_ids),
+                RecurringNeedOccurrence.status.in_(ACTIONABLE_OCCURRENCE_STATUSES),
+                RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
+            )
+            .order_by(RecurringNeedOccurrence.recurring_need_id, RecurringNeedOccurrence.occurrence_date.asc())
+        )
+        found: Dict[Any, RecurringNeedOccurrence] = {}
+        for occ in (await self._db().execute(stmt)).scalars().all():
+            found.setdefault(occ.recurring_need_id, occ)
+        return found
+
     async def replenish_occurrence_windows(self) -> Dict[str, Any]:
         """Réapprovisionnement générique (Phase 3, mandat MONTHLY §17/§18) : rejoue
         `_materialize_occurrences` sur `[aujourd'hui, aujourd'hui+OCCURRENCE_WINDOW_DAYS]` pour
@@ -502,49 +577,16 @@ class RecurringSupplyMixin(BaseMixin):
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
 
-        window_end = _today() + timedelta(days=OCCURRENCE_WINDOW_DAYS)
         needs = (
             await current_session.execute(select(RecurringNeed).where(RecurringNeed.status == "ACTIVE"))
         ).scalars().all()
-        # Une seule requête pour la zone acheteur + l'unité canonique de la sous-catégorie de TOUS
-        # les besoins actifs (analytics Phase C) — jamais un lookup par besoin.
-        dims = {
-            row.need_id: (row.zone_id, row.priority_unit)
-            for row in (
-                await current_session.execute(
-                    select(
-                        RecurringNeed.id.label("need_id"),
-                        User.zone_id.label("zone_id"),
-                        SubCategory.priority_unit.label("priority_unit"),
-                    )
-                    .join(BuyerProfile, BuyerProfile.id == RecurringNeed.buyer_id)
-                    .join(User, User.id == BuyerProfile.user_id)
-                    .join(SubCategory, SubCategory.id == RecurringNeed.sub_category_id)
-                    .where(RecurringNeed.status == "ACTIVE")
-                )
-            ).all()
-        }
+        dims = await self._materialization_dims(None)
 
         needs_examined = 0
         occurrences_created = 0
         for need in needs:
-            rule = RecurrenceRule(
-                recurrence_type=need.recurrence_type,
-                weekly_days=need.weekly_days or (),
-                excluded_weekdays=need.excluded_weekdays or (),
-                starts_at=need.starts_at,
-                ends_at=need.ends_at,
-            )
             needs_examined += 1
-            zone_id, priority_unit = dims.get(need.id, (None, None))
-            occurrences_created += await self._materialize_occurrences(
-                need,
-                rule,
-                from_date=_today(),
-                to_date=window_end,
-                zone_id=zone_id,
-                canonical_unit=resolve_subcategory_canonical_unit(SimpleNamespace(priority_unit=priority_unit)),
-            )
+            occurrences_created += await self._ensure_window_for_need(need, dims=dims)
 
         logger.info(
             "recurring_need.occurrence_window_replenished | needs_examined=%s | occurrences_created=%s",
@@ -605,21 +647,7 @@ class RecurringSupplyMixin(BaseMixin):
         needs = [n for n, _ in rows]
         need_ids = [n.id for n in needs]
 
-        next_occurrence_by_need: Dict[Any, RecurringNeedOccurrence] = {}
-        if need_ids:
-            occ_stmt = (
-                select(RecurringNeedOccurrence)
-                .where(
-                    RecurringNeedOccurrence.recurring_need_id.in_(need_ids),
-                    RecurringNeedOccurrence.status.in_(("OPEN", "MATCHED")),
-                    # Une occurrence passée restée ouverte (aucune réponse) ne doit JAMAIS masquer la
-                    # vraie prochaine occurrence (B12).
-                    RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
-                )
-                .order_by(RecurringNeedOccurrence.recurring_need_id, RecurringNeedOccurrence.occurrence_date.asc())
-            )
-            for occ in (await current_session.execute(occ_stmt)).scalars().all():
-                next_occurrence_by_need.setdefault(occ.recurring_need_id, occ)
+        next_occurrence_by_need = await self._next_actionable_occurrence(need_ids)
 
         items = []
         for need, sub_category_name in rows:
@@ -637,6 +665,7 @@ class RecurringSupplyMixin(BaseMixin):
                         next_occ.occurrence_date.date().isoformat() if next_occ else None
                     ),
                     "next_occurrence_id": str(next_occ.id) if next_occ else None,
+                    "next_occurrence_status": next_occ.status if next_occ else None,
                     "requested_quantity": float(next_occ.requested_quantity) if next_occ else None,
                     "matched_quantity": float(next_occ.quantity_matched) if next_occ else None,
                     # Identité de la proposition (réponse au digest) : version CAS + « a été notifiée ».
@@ -676,24 +705,39 @@ class RecurringSupplyMixin(BaseMixin):
             raise BusinessRuleException("Besoin introuvable.")
         need, sub_category_name = need_row
 
-        occurrence = await current_session.scalar(
-            select(RecurringNeedOccurrence)
-            .where(
-                RecurringNeedOccurrence.recurring_need_id == need.id,
-                RecurringNeedOccurrence.status.in_(("OPEN", "MATCHED")),
-                RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
-            )
-            .order_by(RecurringNeedOccurrence.occurrence_date.asc())
-            .limit(1)
-        )
+        occurrence = (await self._next_actionable_occurrence([need.id])).get(need.id)
+        need_info = {
+            "recurring_need_id": str(need.id),
+            "recurrence_type": need.recurrence_type,
+            "weekly_days": need.weekly_days,
+            "need_status": need.status,
+        }
         if occurrence is None:
+            last = await current_session.scalar(
+                select(RecurringNeedOccurrence)
+                .where(RecurringNeedOccurrence.recurring_need_id == need.id)
+                .order_by(RecurringNeedOccurrence.occurrence_date.desc())
+                .limit(1)
+            )
             return {
                 "status": "success",
+                **need_info,
                 "product": sub_category_name,
                 "requested_quantity": float(need.quantity),
                 "unit": need.unit,
                 "occurrence_date": None,
                 "allocations": [],
+                "last_occurrence": (
+                    {
+                        "status": last.status,
+                        "date": last.occurrence_date.date().isoformat(),
+                        "requested_quantity": float(last.requested_quantity),
+                        "quantity_delivered": float(last.quantity_delivered or 0),
+                        "unit": last.unit,
+                    }
+                    if last is not None
+                    else None
+                ),
             }
 
         alloc_rows = (
@@ -710,8 +754,37 @@ class RecurringSupplyMixin(BaseMixin):
             )
         ).mappings().all()
 
+        orders: List[Dict[str, Any]] = []
+        if occurrence.status in ("ACCEPTED", "PARTIALLY_ACCEPTED") and occurrence.order_group_id is not None:
+            order_rows = (
+                await current_session.execute(
+                    text(
+                        "SELECT o.id AS order_id, o.status AS order_status, COALESCE(pr.business_name, 'Producteur') AS producer_label, "
+                        "COALESCE(SUM(oi.quantity), 0) AS quantity "
+                        "FROM marketplace.orders o "
+                        "JOIN marketplace.order_items oi ON oi.order_id = o.id "
+                        "JOIN marketplace.products p ON p.id = oi.product_id "
+                        "JOIN marketplace.producers pr ON pr.id = p.producer_id "
+                        "WHERE o.checkout_group_id = :group_id AND o.order_type = 'RECURRING_SUPPLY' "
+                        "GROUP BY o.id, o.status, pr.business_name ORDER BY pr.business_name, o.id"
+                    ),
+                    {"group_id": occurrence.order_group_id},
+                )
+            ).mappings().all()
+            orders = [
+                {"order_id": str(r["order_id"]), "order_status": r["order_status"], "producer_label": r["producer_label"],
+                 "quantity": float(r["quantity"])}
+                for r in order_rows
+            ]
+
         return {
             "status": "success",
+            **need_info,
+            "occurrence_status": occurrence.status,
+            "quantity_matched": float(occurrence.quantity_matched or 0),
+            "quantity_confirmed": float(occurrence.quantity_confirmed or 0),
+            "quantity_delivered": float(occurrence.quantity_delivered or 0),
+            "orders": orders,
             # Identité EXACTE de la proposition affichée (B12) : la confirmation depuis cet écran
             # vise `occurrence_id` à `occurrence_version`, jamais « la prochaine ouverte ».
             "occurrence_id": str(occurrence.id),
@@ -729,6 +802,75 @@ class RecurringSupplyMixin(BaseMixin):
                 }
                 for row in alloc_rows
             ],
+        }
+
+    # ─── SELF-SERVICE BUYER (B21) : matérialiser / rechercher à la demande, sans cron ni digest ───────────
+
+    async def _owned_need(self, phone: str, recurring_need_id: str):
+        user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        need = await self._db().scalar(
+            select(RecurringNeed).where(RecurringNeed.id == recurring_need_id, RecurringNeed.buyer_id == buyer_profile.id)
+        )
+        if need is None:
+            raise BusinessRuleException("Besoin introuvable.")
+        return user_obj, need
+
+    async def ensure_next_recurring_occurrence(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+        """Garantit qu'une prochaine occurrence existe pour ce besoin ACTIF — MÊME primitive que le cron
+        (`_ensure_window_for_need`, `ON CONFLICT DO NOTHING`) : idempotent, sûr en concurrence (cron + Buyer
+        simultanés => exactement UNE occurrence par date). Ne dépend ni du digest ni de `notified_at`."""
+        user_obj, need = await self._owned_need(phone, recurring_need_id)
+        created = 0
+        existing = await self._next_actionable_occurrence([need.id])
+        if need.status == "ACTIVE" and need.id not in existing:
+            created = await self._ensure_window_for_need(need, actor_type="BUYER", actor_id=getattr(user_obj, "id", None))
+            existing = await self._next_actionable_occurrence([need.id])
+        occurrence = existing.get(need.id)
+        logger.info(
+            "RECURRING_OCCURRENCE_ENSURED | recurring_need_id=%s | created=%s | occurrence_status=%s",
+            need.id, created, occurrence.status if occurrence else None,
+        )
+        return {
+            "status": "success",
+            "recurring_need_id": str(need.id),
+            "occurrence_id": str(occurrence.id) if occurrence else None,
+            "occurrence_status": occurrence.status if occurrence else None,
+            "created": created,
+        }
+
+    async def refresh_recurring_need_matching(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+        """« Rechercher maintenant » : lance le VRAI moteur de matching (`NeedMatchingService.rematch_occurrence`, celui
+        du cron) sur la prochaine occurrence du besoin — mêmes filtres, classement, prix, garde conditionnement,
+        allocations et versionnement (`version` n'est bumpée que si les allocations changent). N'envoie AUCUN digest."""
+        from ladini.workers.automation.need_matching_service import NeedMatchingService
+
+        ensured = await self.ensure_next_recurring_occurrence(phone, recurring_need_id)
+        if ensured["occurrence_id"] is None:
+            return {"status": "success", "outcome": "NO_OCCURRENCE", "recurring_need_id": ensured["recurring_need_id"]}
+        if ensured["occurrence_status"] not in ("OPEN", "MATCHED"):
+            return {
+                "status": "success", "outcome": "NOT_MATCHABLE", "recurring_need_id": ensured["recurring_need_id"],
+                "occurrence_id": ensured["occurrence_id"], "occurrence_status": ensured["occurrence_status"],
+            }
+        logger.info("RECURRING_MANUAL_MATCH_TRIGGERED | occurrence_id=%s", ensured["occurrence_id"])
+        report = await NeedMatchingService(self._db()).rematch_occurrence(
+            uuid.UUID(ensured["occurrence_id"]), trigger="self_service"
+        )
+        if report.error:
+            return {"status": "success", "outcome": "MATCH_ERROR", "occurrence_id": ensured["occurrence_id"]}
+        occurrence = await self._db().scalar(
+            select(RecurringNeedOccurrence)
+            .where(RecurringNeedOccurrence.id == uuid.UUID(ensured["occurrence_id"]))
+            .execution_options(populate_existing=True)
+        )
+        return {
+            "status": "success",
+            "outcome": "MATCHED" if float(getattr(occurrence, "quantity_matched", 0) or 0) > 0 else "NO_AVAILABILITY",
+            "changed": bool(report.changed),
+            "recurring_need_id": ensured["recurring_need_id"],
+            "occurrence_id": ensured["occurrence_id"],
+            "occurrence_version": int(occurrence.version) if occurrence is not None else None,
+            "quantity_matched": float(occurrence.quantity_matched or 0) if occurrence is not None else 0.0,
         }
 
     # ─── CONFIRMATION (VS4 pilote) ────────────────────────────────────
