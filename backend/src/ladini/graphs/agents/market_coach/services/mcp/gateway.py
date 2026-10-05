@@ -678,19 +678,23 @@ class RecurringSupplyGateway(_BaseGateway):
         excluded_weekdays: Any = None,
         paused_until: Any = None,
         occurrence_date: Any = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
-        return await self._call(
-            "update_recurring_need",
-            phone=phone,
-            recurring_need_id=recurring_need_id,
-            action=action,
-            quantity=quantity,
-            recurrence_type=recurrence_type,
-            weekly_days=weekly_days,
-            excluded_weekdays=excluded_weekdays,
-            paused_until=paused_until,
-            occurrence_date=occurrence_date,
-        )
+        kwargs: Dict[str, Any] = {
+            "phone": phone,
+            "recurring_need_id": recurring_need_id,
+            "action": action,
+            "quantity": quantity,
+            "recurrence_type": recurrence_type,
+            "weekly_days": weekly_days,
+            "excluded_weekdays": excluded_weekdays,
+            "paused_until": paused_until,
+            "occurrence_date": occurrence_date,
+        }
+        if expected_version is not None:
+            # B25 : version du besoin vue par l'acheteur ; le service refuse (`VERSION_CONFLICT`) une intention périmée.
+            kwargs["expected_version"] = int(expected_version)
+        return await self._call("update_recurring_need", **kwargs)
 
     async def list_my_recurring_needs(self, phone: str) -> Dict[str, Any]:
         return await self._call("list_my_recurring_needs", phone=phone)
