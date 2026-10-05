@@ -40,7 +40,7 @@ from tests.integration.test_buyer_preorder_confirmation_e2e import (  # noqa: F4
 )
 
 _ALIASES = ["okay", "OKAY", "ok", "oui", "confirmer", "valider", "précommander"]
-_NOISE = ("get_account_status", "get_prohibited_terms")
+_NOISE = ("get_account_status", "get_prohibited_terms", "get_last_interactive_outbound")  # lectures de contexte, sans effet
 _RECURRING = [{"recurring_need_id": "r1", "product": "oignon", "matched_quantity": 50}]
 _BAD = ("Quelle quantité", "On continue", "j'ai juste besoin")
 

@@ -35,7 +35,7 @@ from tests.integration.test_buyer_deterministic_product_switch_e2e import (
 
 _FAKE_SUCCESS = "C'est confirmé"
 _ALIASES = ["okay", "ok", "oui", "confirmer", "valider", "précommander"]
-_NOISE = ("get_account_status", "get_prohibited_terms")
+_NOISE = ("get_account_status", "get_prohibited_terms", "get_last_interactive_outbound")  # lectures de contexte, sans effet
 _RECURRING = [{"recurring_need_id": "r1", "product": "oignon", "matched_quantity": 50, "status": "ACTIVE",
                "next_occurrence_id": "occ-r1", "next_occurrence_date": "2026-10-04", "next_occurrence_notified": True}]
 

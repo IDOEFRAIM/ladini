@@ -1150,6 +1150,9 @@ def _command_menu(
             "__reset__": True,
             "mapping": mapping, "created_at": time.time(), "actions": {k: _menu_action_of(v) for k, v in mapping.items()},
             "title": f"Confirmation pour le besoin récurrent « {product} »", "labels": labels, "commands": commands,
+            "shown_numbers": _shown_numbers(*[c.get("quantity") for c in commands.values()],
+                                            *[_day_of(c.get("occurrence_date")) for c in commands.values()],
+                                            need.get("quantity")),
             "target": {"type": "RECURRING_NEED", "id": str(need["recurring_need_id"]), "product": product,
                        "quantity": _fmt_qty(need.get("quantity")), "unit": str(need.get("unit") or ""),
                        "frequency": _frequency_label(need), "need_version": need.get("need_version")}}},
@@ -1379,6 +1382,11 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         return await _render_needs_list(state, mc_runtime)
     if _payload.get("digest_action") == "MY_NEEDS":
         return await _render_needs_list(state, mc_runtime)
+    # B27 : « et pour les oignons ? » — une demande NOMMANT un besoin (jamais une réponse de menu) ouvre CE besoin ; la cible est
+    # résolue par le domaine (0 -> introuvable, 1 -> exact, N -> choix explicite), jamais choisie par le modèle.
+    _named = str(entities_said_this_turn(state).get("product") or "").strip()
+    if _named and not _payload.get("selection_index") and str(state.get("interpreted_event") or "").upper() != "SELECTION":
+        return await _open_need_by_name(state, mc_runtime, _named)
     resolved = _resolve_menu_reply(state)
     if resolved is not None:
         kind, target = resolved
@@ -1439,6 +1447,31 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
             return await _render_needs_list(state, mc_runtime, notice="Je n'ai pas compris ce choix.\n\n")
         # kind == "LIST" (retour / mes besoins) — retombe sur la liste fraîche ci-dessous.
     return await _render_needs_list(state, mc_runtime)
+
+
+async def _open_need_by_name(state: Dict[str, Any], mc_runtime: MarketRuntime, hint: str) -> Dict[str, Any]:
+    """B27 — ouvre l'écran du besoin NOMMÉ ; 0 correspondance : introuvable (+ la liste), N : menu des seuls candidats."""
+    intent = "GET_MY_NEEDS"
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        listing = await gw.list_my_recurring_needs(phone=str(state.get("user_phone")))
+    except MCPCallError:
+        return {"final_response": "Je n'ai pas pu récupérer vos besoins.", "status": "COMPLETED"}
+    owned = [i for i in (listing.get("items") or []) if i.get("status") in ("ACTIVE", "PAUSED")]
+    kind, picked = _pick_need(owned, product_hint=hint, context_target=None)
+    if kind == "not_found":
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="named_need_not_found", resolution="not_found")
+        patch = await _render_needs_list(
+            state, mc_runtime, notice=f"Je ne trouve pas de besoin récurrent « {hint} » parmi vos besoins.\n\n")
+        return {**patch, "response_strategy": "CLARIFICATION", "relation_to_context": "AMBIGUOUS"}
+    if kind == "not_unique":
+        _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="target_not_unique", resolution="not_unique")
+        patch = await _need_choice_menu(
+            state, mc_runtime, picked, f"Vous avez {len(picked)} besoins pour « {hint} ». Lequel voulez-vous voir ?")
+        return {**patch, "relation_to_context": "AMBIGUOUS"}
+    _arbitration_log(state, intent=intent, relation="ANSWER", reason="named_need", resolution="by_name")
+    screen = await _show_need_detail(state, mc_runtime, str(picked["recurring_need_id"]), ensure=True)
+    return {**screen, "response_strategy": "CLARIFICATION", "relation_to_context": "ANSWER"}
 
 
 def _resolve_menu_reply(state: Dict[str, Any]):
@@ -1552,7 +1585,15 @@ async def _render_needs_list(
             # B26 : version de chaque besoin AU MOMENT où la liste est montrée (navigation : le détail rafraîchit ; mutation : comparée).
             "versions": {str(i["recurring_need_id"]): i.get("need_version") for i in items if i.get("need_version") is not None},
             "target": None,  # `working_memory` fusionne en profondeur : une cible d'écran précédente ne doit pas survivre à la liste
-            "labels": {str(i): _render_need_line(item) for i, item in enumerate(items, start=1)}}},
+            "labels": {str(i): _render_need_line(item, show_start=str(item.get("recurring_need_id")) in twins)
+                       for i, item in enumerate(items, start=1)},
+            # B27 : dates AFFICHÉES de chaque besoin — le domaine (jamais le modèle) résout « celui du 5 », « celle de demain ».
+            "facts": {str(i): {"starts": [str(item["starts_on"])[:10]] if item.get("starts_on") else [],
+                               "deliveries": [str(item["next_occurrence_date"])[:10]] if item.get("next_occurrence_date") else []}
+                      for i, item in enumerate(items, start=1)},
+            "occurrences": {str(item["recurring_need_id"]): {"id": item.get("next_occurrence_id"),
+                                                             "date": str(item.get("next_occurrence_date") or "")[:10] or None}
+                            for item in items}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
 
@@ -1638,7 +1679,7 @@ def _render_need_block(index: int, item: Dict[str, Any], *, show_start: bool = F
     return lines
 
 
-def _render_need_line(item: Dict[str, Any]) -> str:
+def _render_need_line(item: Dict[str, Any], *, show_start: bool = False) -> str:
     freq = {
         "DAILY": "jour",
         "WEEKLY_DAYS": "semaine",
@@ -1652,6 +1693,12 @@ def _render_need_line(item: Dict[str, Any]) -> str:
     if requested is not None and matched is not None:
         emoji = "✅" if matched >= requested and requested > 0 else "❌" if matched <= 0 else "⚠️"
         label += f" — {emoji} {_fmt_qty(matched)}/{_fmt_qty(requested)} {item.get('unit')} disponibles demain"
+    started = _fmt_date_fr(item.get("starts_on"))
+    if show_start and started:  # B27 : deux besoins identiques se distinguent par leur date (« celui commencé le 5 »)
+        label += f" — démarré le {started}"
+    when = _fmt_date_fr(item.get("next_occurrence_date"))
+    if item.get("status") == "ACTIVE" and item.get("schedule_state") == "OK" and when:
+        label += f" — prochaine livraison {when}"
     return label
 
 
@@ -1694,6 +1741,9 @@ async def _refresh_matching(state: Dict[str, Any], mc_runtime: MarketRuntime, re
         notice = "🔎 Recherche terminée.\n\n"
     elif outcome == "MATCH_ERROR":
         notice = "⚠️ La recherche n'a pas pu aboutir — réessayez dans un instant.\n\n"
+    elif outcome in ("NOT_MATCHABLE", "NO_OCCURRENCE"):
+        # B27 : c'est le DOMAINE qui dit si une relance est encore possible (jamais le langage naturel) ; le message le répète.
+        notice = "🔎 Cette livraison ne peut plus être relancée pour le moment.\n\n"
     return await _show_need_detail(state, mc_runtime, recurring_need_id, notice=notice)
 
 
@@ -1760,6 +1810,9 @@ async def _show_need_detail(
 
     unit = str(detail.get("unit") or "")
     product = str(detail.get("product") or "").capitalize()
+    mismatch = _list_detail_mismatch(state, recurring_need_id, detail)
+    if mismatch:  # B27 : la liste et le détail ne doivent pas se contredire en silence
+        notice += mismatch + "\n\n"
     header = [
         f"{notice}📦 {product}",
         f"Besoin : {_fmt_qty(detail.get('requested_quantity'))} {unit} · {_frequency_label(detail)}",
@@ -1833,6 +1886,12 @@ async def _show_need_detail(
             "__reset__": True,  # B24 : voir `_render_needs_list`
             "mapping": mapping, "created_at": time.time(), "actions": {k: _menu_action_of(v) for k, v in mapping.items()},
             "title": f"Écran du besoin récurrent « {product} » (livraison {_fmt_date_fr(detail.get('occurrence_date')) or 'à venir'})",
+            # B27 : les nombres que CET écran a montrés (une « confirmation » qui en apporte un autre est une correction).
+            "shown_numbers": _shown_numbers(detail.get("requested_quantity"), detail.get("quantity_matched"),
+                                            *[v for a in detail.get("allocations") or [] for v in (a.get("quantity"), a.get("unit_price"))],
+                                            sum(float(a.get("quantity") or 0) * float(a.get("unit_price") or 0)
+                                                for a in detail.get("allocations") or []) or None,
+                                            _day_of(detail.get("occurrence_date"))),
             # B24 : la CIBLE métier de l'écran (indice de résolution pour « mets-en 3 », « cherche pour mes boeufs » ; revalidée
             # contre la liste de l'acheteur avant toute action — jamais un index de menu, jamais une preuve).
             "target": {"type": "RECURRING_NEED", "id": str(recurring_need_id), "product": product,
@@ -1844,6 +1903,42 @@ async def _show_need_detail(
             "labels": {k: _ACTION_LABELS.get(_menu_action_of(v), v) for k, v in mapping.items()}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
+
+
+def _shown_numbers(*values: Any) -> List[float]:
+    out: List[float] = []
+    for v in values:
+        try:
+            if v is not None and float(v) == float(v):
+                out.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _day_of(iso: Any) -> Optional[int]:
+    try:
+        return int(str(iso)[8:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _list_detail_mismatch(state: Dict[str, Any], need_id: str, detail: Dict[str, Any]) -> str:
+    """B27 — LISTE/DÉTAIL : l'écran de détail doit parler de la MÊME livraison que la liste d'où l'acheteur l'a ouvert. Si la liste
+    annonçait une date/une occurrence et que le détail en montre une autre, on ne laisse pas deux vérités circuler en silence :
+    l'écart est dit, et journalisé (sans PII). Aucun identifiant ni devinette : seules les données de la liste affichée et du
+    détail lu sont comparées."""
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    listed = ((menu or {}).get("occurrences") or {}).get(need_id) if isinstance(menu, dict) else None
+    if not isinstance(listed, dict) or not listed.get("date") or not detail.get("occurrence_date"):
+        return ""
+    shown_date = str(detail["occurrence_date"])[:10]
+    same_id = listed.get("id") is None or detail.get("occurrence_id") is None or str(listed["id"]) == str(detail["occurrence_id"])
+    if listed["date"] == shown_date and same_id:
+        return ""
+    logger.warning("RECURRING_LIST_DETAIL_MISMATCH | same_occurrence_id=%s | list_date_differs=%s", same_id, listed["date"] != shown_date)
+    return (f"⚠️ La liste annonçait la livraison du {_fmt_date_fr(listed['date'])} ; ce besoin est maintenant planifié "
+            f"pour le {_fmt_date_fr(shown_date)}.")
 
 
 def _menu_action_of(value: str) -> str:

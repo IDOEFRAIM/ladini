@@ -1536,13 +1536,29 @@ class RecurringSupplyMixin(BaseMixin):
                 from ladini.workers.outbox import templates as _outbox_templates
                 from ladini.workers.repositories import outbox_repo as _outbox_repo
 
+                # B27 — CONTEXTE DE RÉCUPÉRATION : la notification porte la livraison (besoin + occurrence) qui a échoué, pour que
+                # « trouve-moi quelqu'un d'autre » vise CETTE livraison sans repartir de zéro (identifiants seulement, aucun texte libre).
+                failed_occurrence = await current_session.scalar(
+                    select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.order_group_id == order.checkout_group_id)
+                ) if order.checkout_group_id is not None else None
+                recovery: Dict[str, Any] = {}
+                if failed_occurrence is not None:
+                    recovery = {
+                        "recovery_candidate": True,
+                        "occurrences": [{
+                            "recurring_need_id": str(failed_occurrence.recurring_need_id),
+                            "occurrence_id": str(failed_occurrence.id),
+                            "date": failed_occurrence.occurrence_date.date().isoformat()
+                            if failed_occurrence.occurrence_date is not None else None,
+                        }],
+                    }
                 await _outbox_repo.enqueue(
                     current_session,
                     [{
                         "channel": "WHATSAPP", "recipient_phone": buyer_phone,
                         "template_key": _outbox_templates.ORDER_CANCELLED_BY_PRODUCER_BUYER,
                         "payload": {"order_number": str(order.id)[:8].upper(),
-                                    "reason": "Le producteur n'a pas confirmé à temps."},
+                                    "reason": "Le producteur n'a pas confirmé à temps.", **recovery},
                         "dedupe_key": f"ORDER_CANCELLED_BUYER:{order.id}",
                     }],
                 )

@@ -20,7 +20,9 @@ from typing import List
 # (`prompt_version`), pour comparer AVANT/APRÈS un changement de prompt.
 # Distincte de `INTERPRETER_PROMPT_VERSION` (routing.py) — chaque famille de
 # micro-prompt a sa propre version (spec §19).
-SELECTION_PROMPT_VERSION = "selection_v3"
+# v4 (B27) : lecture NATURELLE d'une réponse de menu — accord/refus libres de l'option affichée, références de date
+# (extraites, jamais calculées), certitude ; aucune liste de phrases.
+SELECTION_PROMPT_VERSION = "selection_v4"
 
 SELECTION_SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -52,7 +54,13 @@ _USER_PROMPT_TEMPLATE = (
     "une interruption — même s'il n'y a qu'une seule option affichée, "
     "même si ce verbe pourrait sembler s'appliquer à \"une commande\" en "
     "général : sans référence explicite ou implicite à CETTE option "
-    "précise, ce n'est pas une sélection.\n"
+    "précise, ce n'est pas une sélection. EXCEPTION : quand une option affichée "
+    "est elle-même un accord ou un refus de ce que l'écran propose (« Confirmer », "
+    "« Pas cette fois »...), un message qui exprime NATURELLEMENT cet accord ou "
+    "ce refus pour ce qui est affiché, SANS rien ajouter ni modifier, est la "
+    "SÉLECTION de cette option — quelle que soit la formulation. Un accord qui "
+    "ajoute, change ou conditionne quelque chose (une quantité, une date, un "
+    "autre produit : « oui mais… ») n'est PAS un accord : c'est une INTERRUPTION.\n"
     "- UNKNOWN : trop ambigu pour choisir une option ou conclure à une "
     'interruption (ex: "celui-là" sans repère suffisant, "l\'autre" avec '
     "plus de deux options).\n"
@@ -62,13 +70,22 @@ _USER_PROMPT_TEMPLATE = (
     "exactement UNE option ;\n"
     '- sinon utilise "selected_value" (texte court, la désignation humaine '
     "utile — jamais un identifiant technique) ;\n"
-    "- ne renseigne jamais les deux à la fois, n'invente aucun identifiant.\n"
+    "- ne renseigne jamais les deux à la fois, n'invente aucun identifiant ;\n"
+    "- \"confidence\" (0.0 à 1.0) : ta certitude que CE message désigne cette option ;\n"
+    "- si le message désigne une option par sa DATE (« demain », « celui du 5 »), "
+    "renseigne \"date_offset_days\" (entier : 0 aujourd'hui, 1 demain...) OU "
+    "\"date_day\"/\"date_month\" (le jour et le mois DITS) — jamais une date "
+    "calculée : le système la calcule. \"date_role\" : START si la date est celle "
+    "du DÉMARRAGE (« celui qui commence le 5 »), DELIVERY si c'est une LIVRAISON "
+    "(« celle de demain »), sinon null.\n"
     'Pour INTERRUPTION et UNKNOWN : "selection_index" et "selected_value" '
     "doivent être null.\n"
     "\n"
     "Réponds strictement avec cet objet JSON, sans aucun autre texte :\n"
     '{{"event": "SELECTION|INTERRUPTION|UNKNOWN", "selection_index": '
-    '<entier ou null>, "selected_value": "<texte ou null>"}}'
+    '<entier ou null>, "selected_value": "<texte ou null>", "confidence": '
+    '<0.0 à 1.0>, "date_offset_days": <entier ou null>, "date_day": <1-31 ou '
+    'null>, "date_month": <1-12 ou null>, "date_role": "<START|DELIVERY|null>"}}'
 )
 
 _REPAIR_PROMPT_TEMPLATE = (

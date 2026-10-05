@@ -2252,17 +2252,19 @@ def _apply_packaged_stock_entities(raw: Dict[str, Any], state: Dict[str, Any], t
     return patched
 
 
-async def _fetch_interactive_outbound(mc_runtime: Any, state: Dict[str, Any], text: str):
+async def _fetch_interactive_outbound(mc_runtime: Any, state: Dict[str, Any], text: str, sink: Optional[Dict[str, Any]] = None):
     """Dernier message sortant interactif (lecture DB), seulement quand il peut changer l'attribution de CE message :
     contexte d'état présent, ou réponse courte/chiffre/alias de menu. Toute panne => `None` (jamais bloquant)."""
     from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
 
     norm = ca.fold(text)
+    _no_context = get_pending_interaction(state).kind == InteractionKind.NONE and not ca._has_ghost_menu(state)
     could_matter = (
         get_pending_interaction(state).kind != InteractionKind.NONE
         or ca._has_ghost_menu(state)
         or norm.isdigit()
         or any(norm in aliases for aliases in ca.MENU_ACTION_ALIASES.values())
+        or _no_context  # B27 : sans contexte, le dernier message sortant peut porter un contexte de RÉCUPÉRATION (échec producteur)
     )
     phone = str(state.get("user_phone") or "")
     if not could_matter or not phone:
@@ -2272,9 +2274,11 @@ async def _fetch_interactive_outbound(mc_runtime: Any, state: Dict[str, Any], te
             ModerationGateway,
         )
 
-        return ca.InteractiveOutbound.from_tool_result(
-            await ModerationGateway(mc_runtime).get_last_interactive_outbound(phone)
-        )
+        result = await ModerationGateway(mc_runtime).get_last_interactive_outbound(phone)
+        recovery = result.get("recovery") if isinstance(result, dict) else None
+        if sink is not None and isinstance(recovery, dict) and recovery.get("recurring_need_ids"):
+            sink["recovery_context"] = recovery  # B27 : livraison récurrente en échec signalée au client (identifiants seulement)
+        return ca.InteractiveOutbound.from_tool_result(result)
     except Exception as exc:  # pragma: no cover - la lecture sortante ne casse jamais un tour
         logger.warning("get_last_interactive_outbound a échoué (%s) — arbitrage sans contexte sortant", type(exc).__name__)
         return None
@@ -2308,7 +2312,8 @@ def _screen_context_hint(state: Dict[str, Any]) -> Optional[str]:
 
     view = ca.live_menu_view(state)
     if view is None:
-        return None
+        hint: Optional[str] = ca.recovery_hint(state)  # B27 : pas d'écran, mais une notification d'échec récente
+        return hint
     parts = [view["title"]] if view["title"] else []
     target = ca.live_menu_target(state)
     if target is not None:
@@ -2327,13 +2332,13 @@ def _annotate_interpretation(state: Dict[str, Any], patch: Dict[str, Any]) -> Di
 
     relation = ca.derive_relation(state, patch)
     intent = str(patch.get("detected_intent") or "UNKNOWN").upper()
-    target = ca.live_menu_target(state) if intent in ca.CONTEXT_TARGETED_INTENTS else None
+    target = (ca.live_menu_target(state) or ca.recovery_target(state)) if intent in ca.CONTEXT_TARGETED_INTENTS else None
     out = {**patch, "relation_to_context": relation.value}
     if target is not None:
         out["context_target"] = target
     analysis = patch.get("raw_analysis") or {}
     path = str(analysis.get("path") or "")
-    if ca.live_menu_view(state) is None and not path.startswith("context_arbitration"):
+    if ca.live_menu_view(state) is None and not path.startswith("context_arbitration") and ca.recovery_target(state) is None:
         return out
     reason = analysis.get("decision_reason") or analysis.get("guard")
     if path == "context_arbitration_recurring_menu":
@@ -2356,20 +2361,21 @@ def _annotate_interpretation(state: Dict[str, Any], patch: Dict[str, Any]) -> Di
         route=path or "interpreter",
         reason=str(reason),
         target_type=str(target["type"]) if target is not None else None,
-        target_resolution="context" if target is not None else None,
+        target_resolution=(("recovery" if target.get("source") == "recovery_notification" else "context") if target is not None else None),
+        deterministic_path=path.startswith("context_arbitration") or path.startswith("fast_path"),
     )
     return out
 
 
 async def _arbitrate_context(
-    state: Dict[str, Any], mc_runtime: Any, text: str, role_up: str, impl: Any
+    state: Dict[str, Any], mc_runtime: Any, text: str, role_up: str, impl: Any, sink: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """Applique `resolve_conversation_context` ; retourne le patch d'état, ou `None` pour poursuivre le pipeline existant."""
     from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
 
     if state.get("is_onboarding") or not str(text or "").strip() or role_up not in {"BUYER", "PRODUCER"}:
         return None
-    outbound = await _fetch_interactive_outbound(mc_runtime, state, text)
+    outbound = await _fetch_interactive_outbound(mc_runtime, state, text, sink)
     norm = ca.fold(text)
     # Lecture de capacité UNIQUEMENT pour une navigation « mes besoins » hors graphe BUYER (vocabulaire fermé : coût nul
     # pour tout autre message).
@@ -2871,6 +2877,8 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # départ") car les deux empruntent le même classifieur ensuite.
         _deviation_reclass = False
         _reclass_reason: Optional[str] = None  # B24 : pourquoi l'attente a été écartée (journal INTENT_ARBITRATION)
+        _natural_candidate: Optional[Dict[str, Any]] = None  # B27 : accord/refus naturel à confirmer par la 2e lecture
+        _ref_candidates: Optional[List[str]] = None  # B27 : options qui correspondent à la référence (clarification ciblée)
         from ladini.graphs.agents.market_coach.interpreter.state_router import (
             InterpretationRoute,
             choose_interpretation_route,
@@ -2902,14 +2910,25 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 )
 
                 _sel_result = _ca.guard_free_text_selection(state, _sel_result or {}, text)
-                if (_sel_result.get("raw_analysis") or {}).get("guard") != _ca.GUARD_FREE_TEXT_ACTION:
+                _sel_guard = (_sel_result.get("raw_analysis") or {}).get("guard")
+                if _sel_guard == _ca.GUARD_NATURAL_CONFIRMATION:
+                    # B27 : accord/refus NATUREL d'une entrée mutante — une 2e lecture sémantique INDÉPENDANTE (NEW_TASK) doit
+                    # aboutir à la même disposition avant que la commande ne soit exécutée (même commande que « 1 »).
+                    logger.info("[Interpreter SELECTION] acceptation/refus naturel candidat — 2e lecture sémantique")
+                    _natural_candidate = _sel_result
+                    _reclass_reason = _ca.GUARD_NATURAL_CONFIRMATION
+                    expected_input = "NONE"
+                    _deviation_reclass = True
+                elif _sel_guard != _ca.GUARD_FREE_TEXT_ACTION:
                     return _sel_result
-                # B24 : une action d'écran (rechercher, retour...) « choisie » par le micro-prompt sur du langage LIBRE n'est pas
-                # une réponse prouvée à l'attente — l'index n'est pas exécuté, l'interprétation sémantique (NEW_TASK) tranche.
-                logger.info("[Interpreter SELECTION] sélection en langage libre sur une action d'écran — reclassification NEW_TASK")
-                _reclass_reason = _ca.GUARD_FREE_TEXT_ACTION
-                expected_input = "NONE"
-                _deviation_reclass = True
+                else:
+                    # B24 : une action d'écran (rechercher, retour...) « choisie » par le micro-prompt sur du langage LIBRE n'est pas
+                    # une réponse prouvée à l'attente — l'index n'est pas exécuté, l'interprétation sémantique (NEW_TASK) tranche.
+                    logger.info("[Interpreter SELECTION] sélection en langage libre sur une action d'écran — reclassification NEW_TASK")
+                    _reclass_reason = (_sel_result.get("raw_analysis") or {}).get("decision_reason") or _ca.GUARD_FREE_TEXT_ACTION
+                    _ref_candidates = (_sel_result.get("raw_analysis") or {}).get("reference_candidates")
+                    expected_input = "NONE"
+                    _deviation_reclass = True
             elif _sel_outcome == SelectionOutcome.INTERRUPTION:
                 # Le micro-prompt a confirmé que ce N'EST PAS une réponse au
                 # menu — reprend le message ORIGINAL et le fait passer par
@@ -3047,7 +3066,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 producer_order_action_pending=_producer_order_action_pending_signal(
                     state
                 ),
-                screen_context=_screen_context_hint(state) if _deviation_reclass else None,
+                screen_context=_screen_context_hint(state) if (_deviation_reclass or state.get("recovery_context")) else None,
             )
             _nt_catalog = {
                 intent_key: INTENT_CONFIG[intent_key].get("label", intent_key)
@@ -3107,6 +3126,22 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 # jamais une intention devinée par substitution.
                 _nt_event = str(_nt_result.get("interpreted_event") or "").upper()
                 _nt_intent = _nt_result.get("detected_intent")
+                if _natural_candidate is not None:
+                    _wanted = "REJECT" if (_natural_candidate.get("raw_analysis") or {}).get("natural_action") == "REJECT" else "CONFIRM"
+                    if _nt_event == _wanted:
+                        logger.info("[Interpreter SELECTION] acceptation/refus naturel CONFIRMÉ par les deux lectures (%s)", _wanted)
+                        _natural_result: Dict[str, Any] = {
+                            **_natural_candidate,
+                            "raw_analysis": {**(_natural_candidate.get("raw_analysis") or {}), "guard": None,
+                                             "path": "selection_microprompt_natural_confirmation", "semantic_pair": True,
+                                             "decision_reason": "natural_confirmation"},
+                        }
+                        return _natural_result
+                    if _nt_event in ("CONFIRM", "REJECT"):  # les deux lectures se contredisent : on ne devine pas
+                        _nt_result = {**_nt_result, "interpreted_event": "UNKNOWN", "detected_intent": "UNKNOWN",
+                                      "unknown_reason": "AMBIGUOUS", "interruption_unresolved": True}
+                        _nt_result.pop("candidate_goals", None)
+                        return _nt_result
                 if _deviation_reclass:
                     # B23/B24 : l'attente (menu/slot) a été jugée non pertinente ; l'intention sémantique décide la tâche.
                     # La raison alimente le journal INTENT_ARBITRATION (émis une seule fois, à la sortie de l'interpréteur).
@@ -3153,6 +3188,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     # confirmée). Signal explicite, jamais deviné par le
                     # rendu lui-même.
                     _nt_result["interruption_unresolved"] = True
+                    if _ref_candidates:  # B27 : plusieurs options correspondent -> clarification sur celles-là seulement
+                        _nt_result["extracted_entities"] = {**(_nt_result.get("extracted_entities") or {}),
+                                                            "reference_candidates": _ref_candidates}
                     return _nt_result
                 else:
                     return _nt_result
@@ -3903,7 +3941,11 @@ def make_input_interpreter(role: str = "PRODUCER"):
             # B20 — ARBITRAGE DU CONTEXTE : à quel contexte interactif appartient ce message ? (menu sortant le plus
             # récent > navigation/nouvelle demande explicite > slot actif > classification libre). Voir
             # `interpreter/context_arbitration.py`. Aucun effet quand aucun contexte interactif n'existe.
-            arbitrated: Optional[Dict[str, Any]] = await _arbitrate_context(state, mc_runtime, text, role_up, _input_interpreter_impl)
+            _sink: Dict[str, Any] = {}
+            arbitrated: Optional[Dict[str, Any]] = await _arbitrate_context(
+                state, mc_runtime, text, role_up, _input_interpreter_impl, _sink)
+            if _sink:  # B27 : contexte de récupération lu ce tour (vue dérivée, jamais écrite dans l'état)
+                state = {**state, **_sink}
             if arbitrated is not None:
                 return _annotate_interpretation(state, arbitrated)
             raw = await _input_interpreter_impl(state, mc_runtime)
