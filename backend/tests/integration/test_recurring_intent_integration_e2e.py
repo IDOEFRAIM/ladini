@@ -67,7 +67,7 @@ def _detail(*, allocations: List[Dict[str, Any]] | None = None, need_id: str = B
     def _fn(**_: Any) -> Dict[str, Any]:
         base = {"status": "success", "recurring_need_id": need_id, "recurrence_type": "WEEKLY", "need_status": "ACTIVE",
                 "product": product, "requested_quantity": 2, "unit": "TETE", "occurrence_id": "OCC-1",
-                "occurrence_version": 1, "occurrence_date": "2026-10-05", "occurrence_status": "OPEN"}
+                "need_version": 1000, "occurrence_version": 1, "occurrence_date": "2026-10-05", "occurrence_status": "OPEN"}
         return {**base, "allocations": allocations or [], "quantity_matched": sum(a["quantity"] for a in allocations or [])}
     return _fn
 

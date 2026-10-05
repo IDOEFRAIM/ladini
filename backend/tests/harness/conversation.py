@@ -221,6 +221,8 @@ class HarnessRuntime:
             "get_user_by_phone": lambda **_: {"status": "SUCCESS", "data": dict(self._profile)},
             "get_account_status": {"status": "success", "data": {"account_status": "ACTIVE"}},
             "get_prohibited_terms": {"status": "success", "data": {"terms": []}},
+            # Le vrai service rend la version du besoin après une mutation (B26) : les chaînes de mutations en dépendent.
+            "update_recurring_need": {"status": "success", "outcome": "APPLIED", "need_version": 2000},
         }
 
     # -- cycle de vie -------------------------------------------------

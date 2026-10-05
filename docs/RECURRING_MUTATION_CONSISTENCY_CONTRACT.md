@@ -36,8 +36,7 @@ proposition bâtie sur une quantité périmée. Toute réécriture passe par `_r
   résultat `{"status": "conflict", "outcome": "VERSION_CONFLICT", "current": {…}}` sans aucune écriture ni audit. Le flow
   répond par un message métier (état courant + « redites votre demande »), jamais une erreur technique, jamais un rejeu aveugle.
 - Politique : conflit STRICT sur toute mutation du même besoin (quantité vs fréquence incluses) ; pas de fusion par champ.
-- Sans `expected_version` (appelants hérités, cron, digest) : la mutation s'applique sur l'état verrouillé le plus récent ;
-  deux mutations ne s'entrelacent jamais. Les commandes confirmées (menu fermé) embarquent la version vue à la proposition.
+- La version est OBLIGATOIRE depuis B26 (voir « Version Contract » ci-dessous) : plus d'application « sur l'état courant » par omission.
 - Ordre des verrous : besoin → occurrence → allocations. Le matching verrouille l'occurrence puis ne verrouille pas le besoin ;
   l'acceptation verrouille occurrence puis allocations : pas de cycle.
 
@@ -84,5 +83,50 @@ côté frontend. Pas de table d'historique ni d'UX d'historique.
 ## 10. Limites connues
 - Une exception posée à la même valeur que le contrat est indiscernable d'une occurrence non exceptionnelle.
 - Pas de rematch inline : après une réécriture, la recherche est relancée par le cron ou le self-service.
-- `expected_version` est optionnel : un appelant qui ne le transmet pas n'est protégé que contre l'entrelacement.
+- Demande « à froid » (aucun écran présenté) : la version lue dans le tour est transmise ; elle protège la fenêtre lecture → écriture,
+  pas une intention périmée (il n'y en a pas). Réponses au digest antérieur à B12 (sans snapshot) : accept/reject sans version (repli transitoire).
+- Pas de RECURRING_NEED_UPDATED durable : `analytics.business_events.event_name` a un CHECK fermé côté Drizzle (migration frontend requise).
 - La reprise automatique a lieu au prochain passage du cron ou à l'ouverture du besoin, pas à la seconde près.
+
+## 11. Version Contract (B26)
+1. **Objet.** Empêcher qu'une commande bâtie sur un état présenté plus tôt (écran, liste, confirmation, digest) s'exécute sur un
+   état métier plus récent : *intention périmée*. Quatre invariants distincts, tous nécessaires, aucun ne remplace un autre :
+   le **verrou de ligne** (`FOR UPDATE`) sérialise physiquement ; **`expected_version`** valide logiquement l'état observé ;
+   l'**idempotence** empêche qu'une même commande s'applique deux fois ; le **TTL du menu** borne la fraîcheur conversationnelle.
+2. **Version du besoin** = `updated_at` en µs (entier, `recurring_need_version_of`), sans fuseau (UTC), `< 2^53` (JSON sûr). Elle change
+   exactement une fois par mutation effective (`_bump_need_version`) : quantité, fréquence/jours, statut, `paused_until`, y compris la
+   reprise automatique du cron. Elle ne change PAS : sur un rejeu idempotent (`ALREADY_APPLIED`), un conflit, ni pour une mutation d'occurrence
+   (skip, override), un matching, une allocation, une commande ou une matérialisation. Les écrivains de `recurring_needs` : tous dans
+   `recurring_supply.py` et tous passent par `_bump_need_version` (audit B26 : aucun écrivain externe).
+3. **Version de l'occurrence** = `recurring_need_occurrences.version` (`+1` à chaque réécriture, matching ou réponse). Jamais confondue
+   avec celle du besoin : `OCCURRENCE_SKIP`/`OCCURRENCE_OVERRIDE` exigent `expected_occurrence_version` (et ne demandent pas celle du besoin),
+   `accept_match_proposal` garde son `expected_version` d'occurrence (B12), inchangé.
+4. **Source de la version.** Toujours l'état PRÉSENTÉ, jamais une relecture avant d'écrire : `working_memory.recurring_need_menu.target`
+   (`need_version`, `occurrence_*`) pour un détail, `versions` pour la liste, `commands[k].expected_version|expected_occurrence_version` pour un
+   ordre à confirmer, `selected.occurrence_version` (digest : `digest_occurrence_version`) pour le digest. Elle ne dépend pas du TTL du menu.
+   Frontière : la navigation (liste → détail) rafraîchit ; la mutation compare à l'état affiché. Sans écran présenté (demande à froid), la
+   version lue dans le tour est transmise (`same_turn_read`).
+5. **Obligatoire.** Service : `expected_version` (besoin) ou `expected_occurrence_version` (occurrence) manquant →
+   `BusinessRuleException(reason="version_required")` avant toute lecture. Passerelle : `MCPCallError` sans appel émis. Aucun mode « interne »
+   n'existe : le cron et la reprise automatique n'appellent pas `update_recurring_need` (primitives privées sous verrou).
+6. **Ordre des contrôles.** propriété (le besoin est résolu sous `buyer_id` : « introuvable » identique pour une version juste ou fausse) →
+   version du besoin → (occurrence : existence/statut → version de l'occurrence) → état (`need_not_active`) → action. Donc une intention
+   périmée sur un besoin annulé ou suspendu est un `VERSION_CONFLICT`, jamais une réactivation.
+7. **Snapshot de confirmation.** L'ordre confirmé est immuable : `{action, recurring_need_id, expected_version | expected_occurrence_version,
+   valeurs}`. La seconde confirmation de CANCEL garde la version de la première. Le tour suivant n'est jamais reconstruit depuis la base.
+8. **Conflit.** `{"status": "conflict", "outcome": "VERSION_CONFLICT", "scope": "NEED|OCCURRENCE", "current": {…}}` : aucune écriture, aucun
+   effet de bord (pas d'occurrence, d'allocation, de commande, d'événement, d'outbox, d'audit de mutation, de version). Le flow dit ce qui a
+   changé, RÉAFFICHE l'écran à l'état courant (la version présentée devient l'actuelle) et l'acheteur décide de nouveau ; jamais de rejeu automatique.
+   La version n'est jamais montrée à l'utilisateur.
+9. **Rejeu.** Une commande déjà appliquée rejouée avec sa version d'origine est périmée (`VERSION_CONFLICT`) ; avec la version courante, elle est
+   `ALREADY_APPLIED` (sans écriture ni bump). Même état désiré après un changement concurrent (ex. reprise manuelle après reprise automatique) :
+   conflit propre, jamais une seconde mutation.
+10. **Digest.** Le digest ne propose que des actions d'occurrence (accepter, refuser, ignorer, modifier la livraison) : aucune mutation du
+    besoin. Elles portent la version d'occurrence du digest reçu (`digest_occurrence_version`) ; sans snapshot de digest, celle lue dans le tour.
+11. **Observabilité.** `RECURRING_VERSION_CHECK` (action, scope, `expected_version_present`, `version_match`, outcome — jamais le jeton ni de
+    donnée personnelle) côté service ; `RECURRING_VERSION_CONFLICT` (chemin appelant, action, source de la version) côté flow. Aucun compteur
+    Prometheus dédié (les journaux suffisent à compter).
+12. **Pourquoi `updated_at` et pas un BIGINT.** Écrit par une seule voie, sous verrou de ligne, `clock_timestamp()` à la µs, monotone et sans collision
+    mesurée (40 mutations en rafale). Risques acceptés : surcharge sémantique (date de dernière modification = jeton), dépendance à l'horloge du
+    serveur de base (un retour d'horloge ne casse pas le CAS : égalité stricte, pas d'ordre), précision liée au type `timestamp` Drizzle. Une
+    colonne `version BIGINT` n'apporterait rien d'immédiat et exigerait une migration Drizzle : non retenue.

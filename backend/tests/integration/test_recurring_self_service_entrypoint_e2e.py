@@ -47,7 +47,7 @@ class _Conv:
             items = [{
                 "recurring_need_id": c["recurring_need_id"], "product": str(c.get("product_query") or "Chevre").capitalize(),
                 "quantity": float(c.get("quantity") or 0), "unit": c.get("unit") or "UNITE", "recurrence_type": c.get("recurrence_type"),
-                "weekly_days": None, "status": "ACTIVE", "next_occurrence_date": None, "next_occurrence_id": None,
+                "weekly_days": None, "status": "ACTIVE", "need_version": 1000, "next_occurrence_date": None, "next_occurrence_id": None,
                 "requested_quantity": None, "matched_quantity": None, "next_occurrence_version": None,
                 "next_occurrence_notified": False, "in_latest_digest": False, "digest_occurrence_version": None,
             } for c in server.created]
@@ -55,7 +55,7 @@ class _Conv:
 
         h.runtime.responses["list_my_recurring_needs"] = _list
         h.runtime.responses["get_recurring_need_detail"] = lambda **kw: {
-            "status": "success", "product": "chevre", "requested_quantity": 3, "unit": "UNITE", "allocations": [],
+            "status": "success", "product": "chevre", "need_version": 1000, "requested_quantity": 3, "unit": "UNITE", "allocations": [],
             "occurrence_id": None, "occurrence_version": None,
         }
         h.runtime.responses["get_buyer_orders_dashboard"] = {"status": "success", "formatted_menu": "📦 SUIVI DE VOS COMMANDES", "mapping": {}}

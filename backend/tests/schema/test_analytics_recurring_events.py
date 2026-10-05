@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import psycopg2
 import pytest
 from factories import Graph
+from observed import observed_update
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -264,7 +265,8 @@ def test_skip_emits_occurrence_skipped_once_and_replay_emits_nothing(market):
     target = FIXED_TODAY + timedelta(days=2)
 
     async def skip(session):
-        return await _Svc(session, user, profile).update_recurring_need(
+        return await observed_update(
+            _Svc(session, user, profile), session,
             phone="+226", recurring_need_id=need_id, action="OCCURRENCE_SKIP", occurrence_date=target
         )
 
