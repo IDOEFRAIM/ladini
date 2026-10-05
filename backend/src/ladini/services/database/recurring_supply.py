@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -975,11 +976,25 @@ class RecurringSupplyMixin(BaseMixin):
             "created": created,
         }
 
-    async def refresh_recurring_need_matching(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+    async def refresh_recurring_need_matching(
+        self,
+        phone: str,
+        recurring_need_id: str,
+        occurrence_id: Optional[str] = None,
+        expected_occurrence_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """« Rechercher maintenant » : lance le VRAI moteur de matching (`NeedMatchingService.rematch_occurrence`, celui
         du cron) sur la prochaine occurrence du besoin — mêmes filtres, classement, prix, garde conditionnement,
-        allocations et versionnement (`version` n'est bumpée que si les allocations changent). N'envoie AUCUN digest."""
+        allocations et versionnement (`version` n'est bumpée que si les allocations changent). N'envoie AUCUN digest.
+
+        B28 : avec `occurrence_id` (+ `expected_occurrence_version`, obligatoire), la relance vise EXACTEMENT cette occurrence
+        — jamais « la prochaine » — et passe par `recover_occurrence_sourcing` (décision de récupération, réouverture, rematch)."""
         from ladini.workers.automation.need_matching_service import NeedMatchingService
+
+        if occurrence_id is not None:
+            return await self.recover_occurrence_sourcing(
+                phone, recurring_need_id, occurrence_id, expected_occurrence_version, source="USER"
+            )
 
         ensured = await self.ensure_next_recurring_occurrence(phone, recurring_need_id)
         if ensured["occurrence_id"] is None:
@@ -1009,6 +1024,162 @@ class RecurringSupplyMixin(BaseMixin):
             "occurrence_version": int(occurrence.version) if occurrence is not None else None,
             "quantity_matched": float(occurrence.quantity_matched or 0) if occurrence is not None else 0.0,
         }
+
+    async def recover_occurrence_sourcing(
+        self,
+        phone: str,
+        recurring_need_id: str,
+        occurrence_id: str,
+        expected_occurrence_version: Optional[int],
+        *,
+        source: str = "USER",
+    ) -> Dict[str, Any]:
+        """PRIMITIVE UNIQUE de récupération d'UNE occurrence (B28 ; contrat : docs/RECURRING_RECOVERY_CONTRACT.md) : décide
+        (`can_recover_occurrence`), invalide la tentative échouée (elle reste historique), rouvre l'occurrence et re-matche
+        EXACTEMENT cette occurrence avec le moteur existant. Le flux conversationnel ne décide rien : il résout la cible, appelle
+        ceci, rend le résultat. Même primitive pour le self-service (`source="USER"`) et tout appel automatique.
+
+        `expected_occurrence_version` est OBLIGATOIRE (B26) : jamais relue silencieusement avant la mutation. Verrous :
+        besoin -> occurrence (même ordre que B25) ; deux récupérations simultanées se sérialisent, la seconde voit l'état
+        déjà récupéré (`ALREADY_RECOVERED`) — jamais deux allocations, deux occurrences ni deux commandes.
+
+        Issues (`outcome`) : RECOVERY_APPLIED (réouverte si besoin + re-matchée) / ALREADY_RECOVERED / VERSION_CONFLICT /
+        RECOVERY_WINDOW_CLOSED / NOT_RECOVERABLE / NEED_NOT_ACTIVE / OCCURRENCE_COMMITTED / TARGET_NOT_FOUND / MATCH_ERROR.
+        Le rematch ne crée jamais de commande et n'accepte jamais un producteur : l'acceptation reste celle de B26."""
+        from ladini.workers.automation.need_matching_service import NeedMatchingService
+
+        if expected_occurrence_version is None:
+            logger.warning("RECURRING_VERSION_CHECK | action=RECOVER | scope=OCCURRENCE | expected_version_present=False | outcome=VERSION_REQUIRED")
+            raise BusinessRuleException(
+                "Version de l'état affiché manquante : la relance est refusée.", reason="version_required"
+            )
+        current_session = self._db()
+        _user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        need = await current_session.scalar(
+            select(RecurringNeed)
+            .where(RecurringNeed.id == recurring_need_id, RecurringNeed.buyer_id == buyer_profile.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        try:
+            occ_uuid = uuid.UUID(str(occurrence_id))
+        except (TypeError, ValueError):
+            occ_uuid = None
+        occurrence = (
+            await current_session.scalar(
+                select(RecurringNeedOccurrence)
+                .where(RecurringNeedOccurrence.id == occ_uuid, RecurringNeedOccurrence.recurring_need_id == need.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if need is not None and occ_uuid is not None else None
+        )
+        if need is None or occurrence is None:
+            # Jamais de fuite d'existence : propriété inconnue et identifiant inconnu donnent la même issue.
+            logger.info("RECURRING_RECOVERY_SKIPPED | occurrence_id=%s | source=%s | outcome=TARGET_NOT_FOUND", occurrence_id, source)
+            return {"status": "success", "outcome": "TARGET_NOT_FOUND", "occurrence_id": str(occurrence_id)}
+
+        need_row, occ_row = need, occurrence  # liés après la garde : le typage ne se propage pas dans la fermeture
+
+        def _state(outcome: str, **extra: Any) -> Dict[str, Any]:
+            return {
+                "status": "success", "outcome": outcome, "recurring_need_id": str(need_row.id),
+                "occurrence_id": str(occ_row.id), "occurrence_status": occ_row.status,
+                "occurrence_version": int(occ_row.version), "occurrence_date": occ_row.occurrence_date.date().isoformat(),
+                "requested_quantity": float(occ_row.requested_quantity),
+                "quantity_matched": float(occ_row.quantity_matched or 0), **extra,
+            }
+
+        if int(occurrence.version) != int(expected_occurrence_version):
+            self._log_version_check("RECOVER", "OCCURRENCE", match=False)
+            if occurrence.status in ("OPEN", "MATCHED"):
+                # L'occurrence a déjà été rouverte/re-matchée depuis l'écran affiché (autre message, cron) : un seul effet.
+                _log_recovery("SKIPPED", occurrence, source=source, recoverable=True, outcome="ALREADY_RECOVERED")
+                return _state("ALREADY_RECOVERED")
+            _log_recovery("SKIPPED", occurrence, source=source, recoverable=False, outcome="VERSION_CONFLICT")
+            return _state("VERSION_CONFLICT", expected_version=int(expected_occurrence_version))
+        self._log_version_check("RECOVER", "OCCURRENCE", match=True)
+
+        attempts = await self._attempt_summary(occurrence)
+        decision = can_recover_occurrence(
+            occurrence, need_status=str(need.status), today=_today(), live_orders=attempts["live"],
+            sourcing_failed=attempts["failed"], user_initiated=source == "USER",
+        )
+        _log_recovery("REQUESTED", occurrence, source=source, recoverable=decision.recoverable, outcome=decision.outcome)
+        if not decision.recoverable:
+            if decision.outcome == "RECOVERY_WINDOW_CLOSED" and occurrence.status in ("OPEN", "MATCHED", "ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED"):
+                # Date dépassée mais occurrence jamais clôturée (le cron d'expiration n'est pas encore passé) : clôture honnête.
+                await self._close_unrecoverable(occurrence, attempts)
+            _log_recovery("SKIPPED", occurrence, source=source, recoverable=False, outcome=decision.outcome)
+            return _state(decision.outcome)
+
+        if not decision.in_place:
+            reason = "PROPOSAL_REJECTED" if occurrence.status == "REJECTED" else attempts["reason"]
+            occurrence.status = "OPEN"
+            occurrence.quantity_matched = 0
+            occurrence.quantity_confirmed = 0
+            occurrence.version = int(occurrence.version) + 1
+            await current_session.flush()
+            await current_session.execute(
+                update(NeedAllocation)
+                .where(NeedAllocation.occurrence_id == occurrence.id, NeedAllocation.status == "PROPOSED")
+                .values(status="EXPIRED")
+            )
+            _log_recovery("APPLIED", occurrence, source=source, reason=reason, recoverable=True, outcome="REOPENED")
+
+        report = await NeedMatchingService(current_session).rematch_occurrence(occurrence.id, trigger=f"recovery_{source.lower()}")
+        if report.error:
+            _log_recovery("FAILED", occurrence, source=source, outcome="MATCH_ERROR")
+            return {"status": "success", "outcome": "MATCH_ERROR", "occurrence_id": str(occurrence.id)}
+        refreshed = await current_session.scalar(
+            select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.id == occurrence.id).execution_options(populate_existing=True)
+        )
+        occurrence = refreshed if refreshed is not None else occurrence
+        _log_recovery("REMATCHED", occurrence, source=source, changed=bool(report.changed),
+                      matched=float(occurrence.quantity_matched or 0), candidates=report.candidate_count)
+        return _state("RECOVERY_APPLIED", changed=bool(report.changed),
+                      proposal_available=float(occurrence.quantity_matched or 0) > 0)
+
+    async def _attempt_summary(self, occurrence: Any) -> Dict[str, Any]:
+        """Faits sur les tentatives d'approvisionnement d'une occurrence (commandes issues de ses allocations `CONVERTED`) :
+        `live` = commandes en cours ; `failed` = la tentative COURANTE (`order_group_id`) est entièrement tombée côté
+        producteur/système et rien n'a été livré ; `reason` = raison structurée du dernier échec. Lecture seule."""
+        rows = (
+            await self._db().execute(
+                select(Order.id, Order.status, Order.delivery_status, Order.cancellation_role, Order.checkout_group_id)
+                .select_from(NeedAllocation)
+                .join(OrderItem, OrderItem.id == NeedAllocation.order_item_id)
+                .join(Order, Order.id == OrderItem.order_id)
+                .where(NeedAllocation.occurrence_id == occurrence.id, NeedAllocation.status == "CONVERTED")
+            )
+        ).all()
+        states = {r[0]: _order_fulfillment_state(r[1], r[2]) for r in rows}
+        current = [r for r in rows if occurrence.order_group_id is None or r[4] == occurrence.order_group_id]
+        failed = bool(current) and all(
+            states[r[0]] == "CANCELLED" and str(r[3] or "").upper() in _ATTEMPT_FAILED_BY for r in current
+        ) and not any(st in ("DELIVERED", "ISSUE") for st in states.values())
+        return {
+            "live": sum(1 for st in states.values() if st == "ACTIVE"),
+            "failed": failed,
+            "reason": await self._failure_reason([r[0] for r in current]) if current else "PRODUCER_CANCELLED",
+        }
+
+    async def _close_unrecoverable(self, occurrence: Any, attempts: Dict[str, Any]) -> None:
+        """Fenêtre fermée sur une occurrence encore ouverte/acceptée-sans-commande : clôture honnête (`EXPIRED` si jamais
+        engagée, `UNFULFILLED` si une tentative a échoué) pour qu'elle ne masque plus la prochaine échéance."""
+        if occurrence.status in ("OPEN", "MATCHED"):
+            occurrence.status = "EXPIRED"
+        elif occurrence.status in ("ACCEPTED", "PARTIALLY_ACCEPTED") and attempts["live"] == 0:
+            occurrence.status = "UNFULFILLED"
+        else:
+            return
+        occurrence.version = int(occurrence.version) + 1
+        await self._db().execute(
+            update(NeedAllocation)
+            .where(NeedAllocation.occurrence_id == occurrence.id, NeedAllocation.status == "PROPOSED")
+            .values(status="EXPIRED")
+        )
+        await self._db().flush()
 
     # ─── CONFIRMATION (VS4 pilote) ────────────────────────────────────
 
@@ -1390,6 +1561,8 @@ class RecurringSupplyMixin(BaseMixin):
                     Order.delivery_status,
                     func.coalesce(OrderItem.base_unit_quantity, OrderItem.quantity),
                     NeedAllocation.unit,
+                    Order.cancellation_role,
+                    Order.checkout_group_id,
                 )
                 .select_from(NeedAllocation)
                 .join(OrderItem, OrderItem.id == NeedAllocation.order_item_id)
@@ -1400,10 +1573,13 @@ class RecurringSupplyMixin(BaseMixin):
 
         occ_unit = str(occurrence.unit or "").upper()
         order_state: Dict[Any, str] = {}
+        current_attempt: Dict[Any, tuple] = {}  # B28 : les commandes de la tentative COURANTE (`order_group_id`)
         delivered = 0.0
-        for oid, o_status, d_status, qty, unit in rows:
+        for oid, o_status, d_status, qty, unit, cancel_role, group_id in rows:
             state = _order_fulfillment_state(o_status, d_status)
             order_state[oid] = state
+            if occurrence.order_group_id is None or group_id == occurrence.order_group_id:
+                current_attempt[oid] = (state, str(cancel_role or "").upper())
             if state == "DELIVERED":
                 if str(unit or "").upper() == occ_unit:
                     delivered += float(qty or 0)
@@ -1426,12 +1602,45 @@ class RecurringSupplyMixin(BaseMixin):
             else:
                 new_status = "UNFULFILLED"
 
+        # B28 — ÉCHEC D'UNE TENTATIVE ≠ ÉCHEC DE L'OCCURRENCE. Quand TOUTES les commandes de la tentative courante sont
+        # tombées côté producteur/système (timeout, refus, annulation) et que rien n'a été livré, la livraison est encore
+        # due : si la fenêtre est ouverte et le besoin actif, l'occurrence redevient cherchable (OPEN) ; sinon elle reste
+        # UNFULFILLED (clôture honnête). Une annulation par l'ACHETEUR, une livraison ou une réception litigieuse ne se
+        # récupèrent jamais : c'est le choix ou le fait de l'acheteur.
+        recovery: Optional[Dict[str, Any]] = None
+        if new_status == "UNFULFILLED" and previous_status in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
+            attempt_failed = bool(current_attempt) and all(
+                st == "CANCELLED" and role in _ATTEMPT_FAILED_BY for st, role in current_attempt.values()
+            ) and not any(st in ("DELIVERED", "ISSUE") for st in order_state.values())
+            if attempt_failed:
+                need_status = await current_session.scalar(
+                    select(RecurringNeed.status).where(RecurringNeed.id == occurrence.recurring_need_id)
+                )
+                reason = await self._failure_reason(list(current_attempt))
+                decision = can_recover_occurrence(
+                    occurrence, need_status=str(need_status or ""), today=_today(), sourcing_failed=True, user_initiated=False
+                )
+                recovery = {"outcome": decision.outcome, "reason": reason,
+                            "recurring_need_id": str(occurrence.recurring_need_id), "occurrence_id": str(occurrence.id),
+                            "occurrence_date": occurrence.occurrence_date.date().isoformat()}
+                if decision.recoverable:
+                    new_status = "OPEN"
+                _log_recovery("REQUESTED", occurrence, source="FAILURE", reason=reason,
+                              recoverable=decision.recoverable, outcome=decision.outcome)
+
         changed = abs(delivered - previous_delivered) > 1e-9 or new_status != previous_status
         if changed:
             occurrence.quantity_delivered = delivered
             occurrence.status = new_status
+            if new_status == "OPEN":  # tentative échouée = historique ; l'occurrence repart de zéro (aucune réservation vivante)
+                occurrence.quantity_confirmed = 0
+                occurrence.quantity_matched = 0
             occurrence.version = int(occurrence.version) + 1
             await current_session.flush()
+            if recovery is not None:
+                recovery["occurrence_version"] = int(occurrence.version)
+                _log_recovery("APPLIED" if new_status == "OPEN" else "SKIPPED", occurrence, source="FAILURE",
+                              reason=recovery["reason"], recoverable=new_status == "OPEN", outcome=recovery["outcome"])
         logger.info(
             "RECURRING_FULFILLMENT_RECOMPUTED | occurrence_id=%s | recurring_need_id=%s | orders=%s | "
             "active_orders=%s | requested_quantity=%s | delivered_quantity=%s | previous_status=%s | "
@@ -1446,8 +1655,28 @@ class RecurringSupplyMixin(BaseMixin):
                 "delivered_quantity=%s | previous_status=%s | reason=%s",
                 new_status, occurrence.id, occurrence.recurring_need_id, requested, delivered, previous_status, reason,
             )
-        return {"occurrence_id": str(occurrence.id), "status": new_status, "quantity_delivered": delivered,
-                "changed": changed}
+        result: Dict[str, Any] = {"occurrence_id": str(occurrence.id), "status": new_status,
+                                  "quantity_delivered": delivered, "changed": changed}
+        if recovery is not None:
+            recovery.setdefault("occurrence_version", int(occurrence.version))
+            result["recovery"] = recovery
+        return result
+
+    async def _failure_reason(self, order_ids: List[Any]) -> str:
+        """Raison structurée de l'échec d'une tentative, lue dans l'historique durable des commandes (note écrite par le
+        service qui a fait échouer la commande) — jamais déduite d'un texte libre."""
+        notes = (
+            await self._db().execute(
+                select(OrderStatusHistory.note)
+                .where(OrderStatusHistory.order_id.in_(order_ids), OrderStatusHistory.status_type == "ORDER",
+                       OrderStatusHistory.to_status == "CANCELLED")
+                .order_by(OrderStatusHistory.created_at.desc())
+            )
+        ).scalars().all()
+        for note in notes:
+            if note in _FAILURE_NOTE_TO_REASON:
+                return _FAILURE_NOTE_TO_REASON[str(note)]
+        return "PRODUCER_CANCELLED"
 
     async def reconcile_recurring_fulfillment(self, limit: int = 200) -> Dict[str, Any]:
         """Filet idempotent (cron) : recalcule les occurrences encore `ACCEPTED`/`PARTIALLY_ACCEPTED` — répare
@@ -1478,12 +1707,19 @@ class RecurringSupplyMixin(BaseMixin):
         honorée : elle passe `CANCELLED` (`cancellation_role="SYSTEM"`), le stock débité à l'acceptation est
         RESTITUÉ (même calcul que l'annulation), l'acheteur est notifié (Outbox) et l'occurrence est recalculée.
 
-        Règle dérivée, sans nouveau paramètre : le délai de confirmation est la date de livraison elle-même.
-        Idempotent : le verrou `FOR UPDATE SKIP LOCKED` + le garde de statut empêchent tout double recrédit."""
+        Règle dérivée : par défaut le délai de confirmation est la date de livraison elle-même
+        (`RECURRING_PRODUCER_CONFIRMATION_LEAD_DAYS` = 0, B28 : valeur > 0 = échéance AVANT la livraison, donc livraison encore
+        récupérable). Idempotent : le verrou `FOR UPDATE SKIP LOCKED` + le garde de statut empêchent tout double recrédit.
+
+        B28 : l'échec de CETTE tentative ne tue pas l'occurrence — `_recompute_occurrence_fulfillment_for_order` la rouvre
+        (OPEN) si la fenêtre le permet ; la notification dit honnêtement laquelle des deux situations s'applique."""
+        from ladini.core.settings import settings
+
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
-        today_dt = datetime.combine(_today(), datetime.min.time())
+        lead_days = max(0, int(settings.RECURRING_PRODUCER_CONFIRMATION_LEAD_DAYS))
+        today_dt = datetime.combine(_today() + timedelta(days=lead_days), datetime.min.time())
         orders = (
             await current_session.execute(
                 select(Order)
@@ -1526,50 +1762,65 @@ class RecurringSupplyMixin(BaseMixin):
                     actor_id=None, note="producer_confirmation_expired",
                 )
             )
-            buyer_phone = (
-                await current_session.execute(
-                    select(User.phone).join(BuyerProfile, BuyerProfile.user_id == User.id)
-                    .where(BuyerProfile.id == order.buyer_id).limit(1)
-                )
-            ).scalar_one_or_none()
-            if buyer_phone:
-                from ladini.workers.outbox import templates as _outbox_templates
-                from ladini.workers.repositories import outbox_repo as _outbox_repo
-
-                # B27 — CONTEXTE DE RÉCUPÉRATION : la notification porte la livraison (besoin + occurrence) qui a échoué, pour que
-                # « trouve-moi quelqu'un d'autre » vise CETTE livraison sans repartir de zéro (identifiants seulement, aucun texte libre).
-                failed_occurrence = await current_session.scalar(
-                    select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.order_group_id == order.checkout_group_id)
-                ) if order.checkout_group_id is not None else None
-                recovery: Dict[str, Any] = {}
-                if failed_occurrence is not None:
-                    recovery = {
-                        "recovery_candidate": True,
-                        "occurrences": [{
-                            "recurring_need_id": str(failed_occurrence.recurring_need_id),
-                            "occurrence_id": str(failed_occurrence.id),
-                            "date": failed_occurrence.occurrence_date.date().isoformat()
-                            if failed_occurrence.occurrence_date is not None else None,
-                        }],
-                    }
-                await _outbox_repo.enqueue(
-                    current_session,
-                    [{
-                        "channel": "WHATSAPP", "recipient_phone": buyer_phone,
-                        "template_key": _outbox_templates.ORDER_CANCELLED_BY_PRODUCER_BUYER,
-                        "payload": {"order_number": str(order.id)[:8].upper(),
-                                    "reason": "Le producteur n'a pas confirmé à temps.", **recovery},
-                        "dedupe_key": f"ORDER_CANCELLED_BUYER:{order.id}",
-                    }],
-                )
             await current_session.flush()
             logger.info(
                 "RECURRING_ORDER_CONFIRMATION_EXPIRED | order_id=%s | checkout_group_id=%s | items=%s",
                 order.id, order.checkout_group_id, len(items),
             )
-            await self._recompute_occurrence_fulfillment_for_order(order, reason="producer_confirmation_expired")
+            recomputed = await self._recompute_occurrence_fulfillment_for_order(order, reason="producer_confirmation_expired")
+            await self._notify_attempt_failure(order, reason_text="Le producteur n'a pas confirmé à temps.",
+                                               recovery=(recomputed or {}).get("recovery"))
             expired_ids.append(str(order.id))
         return {"recurring_orders_expired": len(expired_ids)}
+
+    async def _attempt_failure_payload(self, recovery: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Champs de RÉCUPÉRATION ajoutés à la notification d'échec d'une commande récurrente (B27/B28) : identifiants, version
+        de l'occurrence au moment de la notification (B26 : la commande de relance la portera), raison structurée et verdict du
+        domaine (`RECOVERABLE` / `RECOVERY_WINDOW_CLOSED` / …). Rien d'autre : le texte est produit par le gabarit."""
+        if not recovery:
+            return {}
+        label = await self._db().scalar(
+            select(SubCategory.name).join(RecurringNeed, RecurringNeed.sub_category_id == SubCategory.id)
+            .where(RecurringNeed.id == uuid.UUID(recovery["recurring_need_id"]))
+        )
+        return {
+            "recovery_candidate": True,
+            "recovery_outcome": recovery["outcome"],
+            "failure_reason": recovery["reason"],
+            "product": str(label or ""),
+            "occurrences": [{
+                "recurring_need_id": recovery["recurring_need_id"],
+                "occurrence_id": recovery["occurrence_id"],
+                "date": recovery["occurrence_date"],
+                "occurrence_version": recovery.get("occurrence_version"),
+            }],
+        }
+
+    async def _notify_attempt_failure(self, order: Any, *, reason_text: str, recovery: Optional[Dict[str, Any]]) -> None:
+        """Notification Outbox de l'acheteur après l'échec système d'une commande récurrente (timeout producteur)."""
+        current_session = self._db()
+        buyer_phone = (
+            await current_session.execute(
+                select(User.phone).join(BuyerProfile, BuyerProfile.user_id == User.id)
+                .where(BuyerProfile.id == order.buyer_id).limit(1)
+            )
+        ).scalar_one_or_none()
+        if not buyer_phone:
+            return
+        from ladini.workers.outbox import templates as _outbox_templates
+        from ladini.workers.repositories import outbox_repo as _outbox_repo
+
+        await _outbox_repo.enqueue(
+            current_session,
+            [{
+                "channel": "WHATSAPP", "recipient_phone": buyer_phone,
+                "template_key": _outbox_templates.ORDER_CANCELLED_BY_PRODUCER_BUYER,
+                "payload": {"order_number": str(order.id)[:8].upper(), "reason": reason_text,
+                            **await self._attempt_failure_payload(recovery)},
+                "dedupe_key": f"ORDER_CANCELLED_BUYER:{order.id}",
+            }],
+        )
+        await current_session.flush()
 
     @staticmethod
     async def _producer_account_blocked(session: Any, producer_id: Any) -> bool:
@@ -2392,6 +2643,88 @@ class RecurringSupplyMixin(BaseMixin):
         return fresh if fresh is not None and fresh.status == "ACTIVE" else None
 
 
+# ── B28 — RÉCUPÉRATION D'UNE OCCURRENCE (contrat : docs/RECURRING_RECOVERY_CONTRACT.md) ─────────────────────────────
+# Besoin = demande durable ; occurrence = UNE obligation de livraison ; allocation / commande = UNE tentative de la remplir.
+# L'échec d'une tentative (producteur sans réponse, refus, annulation) n'est donc pas l'échec de l'occurrence : tant que la
+# fenêtre le permet, l'occurrence redevient cherchable (OPEN) et la MÊME occurrence est re-matchée — jamais la suivante.
+RECOVERY_REASONS = ("PRODUCER_TIMEOUT", "PRODUCER_REJECTED", "PRODUCER_CANCELLED", "PROPOSAL_REJECTED")
+#: Note d'historique de commande (`OrderStatusHistory.note`, déjà écrite par les services d'échec) -> raison structurée.
+_FAILURE_NOTE_TO_REASON = {
+    "producer_confirmation_expired": "PRODUCER_TIMEOUT",
+    "declined_by_producer": "PRODUCER_REJECTED",
+    "cancelled_by_producer": "PRODUCER_CANCELLED",
+}
+#: Occurrence terminale : jamais récupérable (livrée, sautée, annulée) — la fenêtre n'a pas à être consultée.
+_TERMINAL_NOT_RECOVERABLE = ("SKIPPED", "CANCELLED", "FULFILLED", "PARTIALLY_FULFILLED")
+_ATTEMPT_FAILED_BY = ("PRODUCER", "SYSTEM")
+
+
+@dataclass(frozen=True)
+class RecoveryDecision:
+    """Verdict de `can_recover_occurrence`. `outcome` ∈ RECOVERABLE / NEED_NOT_ACTIVE / NOT_RECOVERABLE /
+    RECOVERY_WINDOW_CLOSED / OCCURRENCE_COMMITTED ; `in_place` = l'occurrence est déjà cherchable (OPEN/MATCHED)."""
+
+    recoverable: bool
+    outcome: str
+    in_place: bool = False
+
+
+def recovery_window_open(occurrence_date: Any, today: date) -> bool:
+    """Fenêtre de récupération = jusqu'au JOUR de livraison INCLUS (même règle que `_occurrence_is_past` / l'expiration
+    d'une proposition : aucune règle horaire nouvelle). Dates sans fuseau, date serveur (limite documentée)."""
+    day = occurrence_date.date() if isinstance(occurrence_date, datetime) else occurrence_date
+    return day >= today
+
+
+def can_recover_occurrence(
+    occurrence: Any,
+    *,
+    need_status: str,
+    today: date,
+    live_orders: int = 0,
+    sourcing_failed: bool = False,
+    user_initiated: bool = True,
+) -> RecoveryDecision:
+    """PRIMITIVE UNIQUE de décision (pure, sans I/O) : cette occurrence peut-elle encore être récupérée ? Appelée par
+    le self-service, le cron et les services d'échec — jamais décidée par un flux conversationnel.
+
+    - besoin non ACTIF (pause / annulation) -> `NEED_NOT_ACTIVE` ;
+    - SKIPPED / CANCELLED / FULFILLED / PARTIALLY_FULFILLED -> `NOT_RECOVERABLE` (terminal) ;
+    - EXPIRED (date passée) -> `RECOVERY_WINDOW_CLOSED` ;
+    - ACCEPTED / PARTIALLY_ACCEPTED avec une commande vivante -> `OCCURRENCE_COMMITTED` (engagement irréversible) ;
+    - ACCEPTED sans commande vivante, ou UNFULFILLED dont TOUTES les tentatives ont échoué côté producteur/système et
+      rien n'a été livré -> récupérable si la fenêtre est ouverte ;
+    - REJECTED (l'acheteur a refusé la proposition) -> récupérable seulement sur demande explicite de l'acheteur ;
+    - OPEN / MATCHED -> déjà cherchable (`in_place`), récupérable si la fenêtre est ouverte."""
+    status = str(getattr(occurrence, "status", "") or "")
+    if str(need_status or "") != "ACTIVE":
+        return RecoveryDecision(False, "NEED_NOT_ACTIVE")
+    if status in _TERMINAL_NOT_RECOVERABLE:
+        return RecoveryDecision(False, "NOT_RECOVERABLE")
+    if status == "EXPIRED":
+        return RecoveryDecision(False, "RECOVERY_WINDOW_CLOSED")
+    if status in ("ACCEPTED", "PARTIALLY_ACCEPTED") and live_orders > 0:
+        return RecoveryDecision(False, "OCCURRENCE_COMMITTED")
+    if status == "UNFULFILLED" and not sourcing_failed:
+        return RecoveryDecision(False, "NOT_RECOVERABLE")
+    if status == "REJECTED" and not user_initiated:
+        return RecoveryDecision(False, "NOT_RECOVERABLE")
+    if status not in ("OPEN", "MATCHED", "PROPOSED", "ACCEPTED", "PARTIALLY_ACCEPTED", "UNFULFILLED", "REJECTED"):
+        return RecoveryDecision(False, "NOT_RECOVERABLE")
+    if not recovery_window_open(occurrence.occurrence_date, today):
+        return RecoveryDecision(False, "RECOVERY_WINDOW_CLOSED")
+    return RecoveryDecision(True, "RECOVERABLE", in_place=status in ("OPEN", "MATCHED", "PROPOSED"))
+
+
+def _log_recovery(event: str, occurrence: Any, **fields: Any) -> None:
+    """Observabilité B28 (sans PII : identifiants d'occurrence et statuts seulement)."""
+    logger.info(
+        "RECURRING_RECOVERY_%s | occurrence_id=%s | recurring_need_id=%s | occurrence_status=%s | %s",
+        event, getattr(occurrence, "id", None), getattr(occurrence, "recurring_need_id", None),
+        getattr(occurrence, "status", None), " | ".join(f"{k}={v}" for k, v in fields.items()),
+    )
+
+
 def _order_fulfillment_state(order_status: Any, delivery_status: Any) -> str:
     """Classe une commande RECURRING_SUPPLY pour le fulfillment : DELIVERED (reçue, comptée),
     ISSUE (réception avec problème, terminale, non comptée), CANCELLED, sinon ACTIVE (en cours)."""
@@ -2434,4 +2767,8 @@ __all__ = [
     "MATCH_RESPONSE_ACTIONS",
     "recurring_need_version",
     "recurring_need_version_of",
+    "RecoveryDecision",
+    "RECOVERY_REASONS",
+    "can_recover_occurrence",
+    "recovery_window_open",
 ]

@@ -110,6 +110,15 @@ _RELIABILITY_SQL = text(
 # scientifique. Valeur délibérément basse (pilote, peu de volume) ; ajustable sans migration.
 _MIN_RELIABILITY_SAMPLE = 3
 
+# B28 — producteurs ÉCARTÉS pour CETTE occurrence : ceux d'une tentative déjà jouée (allocation CONVERTED = commande qui a
+# échoué, REJECTED = proposition refusée par l'acheteur). Portée = l'occurrence seule : le producteur reste candidat pour
+# toutes les autres livraisons. Aucune table ni colonne : l'historique des allocations EST l'exclusion. Sans ce filtre,
+# l'upsert (occurrence, producteur, produit) ressusciterait l'ancienne allocation convertie en PROPOSED.
+_EXCLUDED_PRODUCERS_SQL = text(
+    "SELECT DISTINCT producer_id FROM marketplace.need_allocations "
+    "WHERE occurrence_id = :occurrence_id AND status IN ('CONVERTED', 'REJECTED')"
+)
+
 _BUYER_ZONE_SQL = text(
     "SELECT u.zone_id FROM marketplace.buyer_profiles bp "
     "JOIN auth.users u ON u.id = bp.user_id WHERE bp.id = :buyer_id"
@@ -209,6 +218,12 @@ class NeedMatchingService:
             candidate_rows = (
                 await self.session.execute(_CANDIDATES_SQL, {"sub_category_id": row["sub_category_id"]})
             ).mappings().all()
+            excluded = {
+                str(pid) for pid in (await self.session.execute(_EXCLUDED_PRODUCERS_SQL, {"occurrence_id": occurrence_id})).scalars().all()
+            }
+            if excluded:
+                candidate_rows = [c for c in candidate_rows if str(c["producer_id"]) not in excluded]
+                logger.info("recurring_match.excluded_producers | occurrence_id=%s | count=%s", occurrence_id, len(excluded))
             report.candidate_count = len(candidate_rows)
             reliability = await self._load_reliability({str(c["producer_id"]) for c in candidate_rows})
             candidates = [

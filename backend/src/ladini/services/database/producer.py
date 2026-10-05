@@ -2128,8 +2128,13 @@ class ProducerMgmtMixin(BaseMixin):
         # B14 : une commande RECURRING_SUPPLY refusée/annulée ferme (ou fait avancer) son occurrence.
         await current_session.flush()
         _recompute = getattr(self, "_recompute_occurrence_fulfillment_for_order", None)
+        recovery_payload: Dict[str, Any] = {}
         if _recompute is not None:
-            await _recompute(order, reason="producer_cancelled")
+            # B28 : l'échec de la tentative peut rouvrir l'occurrence (OPEN) ; la notification en porte le verdict + identifiants.
+            recomputed = await _recompute(order, reason="producer_cancelled")
+            _failure_payload = getattr(self, "_attempt_failure_payload", None)
+            if recomputed and recomputed.get("recovery") and _failure_payload is not None:
+                recovery_payload = await _failure_payload(recomputed["recovery"])
 
         # Notification acheteur — miroir exact de la notification producteur
         # posée par `cancel_pending_order`. Outbox, MÊME transaction.
@@ -2156,6 +2161,7 @@ class ProducerMgmtMixin(BaseMixin):
                         "payload": {
                             "order_number": str(order.id)[:8].upper(),
                             "reason": normalized_reason or "",
+                            **recovery_payload,
                         },
                         "dedupe_key": f"ORDER_CANCELLED_BUYER:{order.id}",
                     }

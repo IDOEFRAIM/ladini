@@ -627,6 +627,12 @@ class Settings(BaseSettings):
     # l'envoi matinal sans jamais chevaucher le digest du lendemain.
     RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS: float = 72000.0
 
+    # B28 — délai de confirmation producteur d'une commande récurrente, en jours AVANT la date de livraison. 0 = règle B14
+    # inchangée : la date de livraison est elle-même l'échéance (le timeout tombe donc APRÈS la livraison, fenêtre de
+    # récupération déjà fermée). 1 = un producteur qui n'a pas confirmé la veille est écarté tant que la livraison est
+    # encore récupérable. Décision produit, jamais hardcodée : voir docs/RECURRING_RECOVERY_CONTRACT.md.
+    RECURRING_PRODUCER_CONFIRMATION_LEAD_DAYS: int = 0
+
     # Disjoncteur — défauts repris tels quels de l'ancien `_CircuitBreaker`
     # process-local de get_llm.py (3 échecs / 30s), désormais partagés via
     # Redis entre tous les workers (API + Celery + MCP).

@@ -719,8 +719,15 @@ class RecurringSupplyGateway(_BaseGateway):
     async def ensure_next_recurring_occurrence(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
         return await self._call("ensure_next_recurring_occurrence", phone=phone, recurring_need_id=recurring_need_id)
 
-    async def refresh_recurring_need_matching(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
-        return await self._call("refresh_recurring_need_matching", phone=phone, recurring_need_id=recurring_need_id)
+    async def refresh_recurring_need_matching(
+        self, phone: str, recurring_need_id: str, occurrence_id: Optional[str] = None,
+        expected_occurrence_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        # B28 : sans `occurrence_id` = « la prochaine occurrence » (historique) ; avec = EXACTEMENT cette livraison (+ version B26).
+        kwargs: Dict[str, Any] = {"phone": phone, "recurring_need_id": recurring_need_id}
+        if occurrence_id is not None:
+            kwargs.update(occurrence_id=occurrence_id, expected_occurrence_version=expected_occurrence_version)
+        return await self._call("refresh_recurring_need_matching", **kwargs)
 
     async def get_recurring_need_detail(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
         return await self._call("get_recurring_need_detail", phone=phone, recurring_need_id=recurring_need_id)

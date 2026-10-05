@@ -154,6 +154,8 @@ def test_twin_needs_are_disambiguated_by_the_start_date_on_real_rows(real_db):  
 def _outbox_recovery(dsn, phone, need_id, occ_id, *, age_minutes=2):
     import psycopg2
 
+    version = _sql(dsn, "select version from marketplace.recurring_need_occurrences where id=%s", (occ_id,))[0][0]  # B28 : portée par la notification
+
     conn = psycopg2.connect(dsn)
     with conn, conn.cursor() as cur:
         cur.execute(
@@ -161,7 +163,9 @@ def _outbox_recovery(dsn, phone, need_id, occ_id, *, age_minutes=2):
             "values ('WHATSAPP', %s, %s, %s, %s, 'SENT', %s)",
             (phone, "ORDER_CANCELLED_BY_PRODUCER_BUYER",
              Json({"order_number": "ABC12345", "reason": "Le producteur n'a pas confirmé à temps.", "recovery_candidate": True,
-                   "occurrences": [{"recurring_need_id": need_id, "occurrence_id": occ_id, "date": TODAY.isoformat()}]}),
+                   "recovery_outcome": "RECOVERABLE", "failure_reason": "PRODUCER_TIMEOUT",
+                   "occurrences": [{"recurring_need_id": need_id, "occurrence_id": occ_id, "date": TODAY.isoformat(),
+                                    "occurrence_version": version}]}),
              f"t:{uuid.uuid4()}", datetime.utcnow() - timedelta(minutes=age_minutes)))
     conn.close()
 
@@ -180,11 +184,14 @@ def test_find_someone_else_after_a_producer_timeout_targets_the_failed_delivery(
         occ = _sql(real_db, "select id::text from marketplace.recurring_need_occurrences where recurring_need_id=%s", (need,))
         if not occ:
             conv.send("1", llm=UNKNOWN)  # matérialise l'occurrence (détail)
-        _outbox_recovery(real_db, acct["phone"], need, _occ_id(real_db, need))
+        failed_occ = _occ_id(real_db, need)  # figée avant la relance : la livraison EN ÉCHEC
+        _outbox_recovery(real_db, acct["phone"], need, failed_occ)
         conv.send("mes besoins", llm=UNKNOWN)
         t = conv.send("trouve-moi quelqu'un d'autre", llm=Script(nt=new_task("REFRESH_RECURRING_MATCHING", 0.93)))
         calls = [kw["recurring_need_id"] for n, kw in t.mcp_calls if n == "refresh_recurring_need_matching"]
         assert calls == [need] and other not in calls, (calls, t.response)
+        exact = [kw for n, kw in t.mcp_calls if n == "refresh_recurring_need_matching"][0]  # B28 : EXACTEMENT la livraison en échec
+        assert exact["occurrence_id"] == failed_occ and exact["expected_occurrence_version"] is not None, exact
 
 
 def test_a_recovery_notification_for_someone_elses_need_is_never_a_target(real_db):  # noqa: F811
@@ -225,4 +232,5 @@ def test_the_service_returns_identifiers_only_for_the_recovery_context(real_db):
         res = conv.harness._run(conv._svc.get_last_interactive_outbound(acct["phone"]))
         rec: Optional[Dict[str, Any]] = res.get("recovery")
         assert rec and rec["recurring_need_ids"] == [need] and rec["occurrence_ids"] == [occ], res
-        assert set(rec) == {"sent_at", "recurring_need_ids", "occurrence_ids", "dates"}, "identifiants et dates seulement"
+        assert set(rec) == {"sent_at", "recurring_need_ids", "occurrence_ids", "dates", "occurrence_versions", "reasons"}, \
+            "identifiants, dates, versions et raisons structurées seulement"

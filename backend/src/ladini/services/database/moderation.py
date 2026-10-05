@@ -232,7 +232,7 @@ class ModerationMixin:
         d'autre » de viser la bonne livraison. Le DOMAINE décide ensuite si une relance est encore possible. Lecture seule."""
         from ladini.core.settings import settings
 
-        row = (
+        rows = (
             await session.execute(
                 text(
                     "select payload, extract(epoch from sent_at at time zone 'UTC') as sent_epoch "
@@ -240,22 +240,36 @@ class ModerationMixin:
                     "where recipient_phone = :phone and status = 'SENT' and sent_at is not null "
                     "and (payload ->> 'recovery_candidate') = 'true' "
                     "and sent_at > (now() at time zone 'UTC') - make_interval(secs => :ttl) "
-                    "order by sent_at desc limit 1"
+                    "order by sent_at desc limit 10"
                 ),
                 {"phone": norm_phone, "ttl": float(settings.RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS)},
             )
-        ).first()
-        if row is None:
-            return None
-        body: Dict[str, Any] = row[0] if isinstance(row[0], dict) else {}
-        occurrences = [o for o in (body.get("occurrences") or []) if isinstance(o, dict) and o.get("recurring_need_id")]
-        if not occurrences:
+        ).all()
+        # B28 — TOUTES les livraisons en échec récentes (pas seulement la dernière) : deux échecs simultanés = deux candidats,
+        # jamais un écrasement. Une entrée par occurrence (la plus récente gagne) ; le flux clarifie quand il y en a plusieurs.
+        seen: set = set()
+        entries: List[Dict[str, Any]] = []
+        sent_at = 0.0
+        for payload, sent_epoch in rows:
+            body: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+            for o in body.get("occurrences") or []:
+                if not (isinstance(o, dict) and o.get("recurring_need_id")):
+                    continue
+                key = str(o.get("occurrence_id") or o["recurring_need_id"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append({**o, "outcome": body.get("recovery_outcome"), "reason": body.get("failure_reason")})
+                sent_at = max(sent_at, float(sent_epoch))
+        if not entries:
             return None
         return {
-            "sent_at": float(row[1]),
-            "recurring_need_ids": [str(o["recurring_need_id"]) for o in occurrences],
-            "occurrence_ids": [str(o["occurrence_id"]) for o in occurrences if o.get("occurrence_id")],
-            "dates": [str(o["date"]) for o in occurrences if o.get("date")],
+            "sent_at": sent_at,
+            "recurring_need_ids": [str(o["recurring_need_id"]) for o in entries],
+            "occurrence_ids": [str(o["occurrence_id"]) for o in entries if o.get("occurrence_id")],
+            "dates": [str(o["date"]) for o in entries if o.get("date")],
+            "occurrence_versions": [o.get("occurrence_version") for o in entries if o.get("occurrence_id")],
+            "reasons": [o.get("reason") for o in entries if o.get("occurrence_id")],
         }
 
     # ── Lecture : liste des produits interdits (table + défauts) ────────

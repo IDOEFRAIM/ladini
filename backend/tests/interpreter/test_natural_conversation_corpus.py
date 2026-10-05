@@ -216,7 +216,7 @@ def test_a_recovery_notification_is_a_context_target_for_a_search_again():
     state = {"recovery_context": {"recurring_need_ids": ["N-1"], "occurrence_ids": ["O-1"], "dates": ["2026-10-27"]}}
     result = {"interpreted_event": "NEW_TASK", "detected_intent": "REFRESH_RECURRING_MATCHING"}
     assert ca.derive_relation(state, result) == ca.RelationToContext.ANSWER
-    assert ca.recovery_target(state) == {"type": "RECURRING_NEED", "id": "N-1", "occurrence_id": "O-1", "source": "recovery_notification"}
+    assert ca.recovery_target(state) == {"type": "RECURRING_NEED", "id": "N-1", "occurrence_id": "O-1", "occurrence_version": None, "source": "recovery_notification"}
 
 
 @pytest.mark.parametrize("recovery", [None, {}, {"recurring_need_ids": []}, {"recurring_need_ids": ["A", "B"]}, "x"])

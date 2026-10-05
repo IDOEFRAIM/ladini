@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from ladini.core.idempotency import release
 from ladini.domain.quantity_unit import default_unit_for_product
@@ -1394,7 +1394,8 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
             logger.info("RECURRING_SELF_SERVICE_OPENED")
             return await _show_need_detail(state, mc_runtime, target, ensure=True)
         if kind == "REFRESH":
-            return await _refresh_matching(state, mc_runtime, target)
+            need_id, occ_id, occ_version = _split_match_target(target)  # B28 : l'écran affiché désigne UNE livraison exacte
+            return await _refresh_matching(state, mc_runtime, need_id, occurrence_id=occ_id, occurrence_version=occ_version)
         if kind == "ORDERS":
             from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
                 list_orders,
@@ -1723,22 +1724,52 @@ def _split_match_target(target: Any) -> tuple[str, Optional[str], Optional[int]]
     return parts[0], None, None
 
 
-async def _refresh_matching(state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str) -> Dict[str, Any]:
-    """« Rechercher maintenant » : le VRAI moteur de matching (celui du cron) sur la prochaine occurrence, puis l'écran à
-    jour (nouvelle `version` si les allocations ont changé). N'envoie aucun digest."""
+async def _refresh_matching(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str, *,
+    occurrence_id: Optional[str] = None, occurrence_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """« Rechercher maintenant » : le VRAI moteur de matching (celui du cron), puis l'écran à jour (nouvelle `version` si les
+    allocations ont changé). N'envoie aucun digest. B28 : quand la livraison visée est connue (écran affiché, notification d'échec),
+    la relance porte son identité EXACTE (occurrence + version, B26) — le DOMAINE décide si elle est encore récupérable
+    (`recover_occurrence_sourcing`) ; ce flux ne fait que rendre l'issue. Jamais « la prochaine » à la place de celle-là."""
     gw = RecurringSupplyGateway(mc_runtime)
     logger.info("RECURRING_MANUAL_MATCH_TRIGGERED")
     notice = ""
+    exact = occurrence_id is not None and occurrence_version is not None
     try:
-        res = await gw.refresh_recurring_need_matching(phone=str(state.get("user_phone")), recurring_need_id=recurring_need_id)
+        if exact:
+            res = await gw.refresh_recurring_need_matching(
+                phone=str(state.get("user_phone")), recurring_need_id=recurring_need_id,
+                occurrence_id=occurrence_id, expected_occurrence_version=int(occurrence_version),  # type: ignore[arg-type]
+            )
+        else:
+            res = await gw.refresh_recurring_need_matching(phone=str(state.get("user_phone")), recurring_need_id=recurring_need_id)
     except MCPCallError:
         res = {}
         notice = "⚠️ La recherche n'a pas pu aboutir — réessayez dans un instant.\n\n"
     outcome = (res or {}).get("outcome")
+    when = _fmt_date_fr((res or {}).get("occurrence_date")) if isinstance(res, dict) else ""
+    day = f" du {when}" if when else ""
     if outcome == "NO_AVAILABILITY":
         notice = "🔎 Recherche terminée : aucune disponibilité trouvée pour le moment.\n\n"
     elif outcome == "MATCHED":
         notice = "🔎 Recherche terminée.\n\n"
+    elif outcome == "RECOVERY_APPLIED":
+        notice = (f"🔎 Recherche relancée pour la livraison{day} (un autre producteur que le précédent).\n\n" if res.get("proposal_available")
+                  else f"🔎 Recherche relancée pour la livraison{day} : aucun autre producteur disponible pour le moment.\n\n")
+    elif outcome == "ALREADY_RECOVERED":
+        notice = f"🔎 La recherche a déjà été relancée pour la livraison{day} — voici où elle en est.\n\n"
+    elif outcome == "VERSION_CONFLICT":
+        notice = f"🔎 La livraison{day} a changé depuis votre dernier message — voici où elle en est.\n\n"
+    elif outcome == "RECOVERY_WINDOW_CLOSED":
+        notice = (f"⛔ La livraison{day} ne peut plus être relancée à temps. "
+                  "Votre besoin récurrent reste actif pour les prochaines livraisons.\n\n")
+    elif outcome == "OCCURRENCE_COMMITTED":
+        notice = f"✅ La livraison{day} est déjà confirmée par un producteur : rien à relancer.\n\n"
+    elif outcome == "NEED_NOT_ACTIVE":
+        notice = "⏸️ Ce besoin récurrent n'est plus actif : aucune recherche n'a été relancée.\n\n"
+    elif outcome in ("NOT_RECOVERABLE", "TARGET_NOT_FOUND"):
+        notice = f"🔎 La livraison{day} ne peut pas être relancée.\n\n"
     elif outcome == "MATCH_ERROR":
         notice = "⚠️ La recherche n'a pas pu aboutir — réessayez dans un instant.\n\n"
     elif outcome in ("NOT_MATCHABLE", "NO_OCCURRENCE"):
@@ -1766,19 +1797,54 @@ async def _refresh_by_message(state: Dict[str, Any], mc_runtime: MarketRuntime) 
         _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="target_not_found", resolution="not_found")
         return {"final_response": f"Je ne trouve pas de besoin récurrent « {hint} » (vous avez : {', '.join(picked)}).",
                 "status": "COMPLETED", "relation_to_context": "AMBIGUOUS"}
+    picked = cast(Any, picked)  # `_pick_need` renvoie selon `kind` : liste, dict ou None
+    ctx: Dict[str, Any] = state.get("context_target") if isinstance(state.get("context_target"), dict) else {}  # type: ignore[assignment]
+    failed_ids = {str(n) for n in ctx.get("ids") or []} if ctx.get("source") == "recovery_notification" else set()
+    if kind == "not_unique" and not hint and len(failed_ids) >= 2:
+        # B28 : plusieurs livraisons viennent d'échouer — la question ne porte que sur CELLES-LÀ (pas sur tous les besoins).
+        failed = [i for i in picked if str(i.get("recurring_need_id")) in failed_ids]
+        if len(failed) >= 2:
+            picked = failed
     if kind == "not_unique":
         _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="target_not_unique", resolution="not_unique")
         label = str(picked[0].get("product") or "") if hint else ""
         question = (f"J'ai trouvé {len(picked)} besoins récurrents de {label}. Lequel voulez-vous relancer ?" if label
-                    else "Vous avez plusieurs besoins actifs — pour lequel voulez-vous relancer la recherche ?")
+                    else ("Plusieurs livraisons viennent d'échouer — pour laquelle voulez-vous chercher un autre producteur ?"
+                          if len(failed_ids) >= 2
+                          else "Vous avez plusieurs besoins actifs — pour lequel voulez-vous relancer la recherche ?"))
         patch = await _need_choice_menu(state, mc_runtime, picked, question)
         patch["relation_to_context"] = "AMBIGUOUS"
         return patch
     _arbitration_log(state, intent=intent, relation="ANSWER", reason="contextual_command",
                      resolution={"context": "context", "name": "by_name", "single": "single"}[kind])
-    patch = await _refresh_matching(state, mc_runtime, str(picked["recurring_need_id"]))
+    target: Dict[str, Any] = state.get("context_target") if isinstance(state.get("context_target"), dict) else {}  # type: ignore[assignment]
+    exact = kind == "context" and str(target.get("id") or "") == str(picked["recurring_need_id"]) and target.get("occurrence_id")
+    if exact and target.get("occurrence_version") is None:
+        # Contexte sans version (notification antérieure à B28) : jamais de relance à l'aveugle (B26), ni d'autre livraison.
+        patch = await _show_need_detail(state, mc_runtime, str(picked["recurring_need_id"]),
+                                        notice="🔎 L'état de cette livraison a changé depuis la notification — voici où elle en est.\n\n")
+        patch["relation_to_context"] = "ANSWER"
+        patch["response_strategy"] = "CLARIFICATION"
+        if patch.get("status") == "WAITING_INPUT":
+            patch["current_goal"] = "GET_MY_NEEDS"
+        return patch
+    if kind == "context" and not target.get("occurrence_id") and target.get("source") == "recovery_notification":
+        dates = [str(_fmt_date_fr(d)) for d in target.get("dates") or []]
+        if len(dates) > 1:  # plusieurs livraisons du MÊME besoin en échec : jamais en choisir une à la place de l'acheteur
+            _arbitration_log(state, intent=intent, relation="AMBIGUOUS", reason="recovery_target_not_unique", resolution="not_unique")
+            return {"final_response": f"Plusieurs livraisons de {picked.get('product')} sont à relancer ({', '.join(dates)}). "
+                                      "Pour laquelle ? Précisez la date.", "status": "COMPLETED", "relation_to_context": "AMBIGUOUS"}
+    patch = await _refresh_matching(
+        state, mc_runtime, str(picked["recurring_need_id"]),
+        occurrence_id=str(target["occurrence_id"]) if exact else None,
+        occurrence_version=int(target["occurrence_version"]) if exact and target.get("occurrence_version") is not None else None,
+    )
     patch["relation_to_context"] = "ANSWER"
     patch["response_strategy"] = "CLARIFICATION"  # l'écran rendu par le flow fait foi (pas « Je passe à… »)
+    # B28 : l'écran rendu est un menu de la LISTE (goal GET_MY_NEEDS) — comme `_need_choice_menu`. Sans cela le goal restait
+    # REFRESH_RECURRING_MATCHING et « 1 » (Confirmer) relançait la recherche au lieu d'accepter la proposition affichée.
+    if patch.get("status") == "WAITING_INPUT":
+        patch["current_goal"] = "GET_MY_NEEDS"
     return patch
 
 
@@ -1878,7 +1944,8 @@ async def _show_need_detail(
                               f"Demandé : {_fmt_qty(detail.get('requested_quantity'))} {unit}",
                               "Disponibilité : aucune offre disponible pour le moment", "",
                               "1. Rechercher maintenant", "2. Retour"]
-            mapping = {"1": f"REFRESH:{recurring_need_id}", "2": "LIST"}
+            mapping = {"1": f"REFRESH:{_join_match_target(recurring_need_id, detail.get('occurrence_id'), detail.get('occurrence_version'))}",
+                       "2": "LIST"}
     return {
         "final_response": "\n".join(lines),
         "status": "WAITING_INPUT",  # B13 : voir `_render_needs_list` (garde le goal vivant pour « 1/2/3 »)

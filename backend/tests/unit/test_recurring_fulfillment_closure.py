@@ -60,11 +60,14 @@ class _Svc(RecurringSupplyMixin):
 
 def _occ(status="ACCEPTED", requested=100, delivered=0, version=3, unit="KG"):
     return types.SimpleNamespace(id=uuid.uuid4(), recurring_need_id=uuid.uuid4(), status=status,
-                                 requested_quantity=requested, quantity_delivered=delivered, version=version, unit=unit)
+                                 requested_quantity=requested, quantity_delivered=delivered, version=version, unit=unit,
+                                 order_group_id=None, occurrence_date=_NOW, quantity_confirmed=0, quantity_matched=0)
 
 
-def _line(state, qty, unit="KG"):
-    """state : DELIVERED | ACTIVE | CANCELLED | ISSUE — traduit en (order.status, order.delivery_status)."""
+def _line(state, qty, unit="KG", role=None):
+    """state : DELIVERED | ACTIVE | CANCELLED | ISSUE — traduit en (order.status, order.delivery_status).
+    B28 : une commande annulée porte aussi `cancellation_role` (défaut BUYER : un choix de l'acheteur ne se récupère jamais ;
+    PRODUCER/SYSTEM = échec de tentative, voir `test_recurring_occurrence_recovery_unit.py`)."""
     status, delivery = {
         "DELIVERED": ("COMPLETED", "RECEIVED"),
         "ACTIVE": ("CONFIRMED", "PENDING"),
@@ -74,7 +77,7 @@ def _line(state, qty, unit="KG"):
         "CANCELLED": ("CANCELLED", "PENDING"),
         "ISSUE": ("CONFIRMED", "RECEIVED_WITH_ISSUE"),
     }[state]
-    return (uuid.uuid4(), status, delivery, qty, unit)
+    return (uuid.uuid4(), status, delivery, qty, unit, role or ("BUYER" if state == "CANCELLED" else None), None)
 
 
 def _recompute(occ, lines):

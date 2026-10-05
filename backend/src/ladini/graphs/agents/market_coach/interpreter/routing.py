@@ -2334,6 +2334,12 @@ def _annotate_interpretation(state: Dict[str, Any], patch: Dict[str, Any]) -> Di
     intent = str(patch.get("detected_intent") or "UNKNOWN").upper()
     target = (ca.live_menu_target(state) or ca.recovery_target(state)) if intent in ca.CONTEXT_TARGETED_INTENTS else None
     out = {**patch, "relation_to_context": relation.value}
+    if target is not None and target.get("source") == "recovery_notification":
+        # B28 : le flux doit pouvoir dire QUELLES livraisons ont échoué (le contexte de récupération n'est pas dans l'état du graphe).
+        target = {**target, "dates": [str(d) for d in (state.get("recovery_context") or {}).get("dates") or []]}
+    elif target is None and intent == "REFRESH_RECURRING_MATCHING" and len(ca.recovery_need_ids(state)) >= 2:
+        # Plusieurs livraisons ont échoué ensemble : pas de cible unique ; l'ensemble est transmis pour clarifier ENTRE elles seulement.
+        target = {"type": "RECURRING_NEED_SET", "id": None, "ids": ca.recovery_need_ids(state), "source": "recovery_notification"}
     if target is not None:
         out["context_target"] = target
     analysis = patch.get("raw_analysis") or {}
