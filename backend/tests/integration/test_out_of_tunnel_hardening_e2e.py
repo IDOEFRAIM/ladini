@@ -271,7 +271,7 @@ class TestFullSalesReplay:
         assert pending.get("kind") == "CLARIFY_INTENT"
         assert pending["target"]["facts"]["product"] == "miel"
         assert pending["target"]["facts"]["quantity"] == 90.0
-        assert runtime.calls == []  # aucun side effect MCP
+        assert [c for c in runtime.calls if c != "get_last_interactive_outbound"] == []  # aucun side effect MCP (lecture de contexte exclue)
 
         # TURN 2 — "vendre" : résolution lexicale (aucun appel LLM requis),
         # current_goal=SALES_PUBLISH_PRODUCT, produit/quantité repris,

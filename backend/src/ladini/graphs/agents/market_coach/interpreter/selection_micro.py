@@ -127,10 +127,42 @@ def _parse_and_validate(
 
 def _outcome_for_interpretation(
     interpretation: SelectionInterpretation,
+    state: Optional[Dict[str, Any]] = None,
+    text: str = "",
 ) -> Tuple[SelectionOutcome, Optional[Dict[str, Any]]]:
     if interpretation.event == SelectionEvent.INTERRUPTION:
         return SelectionOutcome.INTERRUPTION, None
-    return SelectionOutcome.RESULT, adapt_selection_to_canonical(interpretation)
+    return SelectionOutcome.RESULT, _apply_domain_date_reference(adapt_selection_to_canonical(interpretation), state, text)
+
+
+def _apply_domain_date_reference(
+    result: Dict[str, Any], state: Optional[Dict[str, Any]], text: str
+) -> Dict[str, Any]:
+    """B27 — « celle de demain », « celui du 5 octobre » : le modèle a extrait la référence ; le DOMAINE calcule la date et choisit
+    l'option parmi les dates AFFICHÉES (jamais une date écrite par le modèle, jamais son index). Une seule option -> index
+    posé par le domaine ; plusieurs -> clarification (`reference_candidates`) ; aucune -> le résultat du modèle reste soumis
+    aux gardes habituelles."""
+    reference = (result.get("raw_analysis") or {}).get("date_reference")
+    if not reference or state is None:
+        return result
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+        live_menu_view,
+        resolve_date_reference,
+    )
+
+    view = live_menu_view(state)
+    if view is None:
+        return result
+    kind, hits = resolve_date_reference(view, reference, text)
+    raw = dict(result.get("raw_analysis") or {})
+    if kind == "one":
+        return {**result, "extracted_entities": {"selection_index": int(hits[0])},
+                "raw_analysis": {**raw, "reference_resolved": "date"}}
+    if kind == "many":
+        return {**result, "interpreted_event": "UNKNOWN", "interpreter_confidence": 0.3,
+                "extracted_entities": {"reference_candidates": hits},
+                "raw_analysis": {**raw, "clarification_reason": "reference_not_unique"}}
+    return result
 
 
 async def run_selection_microprompt(
@@ -222,7 +254,7 @@ async def run_selection_microprompt(
                 )
             except Exception:
                 pass
-            return _outcome_for_interpretation(interpretation)
+            return _outcome_for_interpretation(interpretation, state, text)
 
     call_count_key = f"llm_call_count:{message_sid}" if message_sid else None
 
@@ -285,7 +317,7 @@ async def run_selection_microprompt(
             cache_key, interpretation.model_dump_json(), ttl_seconds=_CACHE_TTL_SECONDS
         )
 
-    return _outcome_for_interpretation(interpretation)
+    return _outcome_for_interpretation(interpretation, state, text)
 
 
 __all__ = ["SelectionOutcome", "run_selection_microprompt"]

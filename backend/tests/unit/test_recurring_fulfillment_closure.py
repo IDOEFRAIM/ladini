@@ -193,6 +193,9 @@ class _TimeoutSession:
     async def scalars(self, _stmt):
         return _Rows(self.products)
 
+    async def scalar(self, _stmt):
+        return None  # B27 : pas d'occurrence rattachée => pas de contexte de récupération
+
     def add(self, obj):
         self.added.append(obj)
 

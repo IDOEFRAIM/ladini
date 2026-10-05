@@ -24,7 +24,9 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # À incrémenter à CHAQUE changement comportemental — composante de la clé de
 # cache LLM ET dimension Langfuse (`prompt_version`), même discipline que
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
-NEW_TASK_PROMPT_VERSION = "new_task_v11"
+# v12 (B27) : écran affiché — accord/refus libre = CONFIRM/REJECT, accord + valeur nouvelle = UPDATE (jamais un accord), demande
+# de chercher un autre fournisseur = REFRESH_RECURRING_MATCHING, besoin NOMMÉ = GET_MY_NEEDS(product) ; aucune liste de phrases.
+NEW_TASK_PROMPT_VERSION = "new_task_v12"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -245,8 +247,14 @@ def build_new_task_user_prompt(
             "valeur inventée ; (b) il demande une recherche/actualisation d'un besoin = REFRESH_RECURRING_MATCHING "
             "(`product` seulement s'il est NOMMÉ) ; (c) il exprime un NOUVEAU besoin complet (produit + quantité + "
             "fréquence) = CREATE_RECURRING_NEED, même si l'écran affiche un autre produit ; (d) une demande d'achat, "
-            "de vente ou de navigation = son intention propre. Un produit nommé DIFFÉRENT de la cible n'est jamais "
-            "une modification de la cible."
+            "de vente ou de navigation = son intention propre ; (e) il accepte ou refuse SIMPLEMENT ce que l'écran propose, "
+            "quelle que soit la formulation, sans rien ajouter ni changer = disposition CONFIRM ou REJECT ; s'il accepte "
+            "MAIS apporte une valeur nouvelle (quantité, date, condition) c'est un changement = UPDATE_RECURRING_NEED "
+            "(jamais CONFIRM) ; si un refus est suivi d'une demande de nouvelle recherche, c'est REFRESH_RECURRING_MATCHING ; "
+            "une demande de ne faire QUE la livraison concernée (pas le besoin entier) = UPDATE_RECURRING_NEED avec "
+            "update_action ; (f) il demande de chercher un autre fournisseur ou de relancer pour la livraison affichée "
+            "ou signalée = REFRESH_RECURRING_MATCHING ; (g) il demande où en est / de voir un besoin NOMMÉ = "
+            "GET_MY_NEEDS avec `product`. Un produit nommé DIFFÉRENT de la cible n'est jamais une modification de la cible."
         )
     lines.append(f'Message utilisateur :\n"""{normalized_text}"""')
     lines.append("\nRetourne le JSON strict.")

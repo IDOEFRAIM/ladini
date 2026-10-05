@@ -34,8 +34,9 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import Enum
-from typing import Any, Dict, FrozenSet, Mapping, Optional
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 from ladini.agents.reducers import mark_deleted
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
@@ -332,10 +333,18 @@ def live_menu_view(
         return None
     labels: Dict[str, Any] = menu["labels"] if isinstance(menu.get("labels"), dict) else {}
     ordered = sorted((k for k in menu["actions"] if str(k).isdigit()), key=int)
+    raw_facts = menu.get("facts")
+    facts: Dict[str, Any] = raw_facts if isinstance(raw_facts, dict) else {}
+    raw_shown = menu.get("shown_numbers")
+    shown: List[Any] = raw_shown if isinstance(raw_shown, list) else []
     return {
         "title": str(menu.get("title") or ""),
         "labels": [str(labels.get(k) or menu["actions"][k]) for k in ordered],
         "actions": {str(k): str(menu["actions"][k]) for k in ordered},
+        # B27 — FAITS métier de chaque option (dates ISO affichées) et nombres montrés par l'écran : ce qui permet au DOMAINE
+        # (jamais au modèle) de résoudre « celui du 5 octobre », « celle de demain », et de refuser « oui mais mets 100 ».
+        "facts": {str(k): dict(v) for k, v in facts.items() if isinstance(v, dict)},
+        "shown_numbers": [float(x) for x in shown if isinstance(x, (int, float))],
     }
 
 
@@ -357,32 +366,136 @@ _ORDINALS: Mapping[str, int] = {
 }
 
 
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def numbers_in(text: Any) -> List[float]:
+    """Les nombres DITS dans le message (« 75 kg » -> 75.0, « 1,5 » -> 1.5). Lecture structurelle, sans vocabulaire."""
+    out: List[float] = []
+    for raw in _NUMBER_RE.findall(str(text or "")):
+        try:
+            out.append(float(raw.replace(",", ".")))
+        except ValueError:  # pragma: no cover - le motif garantit un nombre
+            continue
+    return out
+
+
+def _stem(token: str) -> str:
+    """Repli de pluriel minimal (« chevres » ~ « chevre »), sans dictionnaire : un mot long finissant par s/x perd cette lettre."""
+    return token[:-1] if len(token) > 4 and token[-1] in "sx" else token
+
+
+def _label_tokens(label: str) -> set:
+    return {_stem(t) for t in fold(label).split() if len(t) >= 4 and not t.isdigit()}
+
+
+def _text_tokens(text: str) -> set:
+    return {_stem(t) for t in fold(text).split()}
+
+
+def reference_candidates(view: Mapping[str, Any], text: str) -> List[str]:
+    """Indices des options dont le libellé partage un mot significatif avec le message (« mes chèvres » -> les deux Chèvre)."""
+    tokens = _text_tokens(text)
+    keys = [str(k) for k in view["actions"]]
+    return [k for k, label in zip(keys, view["labels"], strict=False) if _label_tokens(label) & tokens]
+
+
 def selection_is_evidenced(view: Mapping[str, Any], index: Any, text: str) -> bool:
-    """B24 — un choix d'entité en langage LIBRE (« le boeuf », « le premier ») est ÉTAYÉ par le texte : il nomme un mot
-    significatif du libellé affiché pour cet index, ou un ordinal qui désigne cet index. Un chiffre isolé dans une phrase
-    (« mets-en 3 ») n'est PAS une preuve : c'est une quantité, pas un numéro d'écran. Ce n'est pas un routeur métier : c'est la
-    vérification, hors LLM, qu'un index proposé par le micro-prompt est bien justifié par le message."""
+    """B24/B27 — un choix d'entité en langage LIBRE (« le boeuf », « le premier », « celui du 5 octobre ») est ÉTAYÉ par le texte :
+    un ordinal qui désigne cet index, un mot significatif du libellé qui DISTINGUE cette option des autres (un mot partagé par
+    plusieurs options — « chèvre » quand il y a deux Chèvre — ne prouve rien), ou, quand il n'y a qu'une seule option, tout mot
+    de son libellé. Un chiffre isolé (« mets-en 3 ») n'est PAS une preuve : c'est une quantité, pas un numéro d'écran. Ce n'est
+    pas un routeur métier : c'est la vérification, hors LLM, qu'un index proposé par le micro-prompt est justifié par le message."""
     norm = fold(text)
     tokens = set(norm.split())
     if any(_ORDINALS.get(t) == int(index) for t in tokens if str(index).isdigit()):
         return True
+    tokens = _text_tokens(text)
     keys = [str(k) for k in view["actions"]]
     labels = view["labels"]
     if str(index) not in keys:
         return False
-    label_tokens = {t for t in fold(labels[keys.index(str(index))]).split() if len(t) >= 4 and not t.isdigit()}
-    return bool(label_tokens & tokens)
+    position = keys.index(str(index))
+    mine = _label_tokens(labels[position])
+    others: set = set()
+    for i, label in enumerate(labels):
+        if i != position:
+            others |= _label_tokens(label)
+    return bool((mine - others) & tokens) or (not others and bool(mine & tokens))
+
+
+def resolve_date_reference(
+    view: Mapping[str, Any], reference: Mapping[str, Any], text: str, *, today: Optional[date] = None
+) -> Tuple[str, List[str]]:
+    """B27 — RÉFÉRENCE TEMPORELLE -> option. Le modèle a extrait ce qui est DIT (`offset_days`, ou `day`/`month`) ; ICI le domaine
+    calcule la date (`today` + décalage) et la compare aux dates réellement affichées (`view["facts"][i]["starts"|"deliveries"]`).
+    `("one", [i])` : une seule option correspond ; `("many", [...])` : plusieurs (clarifier) ; `("none", [])` : aucune.
+    Un jour (`day`) que le message ne contient pas n'est pas pris en compte (aucune date inventée par le modèle)."""
+    today = today or date.today()
+    wanted_day = reference.get("day")
+    if wanted_day is not None and float(wanted_day) not in numbers_in(text):
+        return "none", []
+    role = str(reference.get("role") or "").upper()
+    fact_keys = {"START": ("starts",), "DELIVERY": ("deliveries",)}.get(role, ("starts", "deliveries"))
+    hits: List[str] = []
+    for key in (str(k) for k in view["actions"]):
+        option_facts = (view.get("facts") or {}).get(key, {})
+        for iso in [d for fk in fact_keys for d in option_facts.get(fk) or []]:
+            try:
+                d = date.fromisoformat(str(iso)[:10])
+            except ValueError:
+                continue
+            offset = reference.get("offset_days")
+            if offset is not None and d == today + timedelta(days=int(offset)):
+                hits.append(key)
+                break
+            if wanted_day is not None and d.day == int(wanted_day) and (
+                reference.get("month") is None or d.month == int(reference["month"])
+            ):
+                hits.append(key)
+                break
+    if len(hits) == 1:
+        return "one", hits
+    return ("many", hits) if hits else ("none", [])
+
+
+#: B27 — une acceptation/un refus LIBRE d'une entrée MUTANTE n'est admis qu'à ces conditions, en plus de la double lecture
+#: sémantique (SELECTION puis NEW_TASK d'accord, voir `routing.py`) : certitude du modèle, message court, et AUCUN nombre que
+#: l'écran n'a pas montré (« oui mais mets 100 » n'est pas une confirmation de 75 : c'est une correction).
+NATURAL_CONFIRM_MIN_CONFIDENCE = 0.9
+NATURAL_CONFIRM_MAX_TOKENS = 10
+GUARD_NATURAL_CONFIRMATION = "natural_confirmation_candidate"
+GUARD_ACCEPTANCE_WITH_NEW_VALUES = "acceptance_with_unshown_values"
+
+
+def assess_natural_mutation(view: Mapping[str, Any], index: Any, result: Mapping[str, Any], text: str) -> str:
+    """`"candidate"` : une acceptation/un refus naturel plausible (à confirmer par la 2e lecture) ; `"correction"` : le message
+    apporte une valeur que l'écran n'a pas montrée -> ce n'est pas la confirmation de ce qui est affiché ; `"closed_required"` :
+    pas assez de preuves -> numéro ou alias fermé exigé (comportement B23/B24)."""
+    raw = result.get("raw_analysis") or {}
+    shown = {float(x) for x in view.get("shown_numbers") or []} | {float(k) for k in view["actions"] if str(k).isdigit()}
+    extra = [n for n in numbers_in(text) if n not in shown]
+    if extra:
+        return "correction"
+    confidence = raw.get("selection_confidence")
+    if not isinstance(confidence, (int, float)) or float(confidence) < NATURAL_CONFIRM_MIN_CONFIDENCE:
+        return "closed_required"
+    if len(fold(text).split()) > NATURAL_CONFIRM_MAX_TOKENS:
+        return "closed_required"
+    return "candidate"
 
 
 def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any], text: str = "") -> Dict[str, Any]:
-    """Fail-safe B23/B24 : une SÉLECTION issue du micro-prompt (donc d'un langage LIBRE : les entrées fermées sont résolues
+    """Fail-safe B23/B24/B27 : une SÉLECTION issue du micro-prompt (donc d'un langage LIBRE : les entrées fermées sont résolues
     avant, par l'arbitrage 1b) sur un menu récurrent vivant n'est JAMAIS exécutée à l'aveugle.
 
-    * entrée MUTANTE (accepter/refuser/exécuter)   -> `closed_reply_required` (le flow demande un numéro/alias fermé) ;
+    * entrée MUTANTE (accepter/refuser/exécuter)   -> B27 : acceptation NATURELLE candidate (`GUARD_NATURAL_CONFIRMATION`, à
+      confirmer par une 2e lecture sémantique indépendante) si le modèle est certain, le message court et sans valeur nouvelle ;
+      valeur non montrée -> correction (`GUARD_ACCEPTANCE_WITH_NEW_VALUES`, reclassification) ; sinon `closed_reply_required` ;
     * action d'écran (rechercher, retour, ...)     -> marquée `free_text_selection_rejected` : l'appelant reclassifie le
       message par l'interprétation sémantique (NEW_TASK) au lieu d'exécuter l'index ;
     * choix d'une entité de la liste (SELECT)       -> accepté seulement s'il est ÉTAYÉ par le texte (`selection_is_evidenced`),
-      sinon `free_text_selection_rejected` comme une action d'écran.
+      sinon `free_text_selection_rejected` (+ `reference_candidates` quand plusieurs options correspondent).
     Hors menu récurrent vivant : `result` inchangé."""
     if str(result.get("interpreted_event") or "").upper() != "SELECTION":
         return result
@@ -393,10 +506,23 @@ def guard_free_text_selection(state: Mapping[str, Any], result: Dict[str, Any], 
     action = view["actions"].get(str(index))
     raw = result.get("raw_analysis") or {}
     if action in MUTATING_MENU_ACTIONS:
+        verdict = assess_natural_mutation(view, index, result, text)
+        if verdict == "candidate":
+            return {**result, "raw_analysis": {**raw, "guard": GUARD_NATURAL_CONFIRMATION, "natural_action": action}}
+        if verdict == "correction":
+            return {**result, "raw_analysis": {**raw, "guard": GUARD_FREE_TEXT_ACTION, "decision_reason": GUARD_ACCEPTANCE_WITH_NEW_VALUES}}
         return {**result, "extracted_entities": {**result["extracted_entities"], "closed_reply_required": True},
                 "raw_analysis": {**raw, "guard": GUARD_MUTATION_CLOSED_REPLY}}
-    if action in FREE_TEXT_GUARDED_ACTIONS or (action == "SELECT" and text and not selection_is_evidenced(view, index, text)):
+    if action in FREE_TEXT_GUARDED_ACTIONS:
         return {**result, "raw_analysis": {**raw, "guard": GUARD_FREE_TEXT_ACTION}}
+    if action == "SELECT" and raw.get("reference_resolved"):
+        return result  # B27 : option désignée par le DOMAINE (date calculée et comparée aux dates affichées), pas par le modèle
+    if action == "SELECT" and text and not selection_is_evidenced(view, index, text):
+        candidates = reference_candidates(view, text)
+        out = {**result, "raw_analysis": {**raw, "guard": GUARD_FREE_TEXT_ACTION}}
+        if len(candidates) >= 2:
+            out["raw_analysis"]["reference_candidates"] = candidates
+        return out
     return result
 
 
@@ -423,12 +549,42 @@ def targeted_menu_clarification(state: Mapping[str, Any], *, require_pending: bo
         return None
     target = live_menu_target(state, require_pending=require_pending)
     options = "\n".join(f"{k}. {label}" for k, label in zip(view["actions"], view["labels"], strict=False))
+    # B27 — UNE question discriminante : plusieurs options correspondent à ce que l'utilisateur a désigné -> on ne liste QUE celles-là.
+    candidates = [str(k) for k in ((state.get("extracted_entities") or {}).get("reference_candidates") or [])]
+    narrowed = [(k, label) for k, label in zip(view["actions"], view["labels"], strict=False) if k in candidates]
+    if len(narrowed) >= 2:
+        shown = "\n".join(f"{k}. {label}" for k, label in narrowed)
+        return f"Plusieurs options correspondent :\n\n{shown}\n\nLaquelle voulez-vous ? Répondez avec le numéro, ou précisez (par exemple une date)."
     if target is None:
         return f"Je n'ai pas compris ce choix.\n\n{view['title']}\n{options}\n\nRépondez avec un numéro, ou dites « mes commandes »."
     return (
         f"Je n'ai pas bien compris votre demande pour le besoin de {target.get('product') or 'ce besoin'}.\n\n{options}\n\n"
         "Répondez avec un numéro, ou dites ce que vous voulez modifier : la quantité, la fréquence ou la prochaine livraison."
     )
+
+
+def recovery_target(state: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """B27 — CONTEXTE DE RÉCUPÉRATION : la livraison récurrente dont une notification récente a signalé l'échec (producteur sans
+    réponse), quand elle désigne UN SEUL besoin. Sert de cible à « trouve-moi quelqu'un d'autre » ; revalidée par le flow contre
+    les besoins de l'acheteur courant (jamais un identifiant pris au mot). `None` : aucun, ou plusieurs besoins (on clarifie)."""
+    recovery = state.get("recovery_context")
+    if not isinstance(recovery, dict):
+        return None
+    needs = [str(n) for n in recovery.get("recurring_need_ids") or []]
+    if len(set(needs)) != 1:
+        return None
+    occurrences = [str(o) for o in recovery.get("occurrence_ids") or []]
+    return {"type": "RECURRING_NEED", "id": needs[0], "occurrence_id": occurrences[0] if len(occurrences) == 1 else None,
+            "source": "recovery_notification"}
+
+
+def recovery_hint(state: Mapping[str, Any]) -> Optional[str]:
+    """Description (générée par l'application, jamais le texte utilisateur) de la notification d'échec récente, pour le micro-prompt."""
+    recovery = state.get("recovery_context")
+    if not isinstance(recovery, dict) or not recovery.get("recurring_need_ids"):
+        return None
+    dates = ", ".join(str(d) for d in recovery.get("dates") or [])
+    return "notification récente : le producteur n'a pas confirmé une livraison récurrente" + (f" ({dates})" if dates else "")
 
 
 def derive_relation(state: Mapping[str, Any], result: Mapping[str, Any]) -> RelationToContext:
@@ -447,7 +603,7 @@ def derive_relation(state: Mapping[str, Any], result: Mapping[str, Any]) -> Rela
         return RelationToContext.CORRECTION
     if intent in NAVIGATION_INTENTS:
         return RelationToContext.INTERRUPTION
-    if intent in CONTEXT_TARGETED_INTENTS and live_menu_target(state) is not None:
+    if intent in CONTEXT_TARGETED_INTENTS and (live_menu_target(state) is not None or recovery_target(state) is not None):
         return CONTEXT_TARGETED_INTENTS[intent]
     return RelationToContext.NEW_TASK
 
@@ -600,6 +756,7 @@ def log_intent_arbitration(
     reason: str,
     target_type: Optional[str] = None,
     target_resolution: Optional[str] = None,
+    deterministic_path: bool = False,
 ) -> None:
     """B23/B24 — journal de décision STRUCTURÉ « attente vs intention » (aucune PII : jamais le texte ni un identifiant,
     seulement des codes).
@@ -613,11 +770,15 @@ def log_intent_arbitration(
     expected = "|".join(sorted(set(view["actions"].values()))) if view else pending.kind.value
     goal = state.get("current_goal") or pending.goal or "NONE"
     rel = relation.value if isinstance(relation, RelationToContext) else str(relation)
+    # B27 : `deterministic_path` (entrée fermée, 0 LLM) / `semantic_path` (lecture du modèle) et `clarification_reason` : codes
+    # seulement, jamais le texte utilisateur ni un identifiant — de quoi mesurer taux de clarification et de repli.
+    clarification = reason if rel == RelationToContext.AMBIGUOUS.value else "none"
     logger.info(
         "INTENT_ARBITRATION current_goal=%s expected_action=%s semantic_intent=%s relation_to_context=%s "
-        "relation_to_expectation=%s target_type=%s target_resolution=%s selected_route=%s decision_reason=%s reason=%s",
+        "relation_to_expectation=%s target_type=%s target_resolution=%s selected_route=%s decision_reason=%s reason=%s "
+        "deterministic_path=%s semantic_path=%s clarification_reason=%s",
         goal, expected, semantic_intent or "UNKNOWN", rel, rel, target_type or "NONE", target_resolution or "none",
-        route, reason, reason,
+        route, reason, reason, str(bool(deterministic_path)).lower(), str(not deterministic_path).lower(), clarification,
     )
 
 
@@ -643,6 +804,14 @@ __all__ = [
     "log_decision",
     "neutral_state_view",
     "resolve_conversation_context",
+    "resolve_date_reference",
+    "recovery_target",
+    "recovery_hint",
+    "reference_candidates",
+    "assess_natural_mutation",
+    "numbers_in",
+    "GUARD_NATURAL_CONFIRMATION",
+    "GUARD_ACCEPTANCE_WITH_NEW_VALUES",
     "resolve_menu_action",
     "stale_context_purge_patch",
 ]

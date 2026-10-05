@@ -183,7 +183,8 @@ class ModerationMixin:
             return {"status": "error", "message": "Session indisponible."}
         norm = normalize_phone(phone, required=False)
         if not norm:
-            return {"status": "success", "interactive": None}
+            return {"status": "success", "interactive": None, "recovery": None}
+        recovery = await self._last_recovery_context(session, norm)
         row = (
             await session.execute(
                 text(
@@ -199,7 +200,7 @@ class ModerationMixin:
             )
         ).first()
         if row is None:
-            return {"status": "success", "interactive": None}
+            return {"status": "success", "interactive": None, "recovery": recovery}
         template_key, payload, _sent_at, sent_epoch = row
         body: Dict[str, Any] = payload if isinstance(payload, dict) else {}
         raw_meta = body.get("interactive")
@@ -210,6 +211,7 @@ class ModerationMixin:
         occurrences: List[Any] = raw_occ if isinstance(raw_occ, list) else []
         return {
             "status": "success",
+            "recovery": recovery,
             "interactive": {
                 "template_key": template_key,
                 "owner_type": INTERACTIVE_TEMPLATE_OWNERS[template_key],
@@ -221,6 +223,39 @@ class ModerationMixin:
                 "occurrence_ids": [str(o["occurrence_id"]) for o in occurrences
                                    if isinstance(o, dict) and o.get("occurrence_id")],
             },
+        }
+
+    @staticmethod
+    async def _last_recovery_context(session: Any, norm_phone: str) -> Optional[Dict[str, Any]]:
+        """B27 — la dernière notification de RÉCUPÉRATION envoyée (livraison récurrente en échec : producteur sans réponse) dans la
+        fenêtre du digest. Identifiants uniquement (besoin, occurrence, date) : c'est ce qui permet à « trouve-moi quelqu'un
+        d'autre » de viser la bonne livraison. Le DOMAINE décide ensuite si une relance est encore possible. Lecture seule."""
+        from ladini.core.settings import settings
+
+        row = (
+            await session.execute(
+                text(
+                    "select payload, extract(epoch from sent_at at time zone 'UTC') as sent_epoch "
+                    "from intelligence.notification_outbox "
+                    "where recipient_phone = :phone and status = 'SENT' and sent_at is not null "
+                    "and (payload ->> 'recovery_candidate') = 'true' "
+                    "and sent_at > (now() at time zone 'UTC') - make_interval(secs => :ttl) "
+                    "order by sent_at desc limit 1"
+                ),
+                {"phone": norm_phone, "ttl": float(settings.RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS)},
+            )
+        ).first()
+        if row is None:
+            return None
+        body: Dict[str, Any] = row[0] if isinstance(row[0], dict) else {}
+        occurrences = [o for o in (body.get("occurrences") or []) if isinstance(o, dict) and o.get("recurring_need_id")]
+        if not occurrences:
+            return None
+        return {
+            "sent_at": float(row[1]),
+            "recurring_need_ids": [str(o["recurring_need_id"]) for o in occurrences],
+            "occurrence_ids": [str(o["occurrence_id"]) for o in occurrences if o.get("occurrence_id")],
+            "dates": [str(o["date"]) for o in occurrences if o.get("date")],
         }
 
     # ── Lecture : liste des produits interdits (table + défauts) ────────

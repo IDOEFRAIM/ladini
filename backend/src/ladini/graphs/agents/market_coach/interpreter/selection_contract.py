@@ -30,9 +30,9 @@ l'interpréteur unifié legacy (route inchangée pour les autres cas)."""
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class SelectionEvent(str, Enum):
@@ -50,6 +50,16 @@ class SelectionInterpretation(BaseModel):
     event: SelectionEvent
     selection_index: Optional[int] = None
     selected_value: Optional[str] = None
+    #: B27 — certitude du modèle (0..1) sur la LECTURE du message ; jamais une autorisation : une entrée MUTANTE (accepter,
+    #: refuser, exécuter) exige en plus la double lecture sémantique et la cohérence des nombres (voir `context_arbitration`).
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    #: B27 — RÉFÉRENCE TEMPORELLE extraite (jamais une date) : le modèle comprend « demain »/« le 5 octobre », le DOMAINE calcule
+    #: la date et choisit l'option (`context_arbitration.resolve_date_reference`). `date_offset_days` : 0 aujourd'hui, 1 demain...
+    date_offset_days: Optional[int] = Field(default=None, ge=-30, le=366)
+    date_day: Optional[int] = Field(default=None, ge=1, le=31)
+    date_month: Optional[int] = Field(default=None, ge=1, le=12)
+    #: Ce que la date désigne : le DÉMARRAGE du besoin (« celui qui commence le 5 ») ou une LIVRAISON (« celle de demain »).
+    date_role: Optional[Literal["START", "DELIVERY"]] = None
 
     model_config = {"frozen": True}
 
@@ -70,6 +80,11 @@ class SelectionInterpretation(BaseModel):
                 f"{self.event.value} ne doit porter ni selection_index "
                 "ni selected_value"
             )
+        if self.event != SelectionEvent.SELECTION and (
+            self.date_offset_days is not None or self.date_day is not None or self.date_month is not None
+            or self.date_role is not None
+        ):
+            raise ValueError(f"{self.event.value} ne doit porter aucune référence de date")
         return self
 
 
@@ -108,12 +123,19 @@ def adapt_selection_to_canonical(
             entities["selection_index"] = interpretation.selection_index
         else:
             entities["selected_value"] = interpretation.selected_value
+        analysis: Dict[str, Any] = {"path": "selection_microprompt"}
+        if interpretation.confidence is not None:
+            analysis["selection_confidence"] = interpretation.confidence
+        refs = {k: v for k, v in (("offset_days", interpretation.date_offset_days), ("day", interpretation.date_day),
+                                  ("month", interpretation.date_month), ("role", interpretation.date_role)) if v is not None}
+        if refs:
+            analysis["date_reference"] = refs  # lu par `context_arbitration.resolve_date_reference` (le domaine calcule la date)
         return {
             "interpreted_event": "SELECTION",
             "detected_intent": "UNKNOWN",
             "interpreter_confidence": 0.95,
             "extracted_entities": entities,
-            "raw_analysis": {"path": "selection_microprompt"},
+            "raw_analysis": analysis,
         }
     if interpretation.event == SelectionEvent.UNKNOWN:
         return {

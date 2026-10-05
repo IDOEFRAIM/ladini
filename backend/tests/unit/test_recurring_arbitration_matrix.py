@@ -62,7 +62,7 @@ def test_open_free_text_is_never_turned_into_a_menu_action_by_python(text):
 def test_live_menu_view_publishes_the_expectation():
     view = ca.live_menu_view(_detail_state())
     assert view == {"title": "Écran du besoin récurrent « Boeuf »", "labels": ["Rechercher maintenant", "Retour"],
-                    "actions": {"1": "REFRESH", "2": "LIST"}}
+                    "actions": {"1": "REFRESH", "2": "LIST"}, "facts": {}, "shown_numbers": []}
 
 
 def test_a_stale_or_foreign_menu_is_not_an_expectation():
