@@ -96,7 +96,7 @@ def _contains_sequence(tokens: List[str], alias_tokens: List[str]) -> bool:
 
 def _fuzzy_slugs(tokens: List[str]) -> List[str]:
     keys = {t for t in tokens if len(t) >= 4}
-    keys.update(a + b for a, b in zip(tokens, tokens[1:]))
+    keys.update(a + b for a, b in zip(tokens, tokens[1:], strict=False))
     found: List[str] = []
     for key in keys:
         match = difflib.get_close_matches(key, list(_JOINED_ALIASES), n=1, cutoff=0.84)

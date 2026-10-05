@@ -25,11 +25,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
-from ladini.domain.burkina_regions import region_list_text, resolve_region
 from ladini.agents.confirmation_phrases import (
     _CONFIRM_EXACT_PHRASES,
     _REJECT_EXACT_PHRASES,
 )
+from ladini.domain.burkina_regions import region_list_text, resolve_region
 
 logger = logging.getLogger("Ladini.Agents.Onboarding")
 
