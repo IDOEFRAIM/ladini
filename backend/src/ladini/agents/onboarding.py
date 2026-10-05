@@ -23,12 +23,13 @@ import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from ladini.agents.confirmation_phrases import (
     _CONFIRM_EXACT_PHRASES,
     _REJECT_EXACT_PHRASES,
 )
+from ladini.domain.burkina_regions import region_list_text, resolve_region
 
 logger = logging.getLogger("Ladini.Agents.Onboarding")
 
@@ -74,6 +75,9 @@ class OnboardingState:
     # chaque relance/insulte de l'utilisateur, ce qui a fini par l'agacer
     # ("arrête de m'envoyer ce même texte") plutôt que de le rassurer.
     explain_count: int = 0
+    # (2026-10-05) La région n'est redemandée QU'UNE fois (localité inconnue / pays seul) :
+    # une 2e réponse non résolue part en OUT_OF_COVERAGE sans bloquer l'onboarding.
+    region_clarify_asked: bool = False
 
     def missing_slots(self) -> List[str]:
         missing: List[str] = []
@@ -170,7 +174,11 @@ def _merge_extracted(
         # d'un tour à l'autre la ferait paraître "changée" à chaque fois et relancerait une
         # résolution DB inutile (jamais un bug fonctionnel, juste un coût réseau superflu et
         # une confirmation ré-invalidée à tort).
-        previous = (ob_state.zone_name or ob_state.declared_location or "").upper()
+        # (`declared_location` seul ne compte que si la zone a été TRANCHÉE : après une relance de
+        # région, répéter la même localité doit la re-résoudre — sans repasser par la relance.)
+        previous = (
+            ob_state.zone_name or (ob_state.declared_location if ob_state.coverage_status else "") or ""
+        ).upper()
         if zone and zone.upper() != previous:
             ob_state.zone_name = zone
             ob_state.zone_id = None
@@ -374,7 +382,7 @@ def _ack_line(ob_state: OnboardingState) -> str:
                 "l'ouverture de la zone ! 🙌"
             )
         elif ob_state.zone_name:
-            parts.append(f"Zone notée : *{ob_state.zone_name}* ✅")
+            parts.append(f"D'accord, je retiens *{ob_state.zone_name}* ✅")
     return " ".join(parts)
 
 
@@ -546,14 +554,24 @@ async def run_onboarding_step(
     # CHAQUE tour suivant). Mandat 2026-09-26 : JAMAIS de rejet sec bloquant — les 3 issues
     # de `_resolve_zone` (COVERED/NEARBY/OUT_OF_COVERAGE) laissent TOUJOURS l'onboarding
     # continuer dans le MÊME tour (voir `_ack_line` pour le message adapté à chacune).
+    region_question: Optional[str] = None
     if ob_state.zone_name and not ob_state.zone_id and ob_state.coverage_status is None:
         declared = ob_state.zone_name
-        resolution = await _resolve_zone(declared, mcp_runtime)
-        ob_state.declared_location = declared
-        ob_state.coverage_status = resolution.status
-        ob_state.zone_id = resolution.zone_id
-        ob_state.zone_name = resolution.zone_name
-        ob_state._filled_slots["zone"] = True
+        resolution = await _resolve_zone(
+            declared, mcp_runtime, allow_clarify=not ob_state.region_clarify_asked
+        )
+        if resolution.status == "NEEDS_REGION":
+            # Région non déterminée : on la redemande (une fois), sans rien inventer.
+            ob_state.region_clarify_asked = True
+            ob_state.declared_location = declared
+            ob_state.zone_name = None
+            region_question = resolution.question
+        else:
+            ob_state.declared_location = resolution.declared or declared
+            ob_state.coverage_status = resolution.status
+            ob_state.zone_id = resolution.zone_id
+            ob_state.zone_name = resolution.zone_name
+            ob_state._filled_slots["zone"] = True
 
     confirm = extracted.get("confirm")
     # La zone est "réglée" dès que `coverage_status` est posé — COVERED/NEARBY (zone_id connu)
@@ -593,7 +611,7 @@ async def run_onboarding_step(
 
     # Still collecting : ask for whichever slot(s) remain, in a friendly free-order tone.
     ob_state.step = OnboardingStep.COLLECT_ROLE
-    prompt = _collect_prompt(ob_state)
+    prompt = region_question or _collect_prompt(ob_state)
     if is_question:
         ob_state.explain_count += 1
         # Le LLM génère la réponse adaptée à CE message précis (voir
@@ -619,9 +637,15 @@ class ZoneResolution:
     status: str
     zone_id: Optional[str] = None
     zone_name: Optional[str] = None
+    #: valeur CANONIQUE à stocker comme `declared_location` (nom de région) quand elle est connue.
+    declared: Optional[str] = None
+    #: statut "NEEDS_REGION" : question de relance à poser à la place de la suite.
+    question: Optional[str] = None
 
 
-async def _resolve_zone(declared_location: str, mcp_runtime: Any) -> ZoneResolution:
+async def _resolve_zone(
+    declared_location: str, mcp_runtime: Any, *, allow_clarify: bool = False
+) -> ZoneResolution:
     """Résout *declared_location* (le texte BRUT de l'utilisateur) en zone de SERVICE,
     JAMAIS en bloquant : voir `ZoneResolution` pour les 3 issues possibles.
 
@@ -639,26 +663,34 @@ async def _resolve_zone(declared_location: str, mcp_runtime: Any) -> ZoneResolut
     if not declared_location or mcp_runtime is None:
         return ZoneResolution(status="OUT_OF_COVERAGE")
 
-    try:
-        zone_response = await mcp_runtime.call_db(
-            "get_zone_by_name", name=declared_location
-        )
-        payload = _unwrap_tool_payload(zone_response)
-        if isinstance(payload, dict) and payload.get("status") != "error":
-            zone_id = payload.get("zone_id") or payload.get("id")
-            zone_label = (
-                payload.get("zone_name") or payload.get("name") or payload.get("label")
-            )
-            if zone_id:
+    # (2026-10-05) Contrat d'onboarding : l'identité géographique est une des 17 RÉGIONS
+    # (`domain/burkina_regions.py`, source unique). La valeur stockée est TOUJOURS le nom
+    # canonique, quelle que soit la saisie (« Ouaga », « kadiogo », chef-lieu...). Le lien
+    # vers `governance.zones` (opérationnel) se fait ensuite par le nom canonique, puis par le
+    # chef-lieu (anciennes lignes racines nommées d'après la ville) ; sans ligne, `zone_id`
+    # reste NULL mais la région est bien enregistrée — jamais un blocage.
+    region_hit = resolve_region(declared_location)
+    if region_hit.status == "RESOLVED" and region_hit.region is not None:
+        region = region_hit.region
+        for candidate in (region.name, region.capital):
+            found = await _lookup_root_zone(candidate, mcp_runtime)
+            if found and resolve_region(found[1]).region == region:
                 return ZoneResolution(
-                    status="COVERED", zone_id=str(zone_id), zone_name=str(zone_label or declared_location)
+                    status="COVERED", zone_id=found[0], zone_name=region.name, declared=region.name
                 )
-    except Exception as exc:
-        logger.error(
-            "[_resolve_zone] Exception (région) pour '%s': %s",
-            declared_location,
-            exc,
-            exc_info=True,
+        return ZoneResolution(status="COVERED", zone_name=region.name, declared=region.name)
+
+    if region_hit.status == "AMBIGUOUS":
+        return _unresolved_region(declared_location, region_hit, allow_clarify)
+
+    # Localité inconnue du référentiel des 17 régions : repli historique sur la DB (zone
+    # racine, puis hiérarchie) — jamais deviné, uniquement si la hiérarchie existe déjà.
+    found = await _lookup_root_zone(declared_location, mcp_runtime)
+    if found:
+        canon = resolve_region(found[1]).region
+        return ZoneResolution(
+            status="COVERED", zone_id=found[0], zone_name=canon.name if canon else found[1],
+            declared=canon.name if canon else None,
         )
 
     try:
@@ -669,8 +701,10 @@ async def _resolve_zone(declared_location: str, mcp_runtime: Any) -> ZoneResolut
         if isinstance(payload, dict) and payload.get("status") != "error":
             root = payload.get("root")
             if isinstance(root, dict) and root.get("id"):
+                canon = resolve_region(root.get("name")).region
                 return ZoneResolution(
-                    status="NEARBY", zone_id=str(root["id"]), zone_name=str(root.get("name") or "")
+                    status="NEARBY", zone_id=str(root["id"]),
+                    zone_name=canon.name if canon else str(root.get("name") or ""),
                 )
     except Exception as exc:
         logger.error(
@@ -680,7 +714,34 @@ async def _resolve_zone(declared_location: str, mcp_runtime: Any) -> ZoneResolut
             exc_info=True,
         )
 
-    return ZoneResolution(status="OUT_OF_COVERAGE")
+    return _unresolved_region(declared_location, region_hit, allow_clarify)
+
+
+async def _lookup_root_zone(name: str, mcp_runtime: Any) -> Optional[Tuple[str, str]]:
+    """(id, libellé) de la zone RACINE `name` (`get_zone_by_name`), ou `None`."""
+    try:
+        zone_response = await mcp_runtime.call_db("get_zone_by_name", name=name)
+        payload = _unwrap_tool_payload(zone_response)
+        if isinstance(payload, dict) and payload.get("status") != "error":
+            zone_id = payload.get("zone_id") or payload.get("id")
+            label = payload.get("zone_name") or payload.get("name") or payload.get("label")
+            if zone_id:
+                return str(zone_id), str(label or name)
+    except Exception as exc:
+        logger.error("[_resolve_zone] Exception (région) pour '%s': %s", name, exc, exc_info=True)
+    return None
+
+
+def _unresolved_region(declared: str, hit: Any, allow_clarify: bool) -> ZoneResolution:
+    """Localité non résolue en région : on REDEMANDE la région une seule fois (l'utilisateur ne
+    recommence pas l'onboarding) ; s'il ne la donne toujours pas, hors couverture sans blocage."""
+    if not allow_clarify:
+        return ZoneResolution(status="OUT_OF_COVERAGE")
+    if hit.status == "AMBIGUOUS":
+        head = "Dans quelle *région* es-tu ? 📍"
+    else:
+        head = f"Dans quelle *région* se trouve *{str(declared).strip()}* ? 📍"
+    return ZoneResolution(status="NEEDS_REGION", question=head + "\n_" + region_list_text() + "_")
 
 
 def _confirmation_component() -> Dict[str, Any]:

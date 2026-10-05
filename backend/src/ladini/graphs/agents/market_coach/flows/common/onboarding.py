@@ -73,6 +73,7 @@ async def onboarding_node(
         ),
         prompt=str(state.get("onboarding_mode") or ""),
         explain_count=int(ob_profile.get("explain_count") or 0),
+        region_clarify_asked=bool(ob_profile.get("region_clarify_asked")),
     )
 
     async def _llm_bulk(text: str, context_hint: str) -> Dict[str, Optional[str]]:
@@ -135,6 +136,7 @@ async def onboarding_node(
         "declared_location": resolved.declared_location or ob_state.declared_location,
         "coverage_status": resolved.coverage_status or ob_state.coverage_status,
         "explain_count": resolved.explain_count,
+        "region_clarify_asked": resolved.region_clarify_asked,
     }
     updates["transaction_payload"] = dict(updates["onboarding_profile"])
 
