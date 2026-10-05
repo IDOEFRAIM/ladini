@@ -679,7 +679,21 @@ class RecurringSupplyGateway(_BaseGateway):
         paused_until: Any = None,
         occurrence_date: Any = None,
         expected_version: Optional[int] = None,
+        expected_occurrence_version: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Mutation user-facing d'un besoin : la version de l'état AFFICHÉ est OBLIGATOIRE (B26). Besoin :
+        `expected_version` ; occurrence (`OCCURRENCE_SKIP|OVERRIDE`) : `expected_occurrence_version`. Un appelant qui l'oublie
+        échoue ICI (aucun appel émis) — jamais une mutation sur « l'état courant » par omission."""
+        from ladini.services.database.recurring_supply import (
+            RECURRING_OCCURRENCE_ACTIONS,
+        )
+
+        required = expected_occurrence_version if action in RECURRING_OCCURRENCE_ACTIONS else expected_version
+        if required is None:
+            raise MCPCallError(
+                tool="update_recurring_need", message="Version de l'état affiché manquante : modification refusée.",
+                error_code="BUSINESS_RULE", request_id="n/a",
+            )
         kwargs: Dict[str, Any] = {
             "phone": phone,
             "recurring_need_id": recurring_need_id,
@@ -692,8 +706,11 @@ class RecurringSupplyGateway(_BaseGateway):
             "occurrence_date": occurrence_date,
         }
         if expected_version is not None:
-            # B25 : version du besoin vue par l'acheteur ; le service refuse (`VERSION_CONFLICT`) une intention périmée.
+            # Version du BESOIN vue par l'acheteur ; le service refuse (`VERSION_CONFLICT`) une intention périmée.
             kwargs["expected_version"] = int(expected_version)
+        if expected_occurrence_version is not None:
+            # Version de l'OCCURRENCE vue par l'acheteur (jamais confondue avec celle du besoin).
+            kwargs["expected_occurrence_version"] = int(expected_occurrence_version)
         return await self._call("update_recurring_need", **kwargs)
 
     async def list_my_recurring_needs(self, phone: str) -> Dict[str, Any]:

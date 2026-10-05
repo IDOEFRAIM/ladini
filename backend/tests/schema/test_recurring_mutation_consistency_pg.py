@@ -89,8 +89,22 @@ def _sql(w, query, params=()):
     return rows
 
 
+def _occurrence_version(w, need, day):
+    rows_ = _sql(w, "select version from marketplace.recurring_need_occurrences where recurring_need_id = %s and "
+                    "occurrence_date = %s", (need, datetime.combine(day, datetime.min.time())))
+    return int(rows_[0][0]) if rows_ else 0  # aucune occurrence : le service refuse avant toute comparaison
+
+
 def upd(w, action, need=None, **kw):
-    return _run(w, lambda svc, s: svc.update_recurring_need(phone="+226", recurring_need_id=need or w.need, action=action, **kw))
+    """Appelant qui vient de LIRE l'état (B26 : la version de l'état observé est obligatoire — jamais d'omission implicite).
+    `expected_version` / `expected_occurrence_version` explicites priment ; `unversioned=True` simule un appelant fautif."""
+    nid = need or w.need
+    if not kw.pop("unversioned", False):
+        if action in rs.RECURRING_OCCURRENCE_ACTIONS:
+            kw.setdefault("expected_occurrence_version", _occurrence_version(w, nid, kw["occurrence_date"]))
+        else:
+            kw.setdefault("expected_version", version(w, nid))
+    return _run(w, lambda svc, s: svc.update_recurring_need(phone="+226", recurring_need_id=nid, action=action, **kw))
 
 
 def cron(w):
@@ -303,9 +317,12 @@ def test_matching_expected_version_applies_and_returns_the_next_version(w):
     assert res["outcome"] == "APPLIED" and res["need_version"] == version(w)
 
 
-def test_without_expected_version_the_mutation_is_applied_on_the_locked_current_state(w):
-    upd(w, "PERMANENT_QUANTITY", quantity=3)
-    assert upd(w, "PERMANENT_QUANTITY", quantity=5)["outcome"] == "APPLIED"  # compat. descendante documentée
+def test_without_expected_version_the_mutation_is_refused_never_applied_on_the_current_state(w):
+    """B26 : plus de « `None` = tout passe » — l'omission est refusée (B25 l'appliquait sur l'état verrouillé courant)."""
+    before = need_row(w)
+    with pytest.raises(BusinessRuleException) as exc:
+        upd(w, "PERMANENT_QUANTITY", quantity=3, unversioned=True)
+    assert getattr(exc.value, "reason", None) == "version_required" and need_row(w) == before
 
 
 async def _two_sessions(w, make_a, make_b):
@@ -348,9 +365,11 @@ def test_concurrent_quantity_and_frequency_on_the_same_version_is_a_strict_confl
     assert (q, rec) in ((3, "DAILY"), (2, "WEEKLY_DAYS"))  # jamais un mélange partiel
 
 
-def test_concurrent_updates_without_version_are_serialized_never_interleaved(w):
-    a, b = asyncio.run(_two_sessions(w, _call(w, "PERMANENT_QUANTITY", quantity=3), _call(w, "PERMANENT_QUANTITY", quantity=5)))
-    assert a["outcome"] == "APPLIED" and b["outcome"] == "APPLIED"
+def test_concurrent_updates_on_the_same_observed_version_are_serialized_never_interleaved(w):
+    v = version(w)
+    a, b = asyncio.run(_two_sessions(w, _call(w, "PERMANENT_QUANTITY", quantity=3, expected_version=v),
+                                     _call(w, "PERMANENT_QUANTITY", quantity=5, expected_version=v)))
+    assert sorted(r["outcome"] for r in (a, b)) == ["APPLIED", "VERSION_CONFLICT"]
     assert need_row(w)[1] in (3, 5)
 
 
@@ -589,13 +608,14 @@ async def _stale_materialization(w, mutate, *, concurrent: bool):
 @pytest.mark.parametrize("action,kw", [("CANCEL", {}), ("PAUSE", {})])
 def test_cron_holding_a_stale_active_need_creates_nothing_after_cancel_or_pause(w, action, kw):
     created = asyncio.run(_stale_materialization(
-        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action=action, **kw), concurrent=False))
+        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action=action, expected_version=version(w), **kw), concurrent=False))
     assert created == 0 and rows(w) == {}
 
 
 def test_cron_holding_a_stale_need_materializes_the_NEW_quantity_never_a_mix(w):
     created = asyncio.run(_stale_materialization(
-        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=7),
+        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=7,
+                                          expected_version=version(w)),
         concurrent=False))
     assert created > 0 and {v[1] for v in rows(w).values()} == {7.0}
 
@@ -626,13 +646,14 @@ def _materialize_all(svc):
 @pytest.mark.parametrize("action,kw", [("CANCEL", {}), ("PAUSE", {})])
 def test_materialization_blocks_on_the_need_lock_then_creates_nothing(w, action, kw):
     out = asyncio.run(_lock_race(
-        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action=action, **kw), _materialize_all))
+        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action=action, expected_version=version(w), **kw), _materialize_all))
     assert out["occurrences_created"] == 0 and rows(w) == {}
 
 
 def test_materialization_blocks_on_a_quantity_update_then_snapshots_the_new_quantity(w):
     out = asyncio.run(_lock_race(
-        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=4),
+        w, lambda svc: svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=4,
+                                          expected_version=version(w)),
         _materialize_all))
     assert out["occurrences_created"] > 0 and {v[1] for v in rows(w).values()} == {4.0}
 
@@ -640,6 +661,7 @@ def test_materialization_blocks_on_a_quantity_update_then_snapshots_the_new_quan
 def test_matching_in_flight_then_quantity_update_leaves_no_stale_proposal(w):
     """Le matching a verrouillé l'occurrence et posé une proposition (non commitée) ; la mutation attend, puis invalide."""
     o = occ(w, 3)
+    v0 = version(w)  # état observé AVANT la course (le matching ne touche pas la version du besoin)
 
     async def go():
         engine_a, engine_b = (create_async_engine(_async_dsn(w.dsn)) for _ in range(2))
@@ -652,7 +674,7 @@ def test_matching_in_flight_then_quantity_update_leaves_no_stale_proposal(w):
                 await a.execute(text("update marketplace.recurring_need_occurrences set status='MATCHED', quantity_matched=2, "
                                      "version=version+1 where id = :i"), {"i": o})
                 task = asyncio.create_task(_Svc(b, w.user, w.profile).update_recurring_need(
-                    phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=3))
+                    phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=3, expected_version=v0))
                 await asyncio.sleep(0.5)
                 assert not task.done()
                 await a.commit()
@@ -671,6 +693,7 @@ def test_accept_in_flight_then_quantity_update_leaves_the_order_and_the_accepted
     """L'acceptation verrouille l'occurrence d'abord : la mutation permanente attend, voit ACCEPTED, ne touche rien."""
     o = occ(w, 3, "MATCHED", matched=2)
     alloc(w, o, 2)
+    v0 = version(w)
 
     async def go():
         engine_a, engine_b = (create_async_engine(_async_dsn(w.dsn)) for _ in range(2))
@@ -678,7 +701,7 @@ def test_accept_in_flight_then_quantity_update_leaves_the_order_and_the_accepted
             async with AsyncSession(engine_a) as a, AsyncSession(engine_b) as b:
                 await a.execute(text("select id from marketplace.recurring_need_occurrences where id = :i for update"), {"i": o})
                 task = asyncio.create_task(_Svc(b, w.user, w.profile).update_recurring_need(
-                    phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=3))
+                    phone="+226", recurring_need_id=w.need, action="PERMANENT_QUANTITY", quantity=3, expected_version=v0))
                 await asyncio.sleep(0.5)
                 await a.execute(text("update marketplace.recurring_need_occurrences set status='ACCEPTED' where id=:i"), {"i": o})
                 await a.execute(text("update marketplace.need_allocations set status='CONVERTED' where occurrence_id=:i"), {"i": o})
@@ -700,11 +723,13 @@ def test_another_buyer_cannot_mutate_the_need_and_learns_nothing(w):
 
     async def fn(svc, s):
         svc._user_profile = intruder
-        return await svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action="CANCEL")
+        # la bonne version ET une mauvaise : même réponse « introuvable » (la propriété est vérifiée AVANT la version)
+        return await svc.update_recurring_need(phone="+226", recurring_need_id=w.need, action="CANCEL", expected_version=ver)
 
-    with pytest.raises(BusinessRuleException) as exc:
-        _run(w, fn)
-    assert "introuvable" in str(exc.value).lower() and need_row(w)[0] == "ACTIVE"
+    for ver in (version(w), 12345):
+        with pytest.raises(BusinessRuleException) as exc:
+            _run(w, fn)
+        assert "introuvable" in str(exc.value).lower() and need_row(w)[0] == "ACTIVE"
 
 
 def test_each_effective_mutation_leaves_one_audit_record_without_pii(w, caplog):
@@ -780,8 +805,10 @@ def test_admin_with_buyer_capability_mutates_with_versioning_through_the_real_se
                 phone=phone, recurring_need_id=need_id, action="PERMANENT_QUANTITY", quantity=4, expected_version=v)
             stale = await svc.update_recurring_need(
                 phone=phone, recurring_need_id=need_id, action="PERMANENT_QUANTITY", quantity=5, expected_version=v)
-            cancelled = await svc.update_recurring_need(phone=phone, recurring_need_id=need_id, action="CANCEL")
-            again = await svc.update_recurring_need(phone=phone, recurring_need_id=need_id, action="CANCEL")
+            cancelled = await svc.update_recurring_need(
+                phone=phone, recurring_need_id=need_id, action="CANCEL", expected_version=ok["need_version"])
+            again = await svc.update_recurring_need(
+                phone=phone, recurring_need_id=need_id, action="CANCEL", expected_version=cancelled["need_version"])
             return ok, stale, cancelled, again
         finally:
             await database.close_db()

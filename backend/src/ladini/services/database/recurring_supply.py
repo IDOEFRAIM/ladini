@@ -142,6 +142,10 @@ def recurring_need_version(need: Any) -> int:
     return recurring_need_version_of(need.updated_at)
 
 
+#: Mutations d'UNE livraison : la version attendue est celle de l'OCCURRENCE affichée (`expected_occurrence_version`) ;
+#: toutes les autres actions portent sur le besoin (`expected_version`).
+RECURRING_OCCURRENCE_ACTIONS = ("OCCURRENCE_SKIP", "OCCURRENCE_OVERRIDE")
+
 RECURRING_NEED_ACTIONS = (
     "PERMANENT_QUANTITY",
     "PERMANENT_FREQUENCY",
@@ -1922,15 +1926,30 @@ class RecurringSupplyMixin(BaseMixin):
         paused_until: Optional[Any] = None,
         occurrence_date: Optional[Any] = None,
         expected_version: Optional[int] = None,
+        expected_occurrence_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Mutation d'un besoin récurrent — SEULE autorité de cohérence (contrat : docs/RECURRING_MUTATION_CONSISTENCY_
-        CONTRACT.md). Le besoin est verrouillé (`FOR UPDATE`) pour toute la transaction : deux mutations, ou une mutation et
-        une matérialisation, se sérialisent ; tout se décide sur l'état COMMITÉ le plus récent. `expected_version` (jeton lu
-        via `list_my_recurring_needs`/`get_recurring_need_detail`) refuse une intention bâtie sur un état périmé :
-        `{"status": "conflict", "outcome": "VERSION_CONFLICT", "current": {…}}`, aucune écriture. Résultat d'une mutation
-        réussie : `outcome` = `APPLIED` ou `ALREADY_APPLIED` (rejeu idempotent : ni écriture, ni version, ni audit)."""
+        CONTRACT.md, « Version Contract »). Le besoin est verrouillé (`FOR UPDATE`) pour toute la transaction : deux
+        mutations, ou une mutation et une matérialisation, se sérialisent ; tout se décide sur l'état COMMITÉ le plus récent.
+
+        La version de l'état OBSERVÉ est OBLIGATOIRE (B26) — aucun « `None` = tout passe » : une mutation du besoin
+        (`PERMANENT_QUANTITY|PERMANENT_FREQUENCY|PAUSE|RESUME|CANCEL`) exige `expected_version` (jeton du besoin lu via
+        `list_my_recurring_needs`/`get_recurring_need_detail`) ; une mutation d'occurrence (`OCCURRENCE_SKIP|OVERRIDE`) exige
+        `expected_occurrence_version` (version de l'occurrence affichée). Sans version : `BusinessRuleException(reason=
+        "version_required")`, rien n'est lu ni écrit. Une version périmée : `{"status": "conflict", "outcome":
+        "VERSION_CONFLICT", "current": {…}}`, aucune écriture, aucun effet de bord. Résultat d'une mutation réussie :
+        `outcome` = `APPLIED` ou `ALREADY_APPLIED` (rejeu idempotent : ni écriture, ni version, ni audit)."""
         if action not in RECURRING_NEED_ACTIONS:
             raise BusinessRuleException(f"Action inconnue : {action!r}")
+        occurrence_scope = action in RECURRING_OCCURRENCE_ACTIONS
+        if (expected_occurrence_version if occurrence_scope else expected_version) is None:
+            logger.warning(
+                "RECURRING_VERSION_CHECK | action=%s | scope=%s | expected_version_present=False | outcome=VERSION_REQUIRED",
+                action, "OCCURRENCE" if occurrence_scope else "NEED",
+            )
+            raise BusinessRuleException(
+                "Version de l'état affiché manquante : la modification est refusée.", reason="version_required"
+            )
 
         current_session = self.session
         if not current_session:
@@ -1949,17 +1968,17 @@ class RecurringSupplyMixin(BaseMixin):
             raise BusinessRuleException("Besoin introuvable.")
 
         if expected_version is not None and int(expected_version) != recurring_need_version(need):
-            logger.info(
-                "recurring_need.version_conflict | recurring_need_id=%s | action=%s | expected=%s | current=%s",
-                need.id, action, expected_version, recurring_need_version(need),
-            )
+            self._log_version_check(action, "NEED", match=False)
             return {
                 "status": "conflict",
                 "outcome": "VERSION_CONFLICT",
+                "scope": "NEED",
                 "recurring_need_id": str(need.id),
                 "expected_version": int(expected_version),
                 "current": self._need_snapshot(need),
             }
+        if not occurrence_scope:
+            self._log_version_check(action, "NEED", match=True)
         if str(need.status) == "CANCELLED" and action != "CANCEL":
             raise BusinessRuleException("Ce besoin est arrêté.", reason="need_not_active")
 
@@ -1976,13 +1995,17 @@ class RecurringSupplyMixin(BaseMixin):
         if action == "CANCEL":
             return await self._apply_cancel(need)
         if action == "OCCURRENCE_OVERRIDE":
-            return await self._apply_occurrence_override(need, occurrence_date=_parse_date(occurrence_date), quantity=quantity)
+            return await self._apply_occurrence_override(
+                need, occurrence_date=_parse_date(occurrence_date), quantity=quantity,
+                expected_occurrence_version=int(expected_occurrence_version),  # type: ignore[arg-type]
+            )
         if action == "OCCURRENCE_SKIP":
             return await self._apply_occurrence_skip(
                 need,
                 occurrence_date=_parse_date(occurrence_date),
                 actor_id=_user_obj.id,
                 zone_id=getattr(_user_obj, "zone_id", None),
+                expected_occurrence_version=int(expected_occurrence_version),  # type: ignore[arg-type]
             )
         raise AssertionError(action)  # pragma: no cover — filtré par RECURRING_NEED_ACTIONS ci-dessus
 
@@ -1999,6 +2022,35 @@ class RecurringSupplyMixin(BaseMixin):
             "recurrence_type": need.recurrence_type,
             "weekly_days": list(need.weekly_days) if need.weekly_days else None,
             "paused_until": need.paused_until.date().isoformat() if need.paused_until else None,
+        }
+
+    @staticmethod
+    def _log_version_check(action: str, scope: str, *, match: bool) -> None:
+        """Observabilité du contrat de version (B26) : jamais le jeton brut, jamais d'identifiant d'acheteur."""
+        logger.info(
+            "RECURRING_VERSION_CHECK | action=%s | scope=%s | expected_version_present=True | version_match=%s | outcome=%s",
+            action, scope, match, "OK" if match else "VERSION_CONFLICT",
+        )
+
+    def _occurrence_conflict(
+        self, need: RecurringNeed, occ: RecurringNeedOccurrence, action: str, expected: int
+    ) -> Dict[str, Any]:
+        """Conflit de version d'OCCURRENCE : même forme que le conflit du besoin, plus l'état courant de la livraison."""
+        self._log_version_check(action, "OCCURRENCE", match=False)
+        return {
+            "status": "conflict",
+            "outcome": "VERSION_CONFLICT",
+            "scope": "OCCURRENCE",
+            "recurring_need_id": str(need.id),
+            "expected_version": int(expected),
+            "current": {
+                **self._need_snapshot(need),
+                "occurrence_id": str(occ.id),
+                "occurrence_version": int(occ.version),
+                "occurrence_status": occ.status,
+                "occurrence_date": occ.occurrence_date.date().isoformat(),
+                "requested_quantity": float(occ.requested_quantity),
+            },
         }
 
     def _mutation_result(self, need: RecurringNeed, outcome: str, **extra: Any) -> Dict[str, Any]:
@@ -2208,13 +2260,17 @@ class RecurringSupplyMixin(BaseMixin):
         return self._mutation_result(need, "APPLIED", occurrences_cancelled=len(ids))
 
     async def _apply_occurrence_override(
-        self, need: RecurringNeed, *, occurrence_date: Optional[date], quantity: Optional[float]
+        self, need: RecurringNeed, *, occurrence_date: Optional[date], quantity: Optional[float],
+        expected_occurrence_version: int,
     ) -> Dict[str, Any]:
         if occurrence_date is None or quantity is None:
             raise BusinessRuleException("Date et quantité requises.")
         if not 0 < float(quantity) < float("inf"):
             raise BusinessRuleException("Quantité invalide : un nombre supérieur à 0 est requis.", reason="invalid_quantity")
         occ = await self._get_mutable_occurrence(need, occurrence_date)
+        if int(occ.version) != expected_occurrence_version:  # occurrence verrouillée : le refus précède tout effet de bord
+            return self._occurrence_conflict(need, occ, "OCCURRENCE_OVERRIDE", expected_occurrence_version)
+        self._log_version_check("OCCURRENCE_OVERRIDE", "OCCURRENCE", match=True)
         if float(occ.requested_quantity) == float(quantity):
             return self._mutation_result(need, "ALREADY_APPLIED", occurrence_id=str(occ.id), requested_quantity=float(quantity))
         old = float(occ.requested_quantity)
@@ -2233,10 +2289,14 @@ class RecurringSupplyMixin(BaseMixin):
         occurrence_date: Optional[date],
         actor_id: Any = None,
         zone_id: Any = None,
+        expected_occurrence_version: int,
     ) -> Dict[str, Any]:
         if occurrence_date is None:
             raise BusinessRuleException("Date requise.")
         occ = await self._get_mutable_occurrence(need, occurrence_date, allow_skipped=True)
+        if int(occ.version) != expected_occurrence_version:  # un rejeu après succès est aussi périmé (version + 1) : conflit
+            return self._occurrence_conflict(need, occ, "OCCURRENCE_SKIP", expected_occurrence_version)
+        self._log_version_check("OCCURRENCE_SKIP", "OCCURRENCE", match=True)
         if occ.status == "SKIPPED":
             return self._mutation_result(need, "ALREADY_APPLIED", occurrence_id=str(occ.id))
         quantity, unit = float(occ.requested_quantity), occ.unit
@@ -2354,6 +2414,7 @@ def _parse_date(value: Optional[Any]) -> Optional[date]:
 __all__ = [
     "RecurringSupplyMixin",
     "RECURRING_NEED_ACTIONS",
+    "RECURRING_OCCURRENCE_ACTIONS",
     "MATCH_RESPONSE_ACTIONS",
     "recurring_need_version",
     "recurring_need_version_of",

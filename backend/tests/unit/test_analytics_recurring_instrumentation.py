@@ -128,9 +128,9 @@ class TestSkip:
         svc._reset_uncommitted_occurrences = AsyncMock(side_effect=_persist_skip)
         need = _need()
         need.updated_at = datetime(2026, 9, 15, 12, 0, 0)
-        first = run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17)))
+        first = run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17), expected_occurrence_version=1))
         assert occ.status == "SKIPPED" and first["outcome"] == "APPLIED"
-        replay = run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17)))
+        replay = run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17), expected_occurrence_version=1))
         assert replay["outcome"] == "ALREADY_APPLIED"  # rejeu : aucun 2e événement
         assert list(outbox) == [f"RECURRING_OCCURRENCE_SKIPPED:{occ.id}"]
 
@@ -140,7 +140,7 @@ class TestSkip:
         svc = _svc(SimpleNamespace(flush=AsyncMock()))
         svc._get_mutable_occurrence = AsyncMock(side_effect=BusinessRuleException("non modifiable"))
         with pytest.raises(BusinessRuleException):
-            run(svc._apply_occurrence_skip(_need(), occurrence_date=date(2026, 9, 17)))
+            run(svc._apply_occurrence_skip(_need(), occurrence_date=date(2026, 9, 17), expected_occurrence_version=1))
         assert outbox == {}
 
 

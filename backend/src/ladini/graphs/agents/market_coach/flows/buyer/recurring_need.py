@@ -947,6 +947,54 @@ def _update_request(state: Dict[str, Any]) -> Dict[str, Any]:
     return {k: said[k] for k in _UPDATE_FIELDS if slot_has_value(said.get(k))}
 
 
+# ── B26 : contrat de version (intention périmée) ───────────────────────────────────────────────────────────────────
+# La version qui protège une mutation est celle de l'état PRÉSENTÉ à l'acheteur (écran de détail, liste, confirmation),
+# jamais une relecture juste avant d'écrire. Elle vit dans `working_memory.recurring_need_menu` — `target.need_version` (+
+# `occurrence_*`) pour un écran de détail, `versions` pour la liste, `commands[k].expected_version` pour un ordre à confirmer —
+# donc indépendamment du TTL du menu (validité conversationnelle) : une réponse tardive reste comparée à l'écran vu.
+# Sans écran présenté (demande « à froid »), la version lue dans CE tour est transmise (`same_turn_read`) : la fenêtre
+# lecture -> écriture reste couverte par le compare-and-swap du service, mais il n'existe alors aucune intention périmée.
+def _presented_need_version(state: Dict[str, Any], need_id: str) -> Optional[int]:
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    if not isinstance(menu, dict):
+        return None
+    target = menu.get("target")
+    if isinstance(target, dict) and str(target.get("id")) == need_id and target.get("need_version") is not None:
+        return int(target["need_version"])
+    versions = menu.get("versions")
+    if isinstance(versions, dict) and versions.get(need_id) is not None:
+        return int(versions[need_id])
+    return None
+
+
+def _presented_occurrence(state: Dict[str, Any], need_id: str) -> Optional[Dict[str, Any]]:
+    """Livraison modifiable (OPEN/MATCHED) montrée par l'écran de détail de CE besoin : `{date, version}`, sinon `None`."""
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    target = menu.get("target") if isinstance(menu, dict) else None
+    if (isinstance(target, dict) and str(target.get("id")) == need_id and target.get("occurrence_version") is not None
+            and target.get("occurrence_date") and target.get("occurrence_status") in ("OPEN", "MATCHED")):
+        return {"date": str(target["occurrence_date"])[:10], "version": int(target["occurrence_version"])}
+    return None
+
+
+def _version_snapshot_patch(state: Dict[str, Any], need_id: str, need_version: Any) -> Dict[str, Any]:
+    """Après une mutation RÉUSSIE de ce besoin, l'écran/la liste affichés sont périmés : le message de succès montre le nouvel
+    état, donc la version présentée devient celle-là (sinon la demande suivante, légitime, serait refusée). Les versions
+    d'occurrence présentées sont invalidées (la mutation les a réécrites). Rien n'est créé si aucun écran n'était présenté."""
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    if not isinstance(menu, dict) or need_version is None:
+        return {}
+    patch: Dict[str, Any] = {}
+    target = menu.get("target")
+    if isinstance(target, dict) and str(target.get("id")) == need_id:
+        patch["target"] = {"need_version": int(need_version), "occurrence_id": None, "occurrence_date": None,
+                           "occurrence_status": None, "occurrence_version": None}
+    versions = menu.get("versions")
+    if isinstance(versions, dict) and need_id in versions:
+        patch["versions"] = {need_id: int(need_version)}
+    return {"working_memory": {"recurring_need_menu": patch}} if patch else {}
+
+
 def _arbitration_log(
     state: Dict[str, Any], *, intent: str, relation: str, reason: str, resolution: str, route: str = "recurring_flow",
     target_type: str = "RECURRING_NEED",
@@ -1037,8 +1085,10 @@ async def _update_from_message(state: Dict[str, Any], mc_runtime: MarketRuntime)
         patch = await _need_choice_menu(state, mc_runtime, picked, question)
         patch["relation_to_context"] = "AMBIGUOUS"
         return patch
-    need = picked
-    need_id, product_label = str(need["recurring_need_id"]), str(need.get("product") or "")
+    need_id, product_label = str(picked["recurring_need_id"]), str(picked.get("product") or "")
+    presented = _presented_need_version(state, need_id)
+    # B26 : la version est celle de l'écran PRÉSENTÉ ; la liste lue ce tour ne sert qu'à résoudre la cible (et de repli à froid).
+    need = {**picked, "need_version": presented if presented is not None else picked.get("need_version")}
     resolution = {"context": "context", "name": "by_name", "single": "single"}[kind]
 
     action = request.get("update_action")
@@ -1053,7 +1103,7 @@ async def _update_from_message(state: Dict[str, Any], mc_runtime: MarketRuntime)
 
     _arbitration_log(state, intent=intent, relation="CORRECTION", reason="contextual_correction", resolution=resolution)
     result: Dict[str, Any] = {}
-    expected_version = need.get("need_version")  # version lue avec la liste : une intention périmée est refusée (B25)
+    expected_version = need.get("need_version")  # B26 : version de l'écran présenté (repli : lue ce tour, `same_turn_read`)
     for service_action, kwargs in steps:
         try:
             result = await gw.update_recurring_need(
@@ -1062,11 +1112,14 @@ async def _update_from_message(state: Dict[str, Any], mc_runtime: MarketRuntime)
             logger.warning("recurring_need.update_failed | need=%s | action=%s | %s", need_id, service_action, exc)
             return {"final_response": "Je n'ai pas pu appliquer ce changement.", "status": "COMPLETED"}
         if isinstance(result, dict) and result.get("status") == "conflict":
-            return {"final_response": _version_conflict_reply(product_label, result), "status": "COMPLETED",
-                    "relation_to_context": "CORRECTION"}
-        expected_version = result.get("need_version") if isinstance(result, dict) else None
+            return await _conflict_response(state, mc_runtime, need_id, product_label, result, service_action,
+                                            caller_path="contextual_correction", source="presented" if presented is not None else "same_turn_read")
+        if not isinstance(result, dict) or result.get("status") != "success":  # refus du service : jamais « C'est noté »
+            logger.warning("recurring_need.update_refused | need=%s | action=%s", need_id, service_action)
+            return {"final_response": "Je n'ai pas pu appliquer ce changement : rien n'a été modifié.", "status": "COMPLETED"}
+        expected_version = result.get("need_version")  # chaîne de NOTRE propre mutation
     return {"final_response": _render_update_summary(need, steps), "status": "COMPLETED", "result": result,
-            "relation_to_context": "CORRECTION"}
+            "relation_to_context": "CORRECTION", **_version_snapshot_patch(state, need_id, expected_version)}
 
 
 def _command_menu(
@@ -1099,20 +1152,28 @@ def _command_menu(
             "title": f"Confirmation pour le besoin récurrent « {product} »", "labels": labels, "commands": commands,
             "target": {"type": "RECURRING_NEED", "id": str(need["recurring_need_id"]), "product": product,
                        "quantity": _fmt_qty(need.get("quantity")), "unit": str(need.get("unit") or ""),
-                       "frequency": _frequency_label(need)}}},
+                       "frequency": _frequency_label(need), "need_version": need.get("need_version")}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
 
 
-async def _next_open_occurrence(gw: RecurringSupplyGateway, phone: Any, need_id: str) -> Optional[str]:
-    """Date de la prochaine livraison MODIFIABLE (`OPEN`) du besoin, lue du service (jamais déduite) ; `None` s'il n'y en a pas."""
+async def _next_open_occurrence(
+    state: Dict[str, Any], gw: RecurringSupplyGateway, phone: Any, need_id: str
+) -> Optional[Dict[str, Any]]:
+    """Prochaine livraison MODIFIABLE (`OPEN`/`MATCHED`) du besoin : `{date, version}` ; `None` s'il n'y en a pas. B26 : la
+    livraison montrée par l'écran de détail (date ET version) prime ; sans écran, elle est lue du service ce tour."""
+    shown = _presented_occurrence(state, need_id)
+    if shown is not None:
+        return shown
     try:
         await gw.ensure_next_recurring_occurrence(phone=str(phone), recurring_need_id=need_id)
         detail = await gw.get_recurring_need_detail(phone=str(phone), recurring_need_id=need_id)
     except MCPCallError:
         return None
     if isinstance(detail, dict) and detail.get("status") == "success" and detail.get("occurrence_status") in ("OPEN", "MATCHED"):
-        return str(detail.get("occurrence_date") or "")[:10] or None
+        date = str(detail.get("occurrence_date") or "")[:10]
+        if date and detail.get("occurrence_version") is not None:
+            return {"date": date, "version": int(detail["occurrence_version"])}
     return None
 
 
@@ -1126,18 +1187,22 @@ async def _propose_command(
     réponse fermée. « annuler » est ambigu (ignorer la prochaine ? tout arrêter ?) : le menu propose les deux."""
     need_id, product = str(need["recurring_need_id"]), str(need.get("product") or "")
     phone = state.get("user_phone")
-    base: Dict[str, Any] = {"recurring_need_id": need_id, "expected_version": need.get("need_version"), "product": product}
+    # B26 : l'ordre est un SNAPSHOT bâti sur l'état présenté. Besoin (`expected_version`) et occurrence
+    # (`expected_occurrence_version`) ne sont jamais confondus : un ordre de livraison ne demande pas la version du besoin.
+    base: Dict[str, Any] = {"recurring_need_id": need_id, "product": product}
+    need_base: Dict[str, Any] = {**base, "expected_version": need.get("need_version")}
 
     def log(reason: str) -> None:
         _arbitration_log(state, intent="UPDATE_RECURRING_NEED", relation="AMBIGUOUS", reason=reason, resolution=resolution)
 
-    stop = {**base, "action": "CANCEL", "summary": f"le besoin récurrent de {product} est arrêté"}
+    stop = {**need_base, "action": "CANCEL", "summary": f"le besoin récurrent de {product} est arrêté"}
     if action == "CANCEL":
         log("destructive_ambiguity")
-        date = await _next_open_occurrence(gw, phone, need_id)
+        nxt = await _next_open_occurrence(state, gw, phone, need_id)
         entries: List[tuple[str, str, Optional[Dict[str, Any]]]] = []
-        if date:
-            skip = {**base, "action": "OCCURRENCE_SKIP", "occurrence_date": date,
+        if nxt:
+            date = nxt["date"]
+            skip = {**base, "action": "OCCURRENCE_SKIP", "occurrence_date": date, "expected_occurrence_version": nxt["version"],
                     "summary": f"la livraison de {product} du {_fmt_date_fr(date)} est ignorée (le besoin continue)"}
             entries.append((f"Ignorer seulement la prochaine livraison ({_fmt_date_fr(date)}) — le besoin continue", "EXEC:<k>", skip))
         entries.append(("Arrêter complètement le besoin récurrent", "ASK:<k>", stop))
@@ -1147,7 +1212,7 @@ async def _propose_command(
     keep: tuple[str, str, Optional[Dict[str, Any]]] = ("Non, ne rien changer", f"VIEW:{need_id}", None)
     if action == "PAUSE":
         log("confirmation_required")
-        cmd = {**base, "action": "PAUSE", "summary": f"le besoin de {product} est suspendu (aucune livraison jusqu'à reprise)"}
+        cmd = {**need_base, "action": "PAUSE", "summary": f"le besoin de {product} est suspendu (aucune livraison jusqu'à reprise)"}
         return _command_menu(need, f"Suspendre votre besoin de {product} ? Aucune livraison ne sera planifiée jusqu'à la reprise.",
                              [("Oui, suspendre", "EXEC:<k>", cmd), keep])
     if action == "RESUME":
@@ -1155,19 +1220,20 @@ async def _propose_command(
             return {"final_response": f"Votre besoin de {product} n'est pas suspendu : rien à reprendre.",
                     "response_strategy": "CLARIFICATION", "status": "COMPLETED", "relation_to_context": "CORRECTION"}
         log("confirmation_required")
-        cmd = {**base, "action": "RESUME", "summary": f"le besoin de {product} est repris"}
+        cmd = {**need_base, "action": "RESUME", "summary": f"le besoin de {product} est repris"}
         return _command_menu(need, f"Reprendre votre besoin de {product} ?", [("Oui, reprendre", "EXEC:<k>", cmd), keep])
 
     # SKIP_OCCURRENCE / OVERRIDE_OCCURRENCE : une livraison précise (la prochaine modifiable), jamais le besoin.
-    date = await _next_open_occurrence(gw, phone, need_id)
-    if not date:
+    nxt = await _next_open_occurrence(state, gw, phone, need_id)
+    if not nxt:
         return {"final_response": f"Je ne trouve pas de prochaine livraison modifiable pour votre besoin de {product} — "
                                   "rien n'a été modifié.",
                 "response_strategy": "CLARIFICATION", "status": "COMPLETED", "relation_to_context": "AMBIGUOUS"}
+    date, occurrence_version = nxt["date"], nxt["version"]
     when = _fmt_date_fr(date)
     if action == "SKIP_OCCURRENCE":
         log("confirmation_required")
-        cmd = {**base, "action": "OCCURRENCE_SKIP", "occurrence_date": date,
+        cmd = {**base, "action": "OCCURRENCE_SKIP", "occurrence_date": date, "expected_occurrence_version": occurrence_version,
                "summary": f"la livraison de {product} du {when} est ignorée (le besoin continue)"}
         return _command_menu(need, f"Ignorer seulement la livraison de {product} du {when} ? Le besoin continue ensuite.",
                              [("Oui, ignorer cette livraison", "EXEC:<k>", cmd), keep])
@@ -1184,6 +1250,7 @@ async def _propose_command(
                 "current_goal": "GET_MY_NEEDS", **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS")}
     log("confirmation_required")
     cmd = {**base, "action": "OCCURRENCE_OVERRIDE", "occurrence_date": date, "quantity": value,
+           "expected_occurrence_version": occurrence_version,
            "summary": f"la livraison de {product} du {when} passe à {_fmt_qty(value)} (le besoin ne change pas)"}
     return _command_menu(need, f"Changer seulement la livraison de {product} du {when} à {_fmt_qty(value)} ? "
                                "Le besoin récurrent reste inchangé.", [("Oui, changer cette livraison", "EXEC:<k>", cmd), keep])
@@ -1193,25 +1260,46 @@ def _version_conflict_reply(product: str, conflict: Dict[str, Any]) -> str:
     """Conflit de version (B25) : le besoin a changé depuis ce que l'acheteur a vu. Message métier — jamais d'erreur technique,
     jamais d'application silencieuse : l'état courant est montré et la demande est à REFORMULER sur cette version."""
     current = conflict.get("current") or {}
+    if conflict.get("scope") == "OCCURRENCE":
+        return (f"La livraison de {product} a été modifiée entre-temps. Rien n'a été changé : "
+                "redites votre demande pour l'appliquer sur la livraison à jour.")
     state = ""
     if current:
         state = f" Il est maintenant à {_fmt_qty(current.get('quantity'))} {current.get('unit') or ''} {_frequency_label(current)}".rstrip() + "."
     return (f"Votre besoin de {product} a été modifié entre-temps.{state} Rien n'a été changé : "
-            "redites votre demande pour l'appliquer sur cette version.")
+            "redites votre demande pour l'appliquer à l'état actuel.")
+
+
+async def _conflict_response(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, need_id: str, product: str, conflict: Dict[str, Any], action: str,
+    *, caller_path: str, source: str,
+) -> Dict[str, Any]:
+    """Conflit de version : RIEN n'a été écrit. Le message dit ce qui a changé, puis l'écran du besoin est RÉAFFICHÉ à l'état
+    courant (ce qui remplace la version présentée) : l'acheteur décide de nouveau. Jamais de rejeu automatique de la demande sur la
+    nouvelle version — une intention périmée peut ne plus avoir de sens."""
+    logger.info("RECURRING_VERSION_CONFLICT | caller_path=%s | action=%s | scope=%s | version_source=%s",
+                caller_path, action, conflict.get("scope") or "NEED", source)
+    notice = _version_conflict_reply(product, conflict)
+    screen = await _show_need_detail(state, mc_runtime, need_id, notice=f"{notice}\n\n")
+    if screen.get("status") == "WAITING_INPUT":
+        # Le texte du flow fait foi (pas le rendu générique d'interruption), le goal reste celui de l'écran affiché.
+        return {**screen, "relation_to_context": "CORRECTION", "response_strategy": "CLARIFICATION", "current_goal": "GET_MY_NEEDS"}
+    return {"final_response": notice, "status": "COMPLETED", "relation_to_context": "CORRECTION"}
 
 
 async def _execute_command(state: Dict[str, Any], mc_runtime: MarketRuntime, command: Dict[str, Any]) -> Dict[str, Any]:
     """Exécute le SNAPSHOT confirmé par une réponse fermée. Le service revalide la propriété (buyer_id) et l'état de
     l'occurrence : un besoin/une date devenus invalides sont refusés, jamais forcés."""
     gw = RecurringSupplyGateway(mc_runtime)
-    kwargs: Dict[str, Any] = {k: command[k] for k in ("occurrence_date", "quantity", "expected_version") if command.get(k) is not None}
+    kwargs: Dict[str, Any] = {k: command[k] for k in ("occurrence_date", "quantity", "expected_version", "expected_occurrence_version")
+                              if command.get(k) is not None}
     try:
         outcome = await gw.update_recurring_need(
             phone=str(state.get("user_phone")), recurring_need_id=str(command["recurring_need_id"]),
             action=str(command["action"]), **kwargs)
         if isinstance(outcome, dict) and outcome.get("status") == "conflict":
-            return {"final_response": _version_conflict_reply(str(command.get("product") or ""), outcome),
-                    "status": "COMPLETED"}
+            return await _conflict_response(state, mc_runtime, str(command["recurring_need_id"]), str(command.get("product") or ""),
+                                            outcome, str(command["action"]), caller_path="confirmed_command", source="snapshot")
         if not isinstance(outcome, dict) or outcome.get("status") != "success":
             raise MCPCallError(tool="update_recurring_need", message="refus du service", error_code="BUSINESS_RULE", request_id="n/a")
     except MCPCallError as exc:
@@ -1221,7 +1309,8 @@ async def _execute_command(state: Dict[str, Any], mc_runtime: MarketRuntime, com
     _arbitration_log(state, intent="UPDATE_RECURRING_NEED", relation="ANSWER", reason="closed_menu_answer",
                      resolution="snapshot")
     return {"final_response": f"C'est noté : {command.get('summary') or 'changement appliqué'}.", "status": "COMPLETED",
-            "relation_to_context": "ANSWER"}
+            "relation_to_context": "ANSWER",
+            **_version_snapshot_patch(state, str(command["recurring_need_id"]), outcome.get("need_version"))}
 
 
 def _plan_permanent_changes(request: Dict[str, Any]):
@@ -1318,7 +1407,8 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
             if not isinstance(command, dict) or not command.get("recurring_need_id"):
                 return await _render_needs_list(state, mc_runtime, notice="Cette confirmation n'est plus valable.\n\n")
             if kind == "ASK":  # action destructive : seconde confirmation explicite, sur le snapshot exact
-                need = {"recurring_need_id": command["recurring_need_id"], "product": (menu.get("target") or {}).get("product")}
+                need = {"recurring_need_id": command["recurring_need_id"], "product": (menu.get("target") or {}).get("product"),
+                        "need_version": command.get("expected_version")}  # B26 : la 2e confirmation garde la version de la 1re
                 return _command_menu(
                     need, f"Confirmer : arrêter complètement votre besoin de {need['product']} ? Cette action est définitive.",
                     [("Oui, arrêter définitivement", "EXEC:<k>", command), ("Non, ne rien changer", f"VIEW:{command['recurring_need_id']}", None)])
@@ -1459,6 +1549,8 @@ async def _render_needs_list(
             "__reset__": True,  # B24 : `working_memory` fusionne en profondeur — un index d'un ancien écran ne doit JAMAIS survivre
             "mapping": mapping, "created_at": time.time(), "actions": {k: "SELECT" for k in mapping},
             "title": "Liste de vos besoins récurrents (répondre avec le numéro du besoin)",
+            # B26 : version de chaque besoin AU MOMENT où la liste est montrée (navigation : le détail rafraîchit ; mutation : comparée).
+            "versions": {str(i["recurring_need_id"]): i.get("need_version") for i in items if i.get("need_version") is not None},
             "target": None,  # `working_memory` fusionne en profondeur : une cible d'écran précédente ne doit pas survivre à la liste
             "labels": {str(i): _render_need_line(item) for i, item in enumerate(items, start=1)}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
@@ -1744,7 +1836,11 @@ async def _show_need_detail(
             # B24 : la CIBLE métier de l'écran (indice de résolution pour « mets-en 3 », « cherche pour mes boeufs » ; revalidée
             # contre la liste de l'acheteur avant toute action — jamais un index de menu, jamais une preuve).
             "target": {"type": "RECURRING_NEED", "id": str(recurring_need_id), "product": product,
-                       "quantity": _fmt_qty(detail.get("requested_quantity")), "unit": unit, "frequency": _frequency_label(detail)},
+                       "quantity": _fmt_qty(detail.get("requested_quantity")), "unit": unit, "frequency": _frequency_label(detail),
+                       # B26 : la base de toute mutation faite depuis CET écran (besoin ET livraison affichés).
+                       "need_version": detail.get("need_version"), "occurrence_id": detail.get("occurrence_id"),
+                       "occurrence_date": str(detail.get("occurrence_date") or "")[:10] or None,
+                       "occurrence_status": occ_status, "occurrence_version": detail.get("occurrence_version")},
             "labels": {k: _ACTION_LABELS.get(_menu_action_of(v), v) for k, v in mapping.items()}}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
@@ -2064,12 +2160,23 @@ async def _digest_actionable_items(gw: RecurringSupplyGateway, phone: Any) -> Li
     return [i for i in items if i.get("next_occurrence_id")]
 
 
+def _digest_occurrence_version(item: Dict[str, Any]) -> Optional[int]:
+    """Version de l'OCCURRENCE que l'acheteur a sous les yeux (B26) : celle du digest qu'il a reçu (`digest_occurrence_version`,
+    figée à l'envoi) ; sans snapshot de digest, celle lue ce tour (`next_occurrence_version`). `None` : aucune version connue —
+    la passerelle refuse alors toute mutation (jamais « la version courante » par omission)."""
+    version = item.get("digest_occurrence_version") if item.get("in_latest_digest") else None
+    if version is None:
+        version = item.get("next_occurrence_version")
+    return int(version) if version is not None else None
+
+
 def _digest_menu_entities(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [
         {
             "index": i,
             "recurring_need_id": item["recurring_need_id"],
             "occurrence_id": item["next_occurrence_id"],
+            "occurrence_version": _digest_occurrence_version(item),  # B26 : base de l'override (jamais relue au moment d'écrire)
             "occurrence_date": item["next_occurrence_date"],
             "product": item["product"],
             "unit": item.get("unit"),
@@ -2213,13 +2320,24 @@ async def _digest_modify_flow_continue(
             # §16 attend l'override appliqué dès cette quantité reçue, sans confirmation
             # supplémentaire. Occurrence UNIQUEMENT (mandat §5 : "ne pas modifier automatiquement
             # le recurring need permanent") — `RecurringNeed.quantity` n'est jamais touché ici.
-            await gw.update_recurring_need(
+            applied = await gw.update_recurring_need(
                 phone=str(phone),
                 recurring_need_id=selected["recurring_need_id"],
                 action="OCCURRENCE_OVERRIDE",
                 occurrence_date=selected["occurrence_date"],
                 quantity=quantity_value,
+                expected_occurrence_version=selected.get("occurrence_version"),
             )
+            if isinstance(applied, dict) and applied.get("status") == "conflict":
+                logger.info("RECURRING_VERSION_CONFLICT | caller_path=digest_override | action=OCCURRENCE_OVERRIDE | scope=OCCURRENCE")
+                return {
+                    "final_response": (
+                        f"La livraison de {selected.get('product', '')} a été modifiée depuis ce message. Rien n'a été changé : "
+                        "répondez « modifier » pour repartir de l'état à jour."
+                    ),
+                    "status": "COMPLETED",
+                    **resolve_pending_interaction(),
+                }
         except MCPCallError as exc:
             logger.warning(
                 "recurring_supply_digest.modify_override_failed | occurrence_id=%s | error_class=%s",
@@ -2285,12 +2403,22 @@ async def _digest_skip_named_product(
 
     target = matches[0]
     try:
-        await gw.update_recurring_need(
+        applied = await gw.update_recurring_need(
             phone=str(phone),
             recurring_need_id=target["recurring_need_id"],
             action="OCCURRENCE_SKIP",
             occurrence_date=target["next_occurrence_date"],
+            expected_occurrence_version=_digest_occurrence_version(target),
         )
+        if isinstance(applied, dict) and applied.get("status") == "conflict":
+            logger.info("RECURRING_VERSION_CONFLICT | caller_path=digest_skip | action=OCCURRENCE_SKIP | scope=OCCURRENCE")
+            return {
+                "final_response": (
+                    f"La livraison de {target['product']} a été modifiée depuis ce message. Rien n'a été changé : "
+                    "redites « pas demain » pour repartir de l'état à jour."
+                ),
+                "status": "COMPLETED",
+            }
     except MCPCallError as exc:
         logger.warning(
             "recurring_supply_digest.skip_product_apply_failed | occurrence_id=%s | error_class=%s",

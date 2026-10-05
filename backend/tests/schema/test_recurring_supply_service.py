@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import psycopg2
 import pytest
 from factories import Graph, insert, uniq
+from observed import observed_update
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -317,7 +318,7 @@ def test_permanent_quantity_update_changes_future_open_occurrences(market):
         svc = _svc(session, market)
         result = await _create(session, market)
         need_id = result["recurring_need_id"]
-        upd = await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="PERMANENT_QUANTITY", quantity=25)
+        upd = await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="PERMANENT_QUANTITY", quantity=25)
         occs = (
             await session.execute(select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == uuid.UUID(need_id)))
         ).scalars().all()
@@ -338,7 +339,7 @@ def test_permanent_update_never_touches_an_occurrence_that_left_open(market):
         frozen.status = "ACCEPTED"  # simule un travail déjà engagé (matching/acceptation, hors scope Phase 2)
         await session.flush()
 
-        await svc.update_recurring_need(phone="+226", recurring_need_id=str(need_id), action="PERMANENT_QUANTITY", quantity=25)
+        await observed_update(svc, session, phone="+226", recurring_need_id=str(need_id), action="PERMANENT_QUANTITY", quantity=25)
         await session.refresh(frozen)
         return frozen
 
@@ -362,10 +363,10 @@ def test_a_permanent_update_never_silently_overwrites_an_explicit_exception(mark
         tomorrow_occ = min(occs, key=lambda o: o.occurrence_date)
         tomorrow = tomorrow_occ.occurrence_date.date()
 
-        await svc.update_recurring_need(
+        await observed_update(svc, session, 
             phone="+226", recurring_need_id=need_id, action="OCCURRENCE_OVERRIDE", occurrence_date=tomorrow, quantity=10
         )
-        await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="PERMANENT_QUANTITY", quantity=25)
+        await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="PERMANENT_QUANTITY", quantity=25)
 
         await session.refresh(tomorrow_occ)
         others = [o for o in occs if o.id != tomorrow_occ.id]
@@ -389,7 +390,7 @@ def test_occurrence_skip_sets_status_and_bumps_version_without_touching_the_need
         occs = (await session.execute(select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == uuid.UUID(need_id)))).scalars().all()
         tomorrow = min(occs, key=lambda o: o.occurrence_date)
 
-        await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="OCCURRENCE_SKIP", occurrence_date=tomorrow.occurrence_date.date())
+        await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="OCCURRENCE_SKIP", occurrence_date=tomorrow.occurrence_date.date())
 
         await session.refresh(tomorrow)
         need = await session.get(RecurringNeed, uuid.UUID(need_id))
@@ -412,7 +413,7 @@ def test_skipping_a_non_open_occurrence_is_rejected(market):
         occ.status = "FULFILLED"
         await session.flush()
         try:
-            await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="OCCURRENCE_SKIP", occurrence_date=occ.occurrence_date.date())
+            await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="OCCURRENCE_SKIP", occurrence_date=occ.occurrence_date.date())
             return "no_exception"
         except BusinessRuleException:
             return "rejected"
@@ -427,7 +428,7 @@ def test_pause_skips_future_open_occurrences_within_the_pause_window(market):
         svc = _svc(session, market)
         result = await _create(session, market)
         need_id = result["recurring_need_id"]
-        await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="PAUSE", paused_until=date(2026, 9, 18))
+        await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="PAUSE", paused_until=date(2026, 9, 18))
         need = await session.get(RecurringNeed, uuid.UUID(need_id))
         occs = (await session.execute(select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == uuid.UUID(need_id)))).scalars().all()
         return need, occs
@@ -445,8 +446,8 @@ def test_resume_reactivates_the_need_without_reverting_past_skips(market):
         svc = _svc(session, market)
         result = await _create(session, market)
         need_id = result["recurring_need_id"]
-        await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="PAUSE", paused_until=date(2026, 9, 18))
-        await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="RESUME")
+        await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="PAUSE", paused_until=date(2026, 9, 18))
+        await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="RESUME")
         need = await session.get(RecurringNeed, uuid.UUID(need_id))
         occs = (await session.execute(select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == uuid.UUID(need_id)))).scalars().all()
         return need, occs
@@ -462,7 +463,7 @@ def test_cancel_marks_future_open_occurrences_cancelled(market):
         svc = _svc(session, market)
         result = await _create(session, market)
         need_id = result["recurring_need_id"]
-        await svc.update_recurring_need(phone="+226", recurring_need_id=need_id, action="CANCEL")
+        await observed_update(svc, session, phone="+226", recurring_need_id=need_id, action="CANCEL")
         need = await session.get(RecurringNeed, uuid.UUID(need_id))
         occs = (await session.execute(select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == uuid.UUID(need_id)))).scalars().all()
         return need, occs
@@ -496,7 +497,7 @@ def test_updating_another_buyers_recurring_need_is_rejected(pg_dsn):
         intruder_svc = _Svc(session, intruder)
         intruder_svc._user_profile = intruder_profile
         try:
-            await intruder_svc.update_recurring_need(phone="+226", recurring_need_id=result["recurring_need_id"], action="CANCEL")
+            await observed_update(intruder_svc, session, phone="+226", recurring_need_id=result["recurring_need_id"], action="CANCEL")
             return "no_exception"
         except BusinessRuleException:
             return "rejected"
