@@ -254,14 +254,43 @@ def _render_order_cancelled_by_buyer_producer(p: Dict[str, Any]) -> str:
     )
 
 
+_MONTHS_FR = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+
+
+def _fr_date(iso: Any) -> str:
+    try:
+        year, month, day = (int(x) for x in str(iso)[:10].split("-"))
+        return f"{day} {_MONTHS_FR[month - 1]}"
+    except (ValueError, IndexError):
+        return ""
+
+
 def _render_order_cancelled_by_producer_buyer(p: Dict[str, Any]) -> str:
     order_number = str(p.get("order_number") or "")
     reason = str(p.get("reason") or "").strip()
     reason_line = f"\n📝 Motif indiqué : {reason}" if reason else ""
+    head = f"❌ *Commande annulée par le producteur* — #{order_number}{reason_line}\n\n"
+    # B28 — livraison RÉCURRENTE : le domaine a dit si cette même livraison peut encore être couverte (`recovery_outcome`).
+    outcome = p.get("recovery_outcome")
+    occ = next((o for o in (p.get("occurrences") or []) if isinstance(o, dict)), {})
+    product = str(p.get("product") or "").strip()
+    when = _fr_date(occ.get("date"))
+    delivery = f"Votre livraison{f' de {product}' if product else ''}{f' du {when}' if when else ''}"
+    if outcome == "RECOVERABLE":
+        return (
+            head + f"{delivery} reste à couvrir. Vous n'avez rien payé : le règlement se fait à la livraison.\n"
+            "🔎 Je peux chercher un autre producteur pour cette même livraison : répondez *cherche un autre producteur*."
+        )
+    if outcome == "NEED_NOT_ACTIVE":
+        return head + f"{delivery} ne sera pas relancée : votre besoin récurrent n'est plus actif. Vous n'avez rien payé."
+    if outcome in ("RECOVERY_WINDOW_CLOSED", "NOT_RECOVERABLE", "OCCURRENCE_COMMITTED"):
+        return (
+            head + f"{delivery} ne peut plus être relancée à temps. Vous n'avez rien payé.\n"
+            "🔁 Votre besoin récurrent reste actif pour les prochaines livraisons."
+        )
     return (
-        f"❌ *Commande annulée par le producteur* — #{order_number}"
-        f"{reason_line}\n\n"
-        "Le producteur ne peut finalement pas honorer cette commande. "
+        head
+        + "Le producteur ne peut finalement pas honorer cette commande. "
         "Vous n'avez rien payé : le règlement se fait à la livraison.\n"
         "🔎 Tapez *chercher <produit>* pour trouver un autre vendeur."
     )

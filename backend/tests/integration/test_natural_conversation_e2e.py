@@ -429,7 +429,8 @@ def test_a_detail_that_contradicts_the_list_says_so(role, caplog):
 def _with_recovery(h, need_id: str = "N-BOEUF") -> None:
     h.runtime.responses["get_last_interactive_outbound"] = {
         "status": "success", "interactive": None,
-        "recovery": {"sent_at": 4102444800.0, "recurring_need_ids": [need_id], "occurrence_ids": ["OCC-C"], "dates": ["2026-10-27"]}}
+        "recovery": {"sent_at": 4102444800.0, "recurring_need_ids": [need_id], "occurrence_ids": ["OCC-C"], "dates": ["2026-10-27"],
+                     "occurrence_versions": [4], "reasons": ["PRODUCER_TIMEOUT"]}}
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -443,6 +444,7 @@ def test_find_someone_else_after_a_producer_failure_targets_the_failed_delivery(
             t = h.send(text, llm=Script(nt=new_task("REFRESH_RECURRING_MATCHING", 0.93)))
         calls = _calls(t, "refresh_recurring_need_matching")
         assert t.intent == "REFRESH_RECURRING_MATCHING" and [c["recurring_need_id"] for c in calls] == ["N-BOEUF"], (calls, t.response)
+        assert (calls[0]["occurrence_id"], calls[0]["expected_occurrence_version"]) == ("OCC-C", 4)  # B28 : EXACTEMENT la livraison en échec
         assert t.turn_value("relation_to_context") == "ANSWER"
         assert any("target_resolution=recovery" in x for x in _arbitration(caplog)), _arbitration(caplog)
 

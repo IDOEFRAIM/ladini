@@ -15,6 +15,7 @@ from factories import Graph
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.moderation import ModerationMixin
 from ladini.services.database.producer import ProducerMgmtMixin
 from ladini.services.database.recurring_supply import RecurringSupplyMixin
@@ -34,7 +35,7 @@ def _dt(d: date) -> datetime:
     return datetime.combine(d, datetime.min.time())
 
 
-class _Svc(RecurringSupplyMixin, AuctionMixin, ModerationMixin, ProducerMgmtMixin):
+class _Svc(RecurringSupplyMixin, AuctionMixin, ModerationMixin, ProducerMgmtMixin, BuyerMixin):
     def __init__(self, session, buyer, producer):
         self._s, self._buyer, self._producer = session, buyer, producer
 
@@ -226,13 +227,40 @@ def test_multi_producer_a_delivers_b_pending_then_b_rejects_gives_partial_and_re
 
 
 def test_all_orders_rejected_is_unfulfilled_with_zero_delivered(pg_dsn):
+    """B28 : une livraison dont la date est DÉJÀ passée (fenêtre fermée) ne se récupère pas : clôture honnête UNFULFILLED."""
+    d = _fresh_date()
+    g, need, occ, actors = _seed(pg_dsn, d, [("A", 60, 500), ("B", 40, 500)], requested=100)
+    orders = _accept(pg_dsn, g, need, occ)
+    _sql(pg_dsn, "update marketplace.recurring_need_occurrences set occurrence_date = %s where id = %s",
+         (_dt(date.today() - timedelta(days=1)), str(occ)))
+    for actor in actors:
+        _producer_cancel(pg_dsn, g, actor, _order_of(pg_dsn, orders, actor[2]))
+    final = _occ(pg_dsn, occ)
+    assert final["status"] == "UNFULFILLED" and final["delivered"] == 0.0
+
+
+def test_all_orders_rejected_while_the_window_is_open_reopens_the_occurrence_B28(pg_dsn):
+    """B28 : l'échec des tentatives n'est pas l'échec de l'occurrence — livraison encore due : OPEN, historique conservé."""
     d = _fresh_date()
     g, need, occ, actors = _seed(pg_dsn, d, [("A", 60, 500), ("B", 40, 500)], requested=100)
     orders = _accept(pg_dsn, g, need, occ)
     for actor in actors:
         _producer_cancel(pg_dsn, g, actor, _order_of(pg_dsn, orders, actor[2]))
     final = _occ(pg_dsn, occ)
-    assert final["status"] == "UNFULFILLED" and final["delivered"] == 0.0
+    assert final["status"] == "OPEN" and final["delivered"] == 0.0 and final["confirmed"] == 0.0
+    assert [r[0] for r in _sql(pg_dsn, "select status from marketplace.need_allocations where occurrence_id = %s", (str(occ),))] == ["CONVERTED"] * 2
+
+
+def test_a_buyer_cancellation_is_never_recovered(pg_dsn):
+    d = _fresh_date()
+    g, need, occ, actors = _seed(pg_dsn, d, [("A", 40, 500)], requested=40)
+    order = _accept(pg_dsn, g, need, occ)[0]
+
+    async def cancel(svc, phone):
+        return await svc.cancel_pending_order(order, phone, "changé d avis")
+
+    _call(pg_dsn, g, cancel)
+    assert _occ(pg_dsn, occ)["status"] == "UNFULFILLED"
 
 
 # ── 3. CLÔTURE CASH B11 sur une commande recurring ────────────────────────────────────────────────
@@ -302,6 +330,9 @@ def test_producer_never_confirms_timeout_cancels_restores_stock_once_and_closes_
     order = _accept(pg_dsn, g, need, occ)[0]
     assert _stock(pg_dsn, actors[0][2]) == 60.0
     _sql(pg_dsn, "update marketplace.orders set expected_fulfillment_date = %s where id = %s", (_dt(date.today() - timedelta(days=1)), order))
+    # B28 : la date de livraison de l'occurrence est celle de la commande (ici passée : fenêtre de récupération fermée)
+    _sql(pg_dsn, "update marketplace.recurring_need_occurrences set occurrence_date = %s where id = %s",
+         (_dt(date.today() - timedelta(days=1)), str(occ)))
 
     async def sweep(svc, phone):
         return await svc.expire_unconfirmed_recurring_orders()

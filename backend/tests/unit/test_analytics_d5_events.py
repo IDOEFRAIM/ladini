@@ -4,6 +4,7 @@ tests/schema/test_analytics_d5_pg.py, in CI)."""
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -133,11 +134,12 @@ class TestQuantityDeliveredWriter:
 
     def _occ(self, delivered=0, status="ACCEPTED", requested=100):
         return SimpleNamespace(id=uuid.uuid4(), recurring_need_id=uuid.uuid4(), quantity_delivered=delivered,
-                               version=3, status=status, requested_quantity=requested, unit="KG")
+                               version=3, status=status, requested_quantity=requested, unit="KG",
+                               order_group_id=None, occurrence_date=datetime(2031, 1, 1), quantity_confirmed=0, quantity_matched=0)
 
     def test_sets_the_value_recomputed_from_received_orders_and_bumps_the_version(self):
         occ = self._occ()
-        rows = [(uuid.uuid4(), "COMPLETED", "RECEIVED", 70, "KG"), (uuid.uuid4(), "CONFIRMED", "PENDING", 30, "KG")]
+        rows = [(uuid.uuid4(), "COMPLETED", "RECEIVED", 70, "KG", None, None), (uuid.uuid4(), "CONFIRMED", "PENDING", 30, "KG", None, None)]
         svc, _ = self._svc(occ, rows)
         out = run(svc._refresh_occurrence_quantity_delivered(_order(checkout_group_id=uuid.uuid4())))
         assert out == 70 and occ.quantity_delivered == 70 and occ.version == 4
@@ -145,7 +147,7 @@ class TestQuantityDeliveredWriter:
 
     def test_retry_is_a_no_op_same_value_same_version(self):
         occ = self._occ(delivered=70)
-        rows = [(uuid.uuid4(), "COMPLETED", "RECEIVED", 70, "KG"), (uuid.uuid4(), "CONFIRMED", "PENDING", 30, "KG")]
+        rows = [(uuid.uuid4(), "COMPLETED", "RECEIVED", 70, "KG", None, None), (uuid.uuid4(), "CONFIRMED", "PENDING", 30, "KG", None, None)]
         svc, session = self._svc(occ, rows)
         run(svc._refresh_occurrence_quantity_delivered(_order(checkout_group_id=uuid.uuid4())))
         assert occ.quantity_delivered == 70 and occ.version == 3

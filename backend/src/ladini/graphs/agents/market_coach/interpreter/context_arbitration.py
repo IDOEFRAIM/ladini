@@ -574,8 +574,19 @@ def recovery_target(state: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     if len(set(needs)) != 1:
         return None
     occurrences = [str(o) for o in recovery.get("occurrence_ids") or []]
-    return {"type": "RECURRING_NEED", "id": needs[0], "occurrence_id": occurrences[0] if len(occurrences) == 1 else None,
+    versions = list(recovery.get("occurrence_versions") or [])
+    exact = len(occurrences) == 1  # B28 : UNE seule livraison en échec pour ce besoin -> cible exacte ; sinon on clarifie
+    return {"type": "RECURRING_NEED", "id": needs[0], "occurrence_id": occurrences[0] if exact else None,
+            "occurrence_version": (versions[0] if exact and versions and str(versions[0]).lstrip("-").isdigit() else None),
             "source": "recovery_notification"}
+
+
+def recovery_need_ids(state: Mapping[str, Any]) -> List[str]:
+    """B28 — les besoins DISTINCTS dont une notification récente a signalé l'échec (plusieurs livraisons ont échoué ensemble)."""
+    recovery = state.get("recovery_context")
+    if not isinstance(recovery, dict):
+        return []
+    return sorted({str(n) for n in recovery.get("recurring_need_ids") or []})
 
 
 def recovery_hint(state: Mapping[str, Any]) -> Optional[str]:
@@ -806,6 +817,7 @@ __all__ = [
     "resolve_conversation_context",
     "resolve_date_reference",
     "recovery_target",
+    "recovery_need_ids",
     "recovery_hint",
     "reference_candidates",
     "assess_natural_mutation",
