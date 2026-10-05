@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
+from datetime import date
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -66,8 +67,8 @@ _FIELD_NAMES = (
     "max_price_per_unit",
     "additional_items",
 )
-# `starts_at` n'est PAS requis : non renseigné, il est par défaut "demain" au moment de l'exécution
-# (mandat §4 — "À partir de demain." dans l'exemple validé), calculé par le service (impur), jamais ici.
+# `starts_at` n'est PAS requis : non renseigné, le service retient `aujourd'hui + délai minimal admin`
+# (`domain/recurring_supply/start_policy.py`), calculé par le service (impur), jamais ici.
 _REQUIRED_FOR_COMPLETION = ("quantity", "unit", "recurrence_type")
 
 
@@ -267,10 +268,11 @@ class RecurringNeedDraft:
                 f"Prix maximum accepté : {_fmt_num(self.max_price_per_unit)} FCFA/{self.unit or 'unité'}."
             )
         lines.append(_render_frequency(self.recurrence_type, self.weekly_days, self.excluded_weekdays))
+        # La date vient du DOMAINE (`start_policy`, délai minimal admin) — jamais d'un « demain » codé en dur.
         if slot_has_value(self.starts_at):
-            lines.append(f"À partir du {self.starts_at}.")
+            lines.append(f"Première livraison prévue : {_fr_date(self.starts_at)}.")
         else:
-            lines.append("À partir de demain.")
+            lines.append("Première livraison : dès que possible, selon le délai d'organisation.")
         return "\n".join(lines)
 
     def execution_payload(self) -> Dict[str, Any]:
@@ -312,6 +314,21 @@ def _render_item_line(product: Optional[str], quantity: Optional[float], unit: O
 
 
 _WEEKDAY_LABELS = {1: "lundi", 2: "mardi", 3: "mercredi", 4: "jeudi", 5: "vendredi", 6: "samedi", 7: "dimanche"}
+
+
+_FR_MONTHS = (
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+)
+
+
+def _fr_date(value: Any) -> str:
+    """« 2026-10-09 » -> « 9 octobre » ; toute autre valeur est rendue telle quelle (jamais devinée)."""
+    try:
+        parsed = date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return str(value)
+    return f"{parsed.day} {_FR_MONTHS[parsed.month - 1]}"
 
 
 def _render_frequency(

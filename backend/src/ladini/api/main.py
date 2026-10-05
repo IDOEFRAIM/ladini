@@ -18,6 +18,7 @@ from ladini.api.routes.analytics_admin_producers import (
 from ladini.api.routes.commercial_admin import router as commercial_admin_router
 from ladini.api.routes.market import router as market_router
 from ladini.api.routes.paydunya_webhook import router as paydunya_router
+from ladini.api.routes.recurring_admin import router as recurring_admin_router
 from ladini.api.routes.twilio_webhook import (
     router as twilio_router,  # repli (MESSAGING_PROVIDER=twilio)
 )
@@ -196,6 +197,7 @@ app.include_router(analytics_admin_router)  # /internal/analytics/buyers/* (toke
 app.include_router(analytics_admin_producers_router)  # /internal/analytics/producers/* (token interne, lecture seule)
 app.include_router(analytics_admin_market_balance_router)  # /internal/analytics/market-balance/* (token interne, lecture seule)
 app.include_router(commercial_admin_router)  # /internal/commercial/* (token interne — relances manuelles COMMERCIAL)
+app.include_router(recurring_admin_router)  # /internal/recurring-admin/* (token interne — OPERATIONS recurring : besoins + réglages)
 
 
 # ── Métadonnées de release (hardening DevOps 2026-09-10) ─────────────

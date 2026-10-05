@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from ladini.domain.orm_base import Base
@@ -306,6 +308,30 @@ class ProhibitedTerm(Base):
 
 
 
+class PlatformSetting(Base):
+    """Réglage GLOBAL de la plateforme, éditable par un admin (clé -> valeur JSON versionnée).
+
+    Première table de configuration administrable du dépôt (le reste vit dans `core/settings.py`, donc
+    dans l'environnement de déploiement). Sert d'abord `recurring_supply.minimum_start_lead_days`
+    (`services/platform_settings.py`). Chaque modification est auditée dans `intelligence.audit_logs`.
+    Table Drizzle-authored (mirror, voir schema_contract/migrations/0015).
+    """
+
+    __tablename__ = "platform_settings"
+    __table_args__ = (
+        Index("platform_settings_updated_by_idx", "updated_by_id"),
+        CheckConstraint("version >= 1", name="platform_settings_version_chk"),
+        {"schema": "governance"},
+    )
+
+    key = Column(Text, primary_key=True)
+    value = Column(JSONB, nullable=False)
+    version = Column(Integer, default=1, nullable=False, server_default=text("1"))
+    updated_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 __all__ = [
     "Organization",
     "UserOrganization",
@@ -317,4 +343,5 @@ __all__ = [
     "SubCategory",
     "StandardPrice",
     "ProhibitedTerm",
+    "PlatformSetting",
 ]

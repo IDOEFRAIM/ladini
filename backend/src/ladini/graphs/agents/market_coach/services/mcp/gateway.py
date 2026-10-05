@@ -729,6 +729,9 @@ class RecurringSupplyGateway(_BaseGateway):
             kwargs.update(occurrence_id=occurrence_id, expected_occurrence_version=expected_occurrence_version)
         return await self._call("refresh_recurring_need_matching", **kwargs)
 
+    async def get_recurring_start_policy(self, starts_at: Optional[str] = None) -> Dict[str, Any]:
+        return await self._call("get_recurring_start_policy", starts_at=starts_at)
+
     async def get_recurring_need_detail(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
         return await self._call("get_recurring_need_detail", phone=phone, recurring_need_id=recurring_need_id)
 

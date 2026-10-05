@@ -105,7 +105,6 @@ class TestA_SingleLivestockWeekly:
         assert "TETE" in t2.response
         assert "UNITE" not in t1.response and "TETE" in t1.response
 
-    @pytest.mark.xfail(strict=True, reason="H1: le récapitulatif générique avant confirmation n'affiche pas la fréquence (recurrence_type/weekly_days) — seul RecurringNeedDraft.render_summary() la connaît, le builder générique de confirmation_gate ne le consulte pas")
     def test_the_frequency_is_shown_before_confirmation(self, conv):
         t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         assert "semaine" in t1.response.lower()
@@ -153,7 +152,6 @@ class TestB_TwoItems:
         items = _created(conv)[0][1]["items"]
         assert {it["unit"] for it in items} == {"TETE"}
 
-    @pytest.mark.xfail(strict=True, reason="H1: le récapitulatif avant confirmation n'affiche que le 1er item")
     def test_the_confirmation_shows_every_item(self, conv):
         t = conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
         text = t.response.lower()

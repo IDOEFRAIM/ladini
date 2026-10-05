@@ -177,12 +177,15 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
     _preorder_draft = None
     _sales_draft = None
     _procurement_draft = None
+    _recurring_draft = None
     if ctx.goal in _BUYER_PREORDER_GOALS:
         _preorder_draft = PreorderDraft.from_dict(state.get("preorder_draft"))
     elif ctx.goal == "SALES_PUBLISH_PRODUCT":
         _sales_draft = SalesPublishDraft.from_dict(state.get("sales_publish_draft"))
     elif ctx.goal == "PROCUREMENT_CREATE_REQUEST":
         _procurement_draft = ProcurementDraft.from_dict(state.get("procurement_draft"))
+    elif ctx.goal == "CREATE_RECURRING_NEED":
+        _recurring_draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
     if _preorder_draft is not None:
         text_output = f"{ctx.salutation}{_preorder_draft.render_summary()}\n\nConfirmez-vous ?"
     elif _sales_draft is not None and _sales_draft.status == SalesPublishDraftStatus.DRAFT:
@@ -192,6 +195,14 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
         # puis « le prix sera appliqué par LITRE » alors que le draft portait tout autre chose.
         text_output = (
             f"{ctx.salutation}Voici le récapitulatif :\n{_sales_draft.render_summary()}"
+            "\n\nConfirmez-vous ?"
+        )
+    elif _recurring_draft is not None and _recurring_draft.status == RecurringNeedDraftStatus.DRAFT:
+        # Récapitulatif = projection PURE du brouillon (tous les produits, la fréquence et la VRAIE date de première
+        # livraison décidée par le domaine) — jamais reconstruit depuis `transaction_payload`, qui n'affichait ni
+        # fréquence ni date et ne montrait que le premier produit.
+        text_output = (
+            f"{ctx.salutation}Voici le récapitulatif :\n{_recurring_draft.render_summary()}"
             "\n\nConfirmez-vous ?"
         )
     elif _procurement_draft is not None and _procurement_draft.status == ProcurementDraftStatus.DRAFT:

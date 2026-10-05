@@ -400,6 +400,7 @@ INTENT_CONFIG = {
             "weekly_days": "jours de la semaine concernés",
             "excluded_weekdays": "jours exclus (ex: sauf le dimanche)",
             "max_price_per_unit": "prix maximum accepté (optionnel)",
+            "starts_at": "date de début (optionnel, sinon la première date possible)",
         },
     },
     # Modifie un besoin récurrent DÉJÀ CRÉÉ : quantité/fréquence permanente,

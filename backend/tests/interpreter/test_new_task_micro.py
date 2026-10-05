@@ -377,10 +377,14 @@ class TestPromptSizeGuard:
     # honnête. +~190 tokens (prose condensée au maximum, un seul exemple
     # contrastif) reste très loin de l'ancien prompt à 5000 tokens que cette
     # garde vise réellement à empêcher (spec §50).
+    # Seuils relevés de 2650 à 2700 et de 2700 à 2750 (2026-10-05) : champ `starts_at` (date de début explicite d'un
+    # besoin récurrent, « à partir du 20 octobre ») — sans lui l'interpréteur ne pouvait structurellement jamais
+    # transmettre une date voulue, et le délai minimal avant première livraison (réglage admin) ne pouvait pas être
+    # confronté à ce que l'utilisateur demande. ~+35 tokens, très loin des 5000 de l'ancien prompt (spec §50).
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2650, (
+        assert estimated_tokens < 2700, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -392,7 +396,7 @@ class TestPromptSizeGuard:
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
         # B24 : +~30 tokens (champ `update_action` du schéma JSON) ; le garde anti-5000 tokens ci-dessus reste à 2650.
-        assert 800 <= total_tokens <= 2700
+        assert 800 <= total_tokens <= 2750
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

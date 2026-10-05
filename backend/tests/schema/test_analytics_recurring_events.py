@@ -123,7 +123,7 @@ def test_create_need_emits_need_created_and_one_event_per_initial_occurrence(mar
     assert len(needs) == 1
     assert needs[0][0] == f"RECURRING_NEED_CREATED:{need_id}"
     assert needs[0][1]["journey"] == "RECURRING" and needs[0][1]["actor_type"] == "BUYER"
-    assert len(occs) == result["occurrences_created"] == 7
+    assert len(occs) == result["occurrences_created"] == 4  # 19..22 : aujourd'hui + délai minimal par défaut (4)
 
 
 # C — le réapprovisionnement passe par le MÊME point d'émission, et un rejeu n'émet rien
@@ -156,7 +156,7 @@ def test_replenishment_emits_same_event_and_replay_emits_nothing(market, monkeyp
     assert first["occurrences_created"] >= 1
     assert second["occurrences_created"] == 0
     n_events, n_rows = _run(dsn, count)
-    assert n_events == n_rows and n_rows > 7  # 1 event par occurrence RÉELLEMENT insérée, ni plus ni moins
+    assert n_events == n_rows and n_rows > 4  # 1 event par occurrence RÉELLEMENT insérée, ni plus ni moins
 
 
 # D + E — allocation matérialisée ; rematch identique => aucun doublon

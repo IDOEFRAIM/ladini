@@ -123,7 +123,7 @@ donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 (CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/MONTHLY/ \
 ONE_OFF ; ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + \
 excluded_weekdays=[7]. `max_price_per_unit` = prix PAR UNITÉ, jamais un budget total ; `null` \
-si l'unité n'est pas précisée.
+si l'unité n'est pas précisée. `starts_at` : date de début dite (`YYYY-MM-DD`) ; `null` sinon ou si "dès que possible".
 - `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
 quantité+unité, en objets {"product","quantity","unit"} — jamais \
 `additional_products`.
@@ -174,6 +174,7 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "farm_name": "<str|null>", "recurrence_type": \
 "<DAILY|WEEKLY_DAYS|WEEKLY|MONTHLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
 "excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>, \
+"starts_at": "<YYYY-MM-DD|null>", \
 "additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \
 "unit": "<str|null>", "candidates": ["<str>", ...]}, ...], \

@@ -133,19 +133,20 @@ def test_create_recurring_need_materializes_the_j_to_j_plus_7_window(market):
 
     result, occs = _run(market[0], fn)
     assert result["status"] == "success"
-    # starts_at par defaut = demain (16) ; fenetre bornee a J+7 depuis aujourd'hui (22) -> 16..22 inclus = 7 jours
-    assert len(occs) == 7
+    # starts_at par defaut = aujourd'hui (15) + delai minimal admin par defaut (4) = 19 ; fenetre bornee a J+7
+    # depuis aujourd'hui (22) -> 19..22 inclus = 4 jours
+    assert len(occs) == 4
     assert all(o.requested_quantity == 40 and o.unit == "KG" and o.status == "OPEN" for o in occs)
 
 
-def test_create_recurring_need_defaults_starts_at_to_tomorrow(market):
+def test_create_recurring_need_defaults_starts_at_to_today_plus_the_default_lead_time(market):
     async def fn(session):
         result = await _create(session, market)
         need = await session.get(RecurringNeed, uuid.UUID(result["recurring_need_id"]))
         return need
 
     need = _run(market[0], fn)
-    assert need.starts_at.date() == date(2026, 9, 16)
+    assert need.starts_at.date() == date(2026, 9, 19)  # 15 + 4 jours (réglage par défaut), plus « demain »
 
 
 def test_create_recurring_need_daily_except_sunday_excludes_sunday_occurrences(market):

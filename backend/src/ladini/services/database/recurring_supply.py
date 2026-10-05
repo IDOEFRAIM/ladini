@@ -89,6 +89,12 @@ from ladini.domain.recurring_supply.recurrence import (
     generate_occurrence_dates,
     next_due_date,
 )
+from ladini.domain.recurring_supply.start_policy import (
+    StartDecision,
+    first_due_date,
+    resolve_start_date,
+)
+from ladini.services.platform_settings import get_recurring_settings
 
 from .base import BaseMixin
 from .common import normalize_phone
@@ -263,7 +269,8 @@ class RecurringSupplyMixin(BaseMixin):
         draft_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Crée un `RecurringNeed` PUIS matérialise la fenêtre J→J+7 d'occurrences, dans une seule
-        transaction (mandat §14). `starts_at` non fourni = demain (mandat §4 : "À partir de demain.").
+        transaction (mandat §14). `starts_at` non fourni (ou « dès que possible ») = `aujourd'hui + délai minimal admin` (`start_policy`) ; une date
+        trop proche est repoussée à ce minimum (`start_adjusted`), jamais acceptée silencieusement.
         UN seul produit — voir `create_recurring_needs` (pluriel) pour PLUSIEURS produits partageant la
         même récurrence, créés atomiquement (chantier multi-produits, 2026-09-23)."""
         current_session = self.session
@@ -276,7 +283,8 @@ class RecurringSupplyMixin(BaseMixin):
 
         user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
 
-        start_date = _parse_date(starts_at) or (_today() + timedelta(days=1))
+        decision = await self._start_decision(starts_at)
+        start_date = decision.effective_start
         end_date = _parse_date(ends_at)
 
         rule = RecurrenceRule(
@@ -303,6 +311,7 @@ class RecurringSupplyMixin(BaseMixin):
             zone_id=getattr(user_obj, "zone_id", None),
         )
 
+        result.update(_start_info(decision, rule))
         await self._close_confirmation(ledger, result)
         logger.info(
             "RECURRING_NEED_CREATED | recurring_need_id=%s | buyer_id=%s | occurrences=%s",
@@ -343,7 +352,8 @@ class RecurringSupplyMixin(BaseMixin):
 
         user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
 
-        start_date = _parse_date(starts_at) or (_today() + timedelta(days=1))
+        decision = await self._start_decision(starts_at)
+        start_date = decision.effective_start
         end_date = _parse_date(ends_at)
 
         rule = RecurrenceRule(
@@ -373,12 +383,37 @@ class RecurringSupplyMixin(BaseMixin):
             )
             created.append(result)
 
-        await self._close_confirmation(ledger, {"items": created})
+        batch_result = {"items": created, **_start_info(decision, rule)}
+        await self._close_confirmation(ledger, batch_result)
         logger.info(
             "RECURRING_NEED_CREATED | batch=true | buyer_id=%s | count=%s | recurring_need_ids=%s",
             buyer_profile.id, len(created), [c["recurring_need_id"] for c in created],
         )
-        return {"status": "success", "items": created}
+        return {"status": "success", **batch_result}
+
+    async def _start_decision(self, starts_at: Optional[Any]) -> StartDecision:
+        """Date de début d'un NOUVEAU besoin selon le délai minimal admin (lu à l'instant de la création :
+        un brouillon confirmé après un changement de réglage utilise la valeur courante). Un besoin existant
+        n'est jamais recalculé — `starts_at` est figé à l'écriture."""
+        current_settings = await get_recurring_settings(self.session)
+        return resolve_start_date(
+            requested=_parse_date(starts_at),
+            today=_today(),
+            lead_days=current_settings.minimum_start_lead_days,
+        )
+
+    async def get_recurring_start_policy(self, starts_at: Optional[Any] = None) -> Dict[str, Any]:
+        """Lecture seule : date de début qui serait retenue pour `starts_at` (ou, sans date, la première
+        possible) + le délai appliqué. Utilisée par le flow AVANT confirmation pour annoncer la vraie date."""
+        decision = await self._start_decision(starts_at)
+        return {
+            "status": "success",
+            "minimum_start_date": decision.minimum.isoformat(),
+            "effective_start": decision.effective_start.isoformat(),
+            "requested_start": decision.requested.isoformat() if decision.requested else None,
+            "adjusted": decision.adjusted,
+            "lead_days": decision.lead_days,
+        }
 
     async def _insert_one_recurring_need(
         self,
@@ -2746,6 +2781,18 @@ def _occurrence_is_past(occurrence: Any) -> bool:
         return False
     occ_day = occ_date.date() if isinstance(occ_date, datetime) else occ_date
     return occ_day < _today()
+
+
+def _start_info(decision: StartDecision, rule: RecurrenceRule) -> Dict[str, Any]:
+    """Ce que l'on annonce à l'utilisateur : la vraie date de début et, si elle a été repoussée, celle demandée."""
+    first = first_due_date(rule)
+    return {
+        "starts_at": decision.effective_start.isoformat(),
+        "first_delivery_date": first.isoformat() if first else None,
+        "start_adjusted": decision.adjusted,
+        "requested_start": decision.requested.isoformat() if decision.requested else None,
+        "start_lead_days": decision.lead_days,
+    }
 
 
 def _parse_date(value: Optional[Any]) -> Optional[date]:
