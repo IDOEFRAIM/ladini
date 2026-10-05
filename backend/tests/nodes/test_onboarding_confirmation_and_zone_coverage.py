@@ -128,31 +128,39 @@ class TestZoneCoverageNeverBlocksOnboarding:
         assert result["onboarding_profile"]["zone_id"] == "z-ouaga"
         assert result["onboarding_profile"]["coverage_status"] == "NEARBY"
         assert result["onboarding_profile"]["declared_location"] == "Somgande"
-        assert "Ouagadougou" in result["onboarding_prompt"]
+        # La région stockée/affichée est TOUJOURS le nom canonique (Ouagadougou -> Kadiogo).
+        assert result["onboarding_profile"]["zone_name"] == "Kadiogo"
+        assert "Kadiogo" in result["onboarding_prompt"]
         assert "valide" not in result["onboarding_prompt"].lower()
 
-    def test_a_completely_unknown_locality_never_blocks_and_keeps_the_declared_text(self, monkeypatch):
-        """Aucune correspondance à aucun niveau ("Koudougou" dans ce scénario, absent du
-        stub) : le profil reste créable, `declared_location` est conservé tel quel, jamais
-        de rejet sec ni de zone inventée."""
-        _patch_llm_extract(monkeypatch, [{"role": "BUYER", "name": "Awa", "zone": "Koudougou"}])
+    def test_a_completely_unknown_locality_asks_the_region_once_then_never_blocks(self, monkeypatch):
+        """Localité inconnue de TOUS les niveaux ("Somgande", absente du stub) : on demande
+        la région UNE fois (sans faire recommencer l'onboarding) ; une 2e réponse toujours
+        non résolue part en hors-couverture, `declared_location` conservé tel quel."""
+        _patch_llm_extract(monkeypatch, [{"role": "BUYER", "name": "Awa", "zone": "Somgande"}])
         rt = _FakeRuntime()  # aucune zone connue, ni région ni hiérarchie
-        state = {"is_onboarding": True, "user_phone": "+22670000001", "normalized_text": "Awa a Koudougou"}
-        result = run(onboarding_node(state, rt))
+        state = {"is_onboarding": True, "user_phone": "+22670000001", "normalized_text": "Awa a Somgande"}
+        r1 = run(onboarding_node(state, rt))
+        assert r1["onboarding_profile"]["coverage_status"] in (None, "")
+        assert "région" in r1["onboarding_prompt"].lower()
+        assert "Somgande" in r1["onboarding_prompt"]
+        assert r1["onboarding_profile"]["name"] == "Awa"  # rien perdu, rien à recommencer
+
+        _patch_llm_extract(monkeypatch, [{"zone": "Somgande"}])
+        result = run(onboarding_node(_carry(r1, text="Somgande"), rt))
         assert result["onboarding_profile"]["zone_id"] is None
         assert result["onboarding_profile"]["coverage_status"] == "OUT_OF_COVERAGE"
-        assert result["onboarding_profile"]["declared_location"] == "Koudougou"
-        assert "Koudougou" in result["onboarding_prompt"]
+        assert result["onboarding_profile"]["declared_location"] == "Somgande"
+        assert "Somgande" in result["onboarding_prompt"]
         assert "valide" not in result["onboarding_prompt"].lower()
-        # L'onboarding continue : jamais renvoyé en boucle sur la SEULE question de zone.
         assert result["is_onboarding"] is True
-        assert result["onboarding_step"] != "COMPLETED" or result["onboarding_profile"]["role"]
 
     def test_an_out_of_coverage_profile_still_reaches_confirmation_and_creation(self, monkeypatch):
-        _patch_llm_extract(monkeypatch, [{"role": "BUYER", "name": "Awa", "zone": "Koudougou"}])
+        _patch_llm_extract(monkeypatch, [{"role": "BUYER", "name": "Awa", "zone": "Somgande"}])
         rt = _FakeRuntime()
-        state = {"is_onboarding": True, "user_phone": "+22670000001", "normalized_text": "Awa a Koudougou"}
-        r1 = run(onboarding_node(state, rt))
+        state = {"is_onboarding": True, "user_phone": "+22670000001", "normalized_text": "Awa a Somgande"}
+        r0 = run(onboarding_node(state, rt))
+        r1 = run(onboarding_node(_carry(r0, text="Somgande"), rt))
         assert r1["onboarding_step"] == "COMPLETED"
 
         r2 = run(onboarding_node(_carry(r1, text="oui"), rt))
@@ -251,8 +259,13 @@ class TestFullReportedScenario:
         # Tour 2 : "je suis Gilbert-prod; je vis a somgande" -> nom capté, localisation
         # conservée, PAS de blocage sec malgré "somgande" absent du référentiel.
         _patch_llm_extract(monkeypatch, [{"name": "Gilbert-prod", "zone": "somgande"}])
-        r2 = run(onboarding_node(_carry(r1, text="je suis Gilbert-prod; je vis a somgande"), rt))
-        assert r2["onboarding_profile"]["name"] == "Gilbert-prod"
+        r2a = run(onboarding_node(_carry(r1, text="je suis Gilbert-prod; je vis a somgande"), rt))
+        assert r2a["onboarding_profile"]["name"] == "Gilbert-prod"
+        assert "région" in r2a["onboarding_prompt"].lower()  # région redemandée UNE fois
+
+        # Tour 2b : même localité -> hors couverture, jamais bloqué.
+        _patch_llm_extract(monkeypatch, [{"zone": "somgande"}])
+        r2 = run(onboarding_node(_carry(r2a, text="somgande"), rt))
         assert r2["onboarding_profile"]["declared_location"] == "somgande"
         assert r2["onboarding_profile"]["coverage_status"] == "OUT_OF_COVERAGE"
         assert "valide" not in r2["onboarding_prompt"].lower()

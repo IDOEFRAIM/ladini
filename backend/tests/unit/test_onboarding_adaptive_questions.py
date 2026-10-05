@@ -207,19 +207,21 @@ class TestZoneResolutionNeverBlocksOnboarding:
     def test_a_locality_matching_nothing_at_all_never_blocks_the_onboarding(self):
         runtime = self._ZoneStub(region_found=False, hierarchy_root=None)
         ob_state = OnboardingState(step=OnboardingStep.COLLECT_ROLE, phone="+22670000001")
+        # 1re réponse non résolue : la région est redemandée (une seule fois).
+        r1 = run(run_onboarding_step(
+            ob_state, "Je suis à Somgande", runtime, llm_extract_all=_extractor(zone="Somgande"),
+        ))
+        assert "région" in r1.response_text.lower()
+        assert ob_state.coverage_status is None
+        # 2e réponse toujours non résolue : hors couverture, jamais bloqué.
         result = run(run_onboarding_step(
-            ob_state,
-            "Je suis à Ouaga mall",
-            runtime,
-            llm_extract_all=_extractor(zone="Ouaga mall"),
+            ob_state, "Somgande", runtime, llm_extract_all=_extractor(zone="Somgande"),
         ))
         assert "valide" not in result.response_text.lower()
-        assert "Ouaga mall" in result.response_text
-        assert ob_state.declared_location == "Ouaga mall"
+        assert "Somgande" in result.response_text
+        assert ob_state.declared_location == "Somgande"
         assert ob_state.coverage_status == "OUT_OF_COVERAGE"
         assert ob_state.zone_id is None
-        # L'onboarding continue (autres champs manquants demandés), jamais bloqué en
-        # COLLECT_ROLE avec le SEUL message de rejet comme avant.
         assert "nom" in result.response_text.lower()
 
     def test_a_locality_attached_to_a_known_parent_zone_is_accepted_transparently(self):
@@ -234,5 +236,5 @@ class TestZoneResolutionNeverBlocksOnboarding:
         assert ob_state.declared_location == "Somgande"
         assert ob_state.coverage_status == "NEARBY"
         assert ob_state.zone_id == "root-1"
-        assert ob_state.zone_name == "Ouagadougou"
-        assert "Ouagadougou" in result.response_text
+        assert ob_state.zone_name == "Kadiogo"  # nom canonique de la région
+        assert "Kadiogo" in result.response_text

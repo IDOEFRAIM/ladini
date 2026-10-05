@@ -1174,7 +1174,7 @@ async def _llm_extract_onboarding_all(
         "pour mon daron/papa' — c'est une DESCRIPTION de la personne, pas son nom ; renvoie null dans ce cas "
         "(exemple : 'je veux creer un compte pour mon daron' -> name: null). "
         "Seule exception : le terme est suivi d'un vrai prenom ('mon pere Ibrahim' -> name: 'Ibrahim').\n"
-        "- zone : uniquement une localite (ville, province, region, quartier). Jamais un nom de personne.\n"
+        "- zone : uniquement la region ou la localite (ville, chef-lieu) du Burkina ou se situe le profil/l'exploitation, telle que dite par l'utilisateur (ex: 'Bobo', 'Kadiogo'). Jamais un nom de personne, ni une position a l'etranger.\n"
         "- confirm : 'YES' si l'utilisateur valide/accepte/confirme explicitement. 'NO' s'il refuse, corrige ou dit que c'est faux. "
         "Sinon null (ne devine pas depuis un simple bonjour ou une info non liee).\n"
         "- is_question : true si le message ne fournit AUCUNE info d'inscription exploitable — question, "
