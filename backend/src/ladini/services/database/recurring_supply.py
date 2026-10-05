@@ -31,27 +31,24 @@ ne doit jamais produire de doublon (`UNIQUE(recurring_need_id, occurrence_date)`
 NOTHING`) — c'est ce qui protège aussi la réconciliation Celery Beat (Phase 3) qui étendra la fenêtre
 chaque jour.
 
-## Sémantique des modifications (mandat §9/§10)
-
-`update_recurring_need` reçoit une `action` structurée (voir `RECURRING_NEED_ACTIONS`) :
-
-- `PERMANENT_QUANTITY` / `PERMANENT_FREQUENCY` : modifie `recurring_needs`, puis met à jour UNIQUEMENT
-  les occurrences FUTURES encore `OPEN` (jamais `SKIPPED`/`MATCHED`/`PROPOSED`/`ACCEPTED`/
-  `PARTIALLY_ACCEPTED`/`FULFILLED`/`PARTIALLY_FULFILLED`/`EXPIRED`/`CANCELLED` — une occurrence qui a
-  quitté `OPEN` a déjà une vie propre, voir `_MUTABLE_OCCURRENCE_STATUSES`). Une exception ponctuelle
-  déjà posée sur une occurrence encore `OPEN` (`requested_quantity` ≠ la quantité permanente d'origine)
-  n'est PAS écrasée : voir `_apply_permanent_update` — c'est le point du mandat §10 vérifié par
-  `test_a_permanent_update_never_silently_overwrites_an_explicit_exception`.
-- `PAUSE` : `recurring_needs.status = PAUSED`, `paused_until` posé. Les occurrences déjà matérialisées
-  et encore `OPEN` dans la fenêtre de pause passent à `SKIPPED` (mandat §9 : « suspend cette semaine »
-  ne doit pas laisser une occurrence `OPEN` que Phase 3 matcherait quand même).
-- `RESUME` : `recurring_needs.status = ACTIVE`, `paused_until = NULL`. Les occurrences qu'on venait de
-  passer `SKIPPED` par CETTE pause ne repassent PAS `OPEN` automatiquement (un skip reste un fait
-  historique) — seules les occurrences futures nouvellement générées seront `OPEN`.
-- `CANCEL` : `recurring_needs.status = CANCELLED`. Les occurrences `OPEN` futures passent `CANCELLED`.
-- `OCCURRENCE_OVERRIDE` : modifie `requested_quantity` d'UNE occurrence précise, `version += 1`. Ne
-  touche jamais `recurring_needs`.
-- `OCCURRENCE_SKIP` : `status = SKIPPED` sur UNE occurrence précise, `version += 1`.
+## Sémantique des modifications (mandat §9/§10, révisée B25 — contrat normatif :
+docs/RECURRING_MUTATION_CONSISTENCY_CONTRACT.md)
+`update_recurring_need` verrouille le besoin (`FOR UPDATE`), contrôle `expected_version` (jeton = `updated_at` en µs, voir
+`recurring_need_version_of`), puis applique UNE action ; le résultat porte `outcome` (`APPLIED`/`ALREADY_APPLIED`/
+`VERSION_CONFLICT`). Une occurrence « non engagée » (`OPEN`, `MATCHED`) peut être réécrite par une mutation ; une occurrence
+engagée (`ACCEPTED`, `PARTIALLY_ACCEPTED`) ou terminale ne l'est jamais. Toute réécriture passe par UNE primitive
+(`_reset_uncommitted_occurrences`) qui expire les propositions `PROPOSED` et remet `quantity_matched` à 0.
+- `PERMANENT_QUANTITY` : les occurrences non engagées qui suivaient l'ancien contrat le suivent ; une exception explicite
+  n'est jamais écrasée.
+- `PERMANENT_FREQUENCY` : les occurrences non engagées, non exceptionnelles, qui ne sont plus dues passent `CANCELLED`
+  (ré-ouvertes par la matérialisation si le planning revient) ; la nouvelle fenêtre est matérialisée dans la même transaction.
+- `PAUSE` : `PAUSED` ; `paused_until` = premier jour de reprise (exclu) ; les occurrences non engagées avant ce jour passent
+  `SKIPPED` ; les `ACCEPTED` survivent. Reprise automatique par `replenish_occurrence_windows`.
+- `RESUME` : `ACTIVE`, planning régénéré à partir d'aujourd'hui, sans rattrapage ; les dates sautées restent sautées.
+- `CANCEL` : fin durable ; occurrences non engagées → `CANCELLED` ; engagements `ACCEPTED` conservés ; un besoin annulé
+  n'accepte plus aucune mutation (`need_not_active`).
+- `OCCURRENCE_OVERRIDE` / `OCCURRENCE_SKIP` : UNE occurrence, jamais le besoin ni son planning.
+La matérialisation (cron ET self-service) reverrouille le besoin et ne crée rien s'il n'est plus `ACTIVE`.
 """
 
 from __future__ import annotations
@@ -124,6 +121,26 @@ _EXECUTABLE_DRAFT_STATUSES = ("EXECUTING", "EXECUTION_UNKNOWN")
 # permanente ou une exception ponctuelle peut encore la faire changer sans piétiner du travail déjà
 # engagé (matching, acceptation, livraison — tous hors scope Phase 2, mais le schéma les anticipe).
 _MUTABLE_OCCURRENCE_STATUSES = ("OPEN",)
+# B25 — occurrences NON ENGAGÉES : aucune réponse acheteur définitive (OPEN = à chercher, MATCHED = proposition pendante,
+# réservation logique sans stock débité). Seules elles peuvent être réécrites par une mutation ; ACCEPTED, PARTIALLY_ACCEPTED
+# et tous les statuts terminaux sont de l'historique métier, jamais réécrit (contrat B25).
+_UNCOMMITTED_OCCURRENCE_STATUSES = ("OPEN", "MATCHED")
+
+_VERSION_EPOCH = datetime(1970, 1, 1)
+
+
+def recurring_need_version_of(updated_at: datetime) -> int:
+    """Jeton de version d'un besoin : `updated_at` en microsecondes (entier exact, jamais de flottant). Aucune colonne
+    `version` n'existe sur `recurring_needs` (schéma Drizzle) ; `updated_at` est réécrit à chaque mutation effective par
+    `_bump_need_version` (horloge du serveur de base, monotone sous le verrou de ligne)."""
+    if updated_at.tzinfo is not None:
+        updated_at = updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return (updated_at - _VERSION_EPOCH) // timedelta(microseconds=1)
+
+
+def recurring_need_version(need: Any) -> int:
+    return recurring_need_version_of(need.updated_at)
+
 
 RECURRING_NEED_ACTIONS = (
     "PERMANENT_QUANTITY",
@@ -469,7 +486,20 @@ class RecurringSupplyMixin(BaseMixin):
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         stmt = pg_insert(RecurringNeedOccurrence).values(rows)
-        stmt = stmt.on_conflict_do_nothing(index_elements=["recurring_need_id", "occurrence_date"])
+        # B25 : une date `CANCELLED` sous un besoin ACTIF a été écartée par un changement de fréquence (l'annulation du
+        # besoin, seule autre source de `CANCELLED`, n'est jamais matérialisée) : si le planning la redemande, elle est
+        # ré-ouverte avec le snapshot COURANT. Toute autre ligne existante est laissée telle quelle (`DO NOTHING` effectif).
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["recurring_need_id", "occurrence_date"],
+            set_={
+                "status": "OPEN",
+                "requested_quantity": stmt.excluded.requested_quantity,
+                "unit": stmt.excluded.unit,
+                "quantity_matched": 0,
+                "version": RecurringNeedOccurrence.version + 1,
+            },
+            where=RecurringNeedOccurrence.status == "CANCELLED",
+        )
         returning_stmt = stmt.returning(RecurringNeedOccurrence.id, RecurringNeedOccurrence.occurrence_date)
         inserted = (await current_session.execute(returning_stmt)).all()
 
@@ -535,6 +565,10 @@ class RecurringSupplyMixin(BaseMixin):
         """Matérialise la fenêtre `[aujourd'hui, aujourd'hui + OCCURRENCE_WINDOW_DAYS]` d'UN besoin. Idempotent et
         sûr en concurrence : `ON CONFLICT (recurring_need_id, occurrence_date) DO NOTHING` (contrainte d'unicité en
         base) — cron et Buyer simultanés produisent exactement UNE occurrence par date."""
+        locked = await self._lock_active_need(need)
+        if locked is None:  # annulé/suspendu entre la lecture du besoin et ici : rien n'est créé (contrat B25)
+            return 0
+        need = locked
         if dims is None:
             dims = await self._materialization_dims(need.id)
         zone_id, priority_unit = dims.get(need.id, (None, None))
@@ -552,6 +586,10 @@ class RecurringSupplyMixin(BaseMixin):
     async def _materialize_due_date(self, need: RecurringNeed, due: date, *, actor_id: Any = None) -> int:
         """Matérialise UNE échéance précise (hors fenêtre J..J+7) — mêmes dimensions et même insertion idempotente que
         `_ensure_window_for_need`."""
+        locked = await self._lock_active_need(need)
+        if locked is None:
+            return 0
+        need = locked
         dims = await self._materialization_dims(need.id)
         zone_id, priority_unit = dims.get(need.id, (None, None))
         return await self._materialize_occurrences(
@@ -633,6 +671,8 @@ class RecurringSupplyMixin(BaseMixin):
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
 
+        # B25 : reprise automatique des pauses temporelles échues — dans CE cron, avant la matérialisation.
+        needs_resumed = await self._resume_elapsed_pauses()
         needs = (
             await current_session.execute(select(RecurringNeed).where(RecurringNeed.status == "ACTIVE"))
         ).scalars().all()
@@ -645,10 +685,10 @@ class RecurringSupplyMixin(BaseMixin):
             occurrences_created += await self._ensure_window_for_need(need, dims=dims)
 
         logger.info(
-            "recurring_need.occurrence_window_replenished | needs_examined=%s | occurrences_created=%s",
-            needs_examined, occurrences_created,
+            "recurring_need.occurrence_window_replenished | needs_examined=%s | occurrences_created=%s | needs_resumed=%s",
+            needs_examined, occurrences_created, needs_resumed,
         )
-        return {"needs_examined": needs_examined, "occurrences_created": occurrences_created}
+        return {"needs_examined": needs_examined, "occurrences_created": occurrences_created, "needs_resumed": needs_resumed}
 
     async def _resolve_sub_category(self, product_query: str) -> SubCategory:
         """Même résolution catalogue que `AuctionMixin.create_auction` (fuzzy trigram + auto-
@@ -725,6 +765,8 @@ class RecurringSupplyMixin(BaseMixin):
                     "recurrence_type": need.recurrence_type,
                     "weekly_days": need.weekly_days,
                     "status": need.status,
+                    "need_version": recurring_need_version(need),
+                    "paused_until": need.paused_until.date().isoformat() if need.paused_until else None,
                     "schedule_state": schedule_state,
                     # Début et création : distinguent deux besoins par ailleurs identiques (engagements distincts).
                     "starts_on": need.starts_at.date().isoformat() if need.starts_at else None,
@@ -779,6 +821,7 @@ class RecurringSupplyMixin(BaseMixin):
             "recurrence_type": need.recurrence_type,
             "weekly_days": need.weekly_days,
             "need_status": need.status,
+            "need_version": recurring_need_version(need),
         }
         schedule_state, planned_date = (
             (await self._planned_schedule([need])).get(need.id, ("OK", None)) if need.status == "ACTIVE" and occurrence is None
@@ -896,6 +939,8 @@ class RecurringSupplyMixin(BaseMixin):
         (`_ensure_window_for_need`, `ON CONFLICT DO NOTHING`) : idempotent, sûr en concurrence (cron + Buyer
         simultanés => exactement UNE occurrence par date). Ne dépend ni du digest ni de `notified_at`."""
         user_obj, need = await self._owned_need(phone, recurring_need_id)
+        if need.status == "PAUSED" and await self._resume_elapsed_pauses(need_id=need.id):
+            need = (await self._owned_need(phone, recurring_need_id))[1]  # état COMMITÉ après la reprise
         created = 0
         existing = await self._next_actionable_occurrence([need.id])
         source = "EXISTING" if need.id in existing else "NONE"
@@ -1876,7 +1921,14 @@ class RecurringSupplyMixin(BaseMixin):
         excluded_weekdays: Optional[List[int]] = None,
         paused_until: Optional[Any] = None,
         occurrence_date: Optional[Any] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Mutation d'un besoin récurrent — SEULE autorité de cohérence (contrat : docs/RECURRING_MUTATION_CONSISTENCY_
+        CONTRACT.md). Le besoin est verrouillé (`FOR UPDATE`) pour toute la transaction : deux mutations, ou une mutation et
+        une matérialisation, se sérialisent ; tout se décide sur l'état COMMITÉ le plus récent. `expected_version` (jeton lu
+        via `list_my_recurring_needs`/`get_recurring_need_detail`) refuse une intention bâtie sur un état périmé :
+        `{"status": "conflict", "outcome": "VERSION_CONFLICT", "current": {…}}`, aucune écriture. Résultat d'une mutation
+        réussie : `outcome` = `APPLIED` ou `ALREADY_APPLIED` (rejeu idempotent : ni écriture, ni version, ni audit)."""
         if action not in RECURRING_NEED_ACTIONS:
             raise BusinessRuleException(f"Action inconnue : {action!r}")
 
@@ -1887,16 +1939,34 @@ class RecurringSupplyMixin(BaseMixin):
         buyer_id = buyer_profile.id
 
         need = await current_session.scalar(
-            select(RecurringNeed).where(RecurringNeed.id == recurring_need_id, RecurringNeed.buyer_id == buyer_id)
+            select(RecurringNeed)
+            .where(RecurringNeed.id == recurring_need_id, RecurringNeed.buyer_id == buyer_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if need is None:
             # Jamais de fuite d'existence (mandat §12) : même message qu'un id inexistant.
             raise BusinessRuleException("Besoin introuvable.")
 
+        if expected_version is not None and int(expected_version) != recurring_need_version(need):
+            logger.info(
+                "recurring_need.version_conflict | recurring_need_id=%s | action=%s | expected=%s | current=%s",
+                need.id, action, expected_version, recurring_need_version(need),
+            )
+            return {
+                "status": "conflict",
+                "outcome": "VERSION_CONFLICT",
+                "recurring_need_id": str(need.id),
+                "expected_version": int(expected_version),
+                "current": self._need_snapshot(need),
+            }
+        if str(need.status) == "CANCELLED" and action != "CANCEL":
+            raise BusinessRuleException("Ce besoin est arrêté.", reason="need_not_active")
+
         if action == "PERMANENT_QUANTITY":
-            return await self._apply_permanent_update(need, quantity=quantity)
+            return await self._apply_permanent_quantity(need, quantity=quantity)
         if action == "PERMANENT_FREQUENCY":
-            return await self._apply_permanent_update(
+            return await self._apply_permanent_frequency(
                 need, recurrence_type=recurrence_type, weekly_days=weekly_days, excluded_weekdays=excluded_weekdays
             )
         if action == "PAUSE":
@@ -1916,116 +1986,245 @@ class RecurringSupplyMixin(BaseMixin):
             )
         raise AssertionError(action)  # pragma: no cover — filtré par RECURRING_NEED_ACTIONS ci-dessus
 
-    async def _apply_permanent_update(
+    # ── primitives de cohérence ───────────────────────────────────────
+
+    @staticmethod
+    def _need_snapshot(need: RecurringNeed) -> Dict[str, Any]:
+        """État courant d'un besoin tel que montré à l'acheteur après un conflit (aucune donnée personnelle)."""
+        return {
+            "need_version": recurring_need_version(need),
+            "status": need.status,
+            "quantity": float(need.quantity),
+            "unit": need.unit,
+            "recurrence_type": need.recurrence_type,
+            "weekly_days": list(need.weekly_days) if need.weekly_days else None,
+            "paused_until": need.paused_until.date().isoformat() if need.paused_until else None,
+        }
+
+    def _mutation_result(self, need: RecurringNeed, outcome: str, **extra: Any) -> Dict[str, Any]:
+        return {
+            "status": "success",
+            "outcome": outcome,
+            "recurring_need_id": str(need.id),
+            "need_version": recurring_need_version(need),
+            **extra,
+        }
+
+    async def _bump_need_version(self, need: RecurringNeed) -> None:
+        """Nouvelle version = nouvel `updated_at` (`clock_timestamp()`, monotone sous le verrou de ligne). Pas de colonne
+        ajoutée : `updated_at` est déjà le jeton de compare-and-swap du besoin (voir `recurring_need_version`)."""
+        current_session = self._db()
+        need.updated_at = func.clock_timestamp()
+        await current_session.flush()
+        await current_session.refresh(need, ["updated_at"])
+
+    @staticmethod
+    def _audit_mutation(need: RecurringNeed, action: str, old: Any, new: Any, *, actor: str = "BUYER") -> None:
+        """Piste d'audit d'une mutation EFFECTIVE (qui/quoi/avant/après/quand) — journal structuré, sans téléphone ni nom.
+        `analytics.business_events` a un CHECK fermé sur `event_name` (schéma Drizzle) : un événement dédié exige une
+        migration côté frontend — voir « limites » du contrat."""
+        logger.info(
+            "recurring_need.mutation | recurring_need_id=%s | action=%s | old=%s | new=%s | version=%s | actor=%s | at=%s",
+            need.id, action, old, new, recurring_need_version(need), actor, datetime.utcnow().isoformat(timespec="seconds"),
+        )
+
+    async def _reset_uncommitted_occurrences(
+        self,
+        need_id: Any,
+        *where: Any,
+        status: str = "OPEN",
+        requested_quantity: Optional[float] = None,
+        from_today: bool = True,
+    ) -> List[Any]:
+        """UNIQUE point qui réécrit des occurrences futures NON ENGAGÉES (`OPEN`/`MATCHED`, date ≥ aujourd'hui) : nouveau
+        statut/quantité, `quantity_matched = 0`, `version + 1`, et les allocations `PROPOSED` (simples réservations
+        logiques, aucun stock débité) passent `EXPIRED` — jamais d'allocation vivante au-delà de la quantité demandée, jamais
+        de proposition périmée. ACCEPTED / PARTIALLY_ACCEPTED / terminales ne sont jamais touchées (le `WHERE` lit leur état
+        committé, y compris après l'attente d'un verrou tenu par un matching ou une acceptation)."""
+        current_session = self._db()
+        values: Dict[str, Any] = {
+            "status": status,
+            "quantity_matched": 0,
+            "version": RecurringNeedOccurrence.version + 1,
+        }
+        if requested_quantity is not None:
+            values["requested_quantity"] = requested_quantity
+        horizon = (RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),) if from_today else ()
+        stmt = (
+            update(RecurringNeedOccurrence)
+            .where(
+                RecurringNeedOccurrence.recurring_need_id == need_id,
+                RecurringNeedOccurrence.status.in_(_UNCOMMITTED_OCCURRENCE_STATUSES),
+                *horizon,
+                *where,
+            )
+            .values(**values)
+            .returning(RecurringNeedOccurrence.id)
+        )
+        ids = [row[0] for row in (await current_session.execute(stmt)).all()]
+        if ids:
+            await current_session.execute(
+                update(NeedAllocation)
+                .where(NeedAllocation.occurrence_id.in_(ids), NeedAllocation.status == "PROPOSED")
+                .values(status="EXPIRED")
+            )
+        return ids
+
+    # ── actions ───────────────────────────────────────────────────────
+
+    async def _apply_permanent_quantity(self, need: RecurringNeed, *, quantity: Optional[float]) -> Dict[str, Any]:
+        """Change le contrat. Les occurrences futures NON engagées qui suivaient l'ancien contrat (`requested == ancienne
+        quantité`) le suivent ; une exception explicite (quantité différente) n'est JAMAIS écrasée ; ACCEPTED/terminales
+        jamais réécrites. Une occurrence suivie perd sa proposition (à rematcher par le cron ou « rechercher »)."""
+        if quantity is None or not 0 < float(quantity) < float("inf"):
+            raise BusinessRuleException("Quantité invalide : un nombre supérieur à 0 est requis.", reason="invalid_quantity")
+        new_quantity = float(quantity)
+        old_quantity = need.quantity
+        if float(old_quantity) == new_quantity:
+            return self._mutation_result(need, "ALREADY_APPLIED", occurrences_updated=0)
+        old_unit = need.unit
+        need.quantity = new_quantity
+        await self._bump_need_version(need)
+        ids = await self._reset_uncommitted_occurrences(
+            need.id,
+            RecurringNeedOccurrence.requested_quantity == old_quantity,
+            RecurringNeedOccurrence.unit == old_unit,
+            requested_quantity=new_quantity,
+        )
+        self._audit_mutation(need, "PERMANENT_QUANTITY", f"{float(old_quantity):g}", f"{new_quantity:g}")
+        logger.info("recurring_need.updated | recurring_need_id=%s | occurrences_updated=%s", need.id, len(ids))
+        return self._mutation_result(need, "APPLIED", occurrences_updated=len(ids))
+
+    async def _apply_permanent_frequency(
         self,
         need: RecurringNeed,
         *,
-        quantity: Optional[float] = None,
-        recurrence_type: Optional[str] = None,
-        weekly_days: Optional[List[int]] = None,
-        excluded_weekdays: Optional[List[int]] = None,
+        recurrence_type: Optional[str],
+        weekly_days: Optional[List[int]],
+        excluded_weekdays: Optional[List[int]],
     ) -> Dict[str, Any]:
-        """Modifie `recurring_needs` PUIS les occurrences FUTURES encore `OPEN` — jamais une
-        occurrence qui a quitté cet état (mandat §9), et jamais une exception ponctuelle déjà posée
-        sur une occurrence encore `OPEN` (mandat §10) : une occurrence dont `requested_quantity` a
-        déjà été explicitement modifiée (≠ l'ancienne quantité permanente) reste intacte — une mise à
-        jour générale ne doit jamais écraser silencieusement une exception explicite."""
-        current_session = self.session
-        old_quantity = need.quantity
-        old_unit = need.unit
-
-        if quantity is not None:
-            need.quantity = float(quantity)
+        """Change le planning. Les occurrences futures NON engagées, non exceptionnelles, qui ne sont plus dues sont
+        `CANCELLED` (puis ré-ouvertes par la matérialisation si le planning revient) ; une exception explicite, une occurrence
+        engagée ou terminale n'est jamais perdue. La nouvelle fenêtre est matérialisée dans la même transaction."""
+        old_key = self._schedule_key(need)
         if recurrence_type is not None:
             need.recurrence_type = recurrence_type
         if weekly_days is not None:
             need.weekly_days = list(weekly_days)
         if excluded_weekdays is not None:
             need.excluded_weekdays = list(excluded_weekdays)
-        await current_session.flush()
+        new_key = self._schedule_key(need)
+        if new_key == old_key:
+            return self._mutation_result(need, "ALREADY_APPLIED", occurrences_cancelled=0)
+        try:
+            rule = self._recurrence_rule_for(need)
+        except InvalidRecurrenceRule as exc:
+            raise BusinessRuleException(f"Fréquence invalide : {exc}", reason="invalid_frequency") from exc
+        await self._bump_need_version(need)
 
-        updated_count = 0
-        if quantity is not None:
-            # Ne touche QUE les occurrences encore OPEN dont la quantité est EXACTEMENT l'ancienne
-            # quantité permanente — une occurrence déjà en exception (quantité différente posée
-            # explicitement par `OCCURRENCE_OVERRIDE`) n'est jamais écrasée silencieusement.
-            stmt = (
-                update(RecurringNeedOccurrence)
-                .where(
+        current_session = self._db()
+        candidates = (
+            await current_session.execute(
+                select(RecurringNeedOccurrence.id, RecurringNeedOccurrence.occurrence_date).where(
                     RecurringNeedOccurrence.recurring_need_id == need.id,
-                    RecurringNeedOccurrence.status.in_(_MUTABLE_OCCURRENCE_STATUSES),
+                    RecurringNeedOccurrence.status.in_(_UNCOMMITTED_OCCURRENCE_STATUSES),
                     RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
-                    RecurringNeedOccurrence.requested_quantity == old_quantity,
-                    RecurringNeedOccurrence.unit == old_unit,
+                    RecurringNeedOccurrence.requested_quantity == need.quantity,  # hors exceptions explicites
+                    RecurringNeedOccurrence.unit == need.unit,
                 )
-                .values(requested_quantity=need.quantity, unit=need.unit, version=RecurringNeedOccurrence.version + 1)
             )
-            result = await current_session.execute(stmt)
-            updated_count = result.rowcount or 0
+        ).all()
+        cancelled = 0
+        if candidates:
+            due = set(generate_occurrence_dates(rule, from_date=_today(), to_date=max(d for _, d in candidates).date()))
+            stale = [oid for oid, d in candidates if d.date() not in due]
+            if stale:
+                cancelled = len(
+                    await self._reset_uncommitted_occurrences(
+                        need.id, RecurringNeedOccurrence.id.in_(stale), status="CANCELLED"
+                    )
+                )
+        created = 0
+        if need.status == "ACTIVE":
+            created = await self._ensure_window_for_need(need, actor_type="BUYER")
+        self._audit_mutation(need, "PERMANENT_FREQUENCY", old_key, new_key)
+        logger.info(
+            "recurring_need.frequency_reconciled | recurring_need_id=%s | cancelled=%s | created=%s", need.id, cancelled, created
+        )
+        return self._mutation_result(need, "APPLIED", occurrences_cancelled=cancelled, occurrences_created=created)
 
-        logger.info("recurring_need.updated | recurring_need_id=%s | occurrences_updated=%s", need.id, updated_count)
-        return {"status": "success", "recurring_need_id": str(need.id), "occurrences_updated": updated_count}
+    @staticmethod
+    def _schedule_key(need: RecurringNeed) -> str:
+        days = ",".join(str(d) for d in sorted(need.weekly_days or []))
+        excl = ",".join(str(d) for d in sorted(need.excluded_weekdays or []))
+        return f"{need.recurrence_type}[days={days};excl={excl}]"
 
     async def _apply_pause(self, need: RecurringNeed, *, paused_until: Optional[date]) -> Dict[str, Any]:
-        current_session = self.session
-        need.status = "PAUSED"
-        need.paused_until = datetime.combine(paused_until, datetime.min.time()) if paused_until else None
-        await current_session.flush()
-
-        stmt = (
-            update(RecurringNeedOccurrence)
-            .where(
-                RecurringNeedOccurrence.recurring_need_id == need.id,
-                RecurringNeedOccurrence.status.in_(_MUTABLE_OCCURRENCE_STATUSES),
-                RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
+        """`paused_until` = premier jour de REPRISE (exclu de la pause) : les occurrences futures non engagées strictement
+        avant ce jour (toutes, sans date) passent `SKIPPED`. Une occurrence ACCEPTED est un engagement : préservée. La
+        génération future est arrêtée (le besoin n'est plus `ACTIVE`) ; la reprise automatique à `paused_until` est portée
+        par `replenish_occurrence_windows` (même cron, aucun second planificateur)."""
+        if paused_until is not None and paused_until <= _today():
+            raise BusinessRuleException(
+                "La date de reprise doit être postérieure à aujourd'hui.", reason="invalid_pause_date"
             )
-        )
-        if paused_until:
-            stmt = stmt.where(RecurringNeedOccurrence.occurrence_date <= datetime.combine(paused_until, datetime.min.time()))
-        stmt = stmt.values(status="SKIPPED", version=RecurringNeedOccurrence.version + 1)
-        result = await current_session.execute(stmt)
-
-        logger.info("recurring_need.paused | recurring_need_id=%s | occurrences_skipped=%s", need.id, result.rowcount)
-        return {"status": "success", "recurring_need_id": str(need.id), "occurrences_skipped": result.rowcount or 0}
+        until_dt = datetime.combine(paused_until, datetime.min.time()) if paused_until else None
+        if need.status == "PAUSED" and need.paused_until == until_dt:
+            return self._mutation_result(need, "ALREADY_APPLIED", occurrences_skipped=0)
+        old = f"{need.status}(until={need.paused_until.date().isoformat() if need.paused_until else None})"
+        need.status = "PAUSED"
+        need.paused_until = until_dt
+        await self._bump_need_version(need)
+        where = (RecurringNeedOccurrence.occurrence_date < until_dt,) if until_dt else ()
+        ids = await self._reset_uncommitted_occurrences(need.id, *where, status="SKIPPED")
+        self._audit_mutation(need, "PAUSE", old, f"PAUSED(until={paused_until.isoformat() if paused_until else None})")
+        logger.info("recurring_need.paused | recurring_need_id=%s | occurrences_skipped=%s", need.id, len(ids))
+        return self._mutation_result(need, "APPLIED", occurrences_skipped=len(ids))
 
     async def _apply_resume(self, need: RecurringNeed) -> Dict[str, Any]:
-        current_session = self.session
+        """Reprise : `ACTIVE`, planning régénéré À PARTIR D'AUJOURD'HUI (jamais de rattrapage de la période de pause) ; les
+        dates `SKIPPED` par la pause restent des faits historiques."""
+        if need.status == "ACTIVE":
+            return self._mutation_result(need, "ALREADY_APPLIED")
         need.status = "ACTIVE"
         need.paused_until = None
-        await current_session.flush()
-        logger.info("recurring_need.resumed | recurring_need_id=%s", need.id)
-        return {"status": "success", "recurring_need_id": str(need.id)}
+        await self._bump_need_version(need)
+        created = await self._ensure_window_for_need(need, actor_type="BUYER")
+        self._audit_mutation(need, "RESUME", "PAUSED", "ACTIVE")
+        logger.info("recurring_need.resumed | recurring_need_id=%s | occurrences_created=%s", need.id, created)
+        return self._mutation_result(need, "APPLIED", occurrences_created=created)
 
     async def _apply_cancel(self, need: RecurringNeed) -> Dict[str, Any]:
-        current_session = self.session
+        """Fin durable du contrat : plus de génération, plus de matching ; les occurrences futures non engagées (OPEN et
+        MATCHED) passent `CANCELLED`, leurs propositions expirent. Les engagements ACCEPTED et leurs commandes subsistent."""
+        if need.status == "CANCELLED":
+            return self._mutation_result(need, "ALREADY_APPLIED", occurrences_cancelled=0)
+        old = need.status
         need.status = "CANCELLED"
-        await current_session.flush()
-
-        stmt = (
-            update(RecurringNeedOccurrence)
-            .where(
-                RecurringNeedOccurrence.recurring_need_id == need.id,
-                RecurringNeedOccurrence.status.in_(_MUTABLE_OCCURRENCE_STATUSES),
-                RecurringNeedOccurrence.occurrence_date >= datetime.combine(_today(), datetime.min.time()),
-            )
-            .values(status="CANCELLED", version=RecurringNeedOccurrence.version + 1)
-        )
-        result = await current_session.execute(stmt)
-        logger.info("recurring_need.cancelled | recurring_need_id=%s | occurrences_cancelled=%s", need.id, result.rowcount)
-        return {"status": "success", "recurring_need_id": str(need.id), "occurrences_cancelled": result.rowcount or 0}
+        await self._bump_need_version(need)
+        ids = await self._reset_uncommitted_occurrences(need.id, status="CANCELLED")
+        self._audit_mutation(need, "CANCEL", old, "CANCELLED")
+        logger.info("recurring_need.cancelled | recurring_need_id=%s | occurrences_cancelled=%s", need.id, len(ids))
+        return self._mutation_result(need, "APPLIED", occurrences_cancelled=len(ids))
 
     async def _apply_occurrence_override(
         self, need: RecurringNeed, *, occurrence_date: Optional[date], quantity: Optional[float]
     ) -> Dict[str, Any]:
         if occurrence_date is None or quantity is None:
             raise BusinessRuleException("Date et quantité requises.")
+        if not 0 < float(quantity) < float("inf"):
+            raise BusinessRuleException("Quantité invalide : un nombre supérieur à 0 est requis.", reason="invalid_quantity")
         occ = await self._get_mutable_occurrence(need, occurrence_date)
-        current_session = self.session
-        occ.requested_quantity = float(quantity)
-        occ.version = occ.version + 1
-        await current_session.flush()
-        logger.info("occurrence.updated | occurrence_id=%s | requested_quantity=%s", occ.id, quantity)
-        return {"status": "success", "occurrence_id": str(occ.id), "requested_quantity": float(quantity)}
+        if float(occ.requested_quantity) == float(quantity):
+            return self._mutation_result(need, "ALREADY_APPLIED", occurrence_id=str(occ.id), requested_quantity=float(quantity))
+        old = float(occ.requested_quantity)
+        # La proposition construite sur l'ancienne quantité n'a plus de sens : même primitive que la mise à jour permanente.
+        await self._reset_uncommitted_occurrences(need.id, RecurringNeedOccurrence.id == occ.id, requested_quantity=float(quantity), from_today=False)
+        logger.info(
+            "occurrence.mutation | occurrence_id=%s | recurring_need_id=%s | action=OCCURRENCE_OVERRIDE | old=%g | new=%g",
+            occ.id, need.id, old, float(quantity),
+        )
+        return self._mutation_result(need, "APPLIED", occurrence_id=str(occ.id), requested_quantity=float(quantity))
 
     async def _apply_occurrence_skip(
         self,
@@ -2037,15 +2236,14 @@ class RecurringSupplyMixin(BaseMixin):
     ) -> Dict[str, Any]:
         if occurrence_date is None:
             raise BusinessRuleException("Date requise.")
-        occ = await self._get_mutable_occurrence(need, occurrence_date)
-        current_session = self.session
-        occ.status = "SKIPPED"
-        occ.version = occ.version + 1
-        await current_session.flush()
-        # Analytics Phase C : fonction de skip commune à toutes les formulations utilisateur ; le
-        # fait métier = l'occurrence réellement passée à SKIPPED (une 2e tentative échoue dans
-        # `_get_mutable_occurrence`, et la clé est de toute façon unique par occurrence).
-        await BusinessEventEmitter(current_session).emit(
+        occ = await self._get_mutable_occurrence(need, occurrence_date, allow_skipped=True)
+        if occ.status == "SKIPPED":
+            return self._mutation_result(need, "ALREADY_APPLIED", occurrence_id=str(occ.id))
+        quantity, unit = float(occ.requested_quantity), occ.unit
+        await self._reset_uncommitted_occurrences(need.id, RecurringNeedOccurrence.id == occ.id, status="SKIPPED", from_today=False)
+        # Analytics Phase C : le fait métier = l'occurrence réellement passée à SKIPPED ; un rejeu est `ALREADY_APPLIED`
+        # (aucun 2e événement), et la clé est de toute façon unique par occurrence.
+        await BusinessEventEmitter(self._db()).emit(
             event_name=BusinessEventName.RECURRING_OCCURRENCE_SKIPPED,
             journey=Journey.RECURRING,
             actor_type="BUYER",
@@ -2056,28 +2254,66 @@ class RecurringSupplyMixin(BaseMixin):
             entity_id=occ.id,
             idempotency_key=f"RECURRING_OCCURRENCE_SKIPPED:{occ.id}",
             sub_category_id=need.sub_category_id,
-            quantity=float(occ.requested_quantity),
-            unit=occ.unit,
+            quantity=quantity,
+            unit=unit,
             metadata={"recurring_need_id": str(need.id)},
         )
         logger.info("occurrence.skipped | occurrence_id=%s", occ.id)
-        return {"status": "success", "occurrence_id": str(occ.id)}
+        return self._mutation_result(need, "APPLIED", occurrence_id=str(occ.id))
 
-    async def _get_mutable_occurrence(self, need: RecurringNeed, occurrence_date: date) -> RecurringNeedOccurrence:
+    async def _get_mutable_occurrence(
+        self, need: RecurringNeed, occurrence_date: date, *, allow_skipped: bool = False
+    ) -> RecurringNeedOccurrence:
         current_session = self.session
         occ = await current_session.scalar(
-            select(RecurringNeedOccurrence).where(
+            select(RecurringNeedOccurrence)
+            .where(
                 RecurringNeedOccurrence.recurring_need_id == need.id,
                 RecurringNeedOccurrence.occurrence_date == datetime.combine(occurrence_date, datetime.min.time()),
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if occ is None:
             raise BusinessRuleException("Aucune occurrence à cette date.")
-        if occ.status not in _MUTABLE_OCCURRENCE_STATUSES:
+        if allow_skipped and occ.status == "SKIPPED":
+            return occ
+        if occ.status not in _UNCOMMITTED_OCCURRENCE_STATUSES:
             raise BusinessRuleException(
-                f"Cette date n'est plus modifiable (statut actuel : {occ.status})."
+                f"Cette date n'est plus modifiable (statut actuel : {occ.status}).", reason="occurrence_not_open"
             )
         return occ
+
+    # ── pauses temporelles échues ─────────────────────────────────────
+
+    async def _resume_elapsed_pauses(self, *, need_id: Any = None) -> int:
+        """Reprise automatique : un besoin `PAUSED` dont `paused_until` est atteint repasse `ACTIVE` (sans rattrapage : la
+        matérialisation part d'aujourd'hui). Appelée par le cron de réapprovisionnement ET par le self-service, sous le
+        verrou du besoin — idempotent, jamais de second planificateur."""
+        stmt = select(RecurringNeed).where(
+            RecurringNeed.status == "PAUSED",
+            RecurringNeed.paused_until.is_not(None),
+            RecurringNeed.paused_until <= datetime.combine(_today(), datetime.min.time()),
+        )
+        if need_id is not None:
+            stmt = stmt.where(RecurringNeed.id == need_id)
+        needs = (
+            await self._db().execute(stmt.with_for_update(skip_locked=True).execution_options(populate_existing=True))
+        ).scalars().all()
+        for need in needs:
+            need.status = "ACTIVE"
+            need.paused_until = None
+            await self._bump_need_version(need)
+            self._audit_mutation(need, "RESUME", "PAUSED(elapsed)", "ACTIVE", actor="SYSTEM")
+        return len(needs)
+
+    async def _lock_active_need(self, need: RecurringNeed) -> Optional[RecurringNeed]:
+        """Reverrouille le besoin et renvoie son état COMMITÉ le plus récent s'il est encore `ACTIVE`, sinon `None` : la
+        matérialisation ne décide jamais sur un objet lu avant une annulation/pause/modification concurrente."""
+        fresh = await self._db().scalar(
+            select(RecurringNeed).where(RecurringNeed.id == need.id).with_for_update().execution_options(populate_existing=True)
+        )
+        return fresh if fresh is not None and fresh.status == "ACTIVE" else None
 
 
 def _order_fulfillment_state(order_status: Any, delivery_status: Any) -> str:
@@ -2115,4 +2351,10 @@ def _parse_date(value: Optional[Any]) -> Optional[date]:
     raise BusinessRuleException(f"Date invalide : {value!r}")
 
 
-__all__ = ["RecurringSupplyMixin", "RECURRING_NEED_ACTIONS", "MATCH_RESPONSE_ACTIONS"]
+__all__ = [
+    "RecurringSupplyMixin",
+    "RECURRING_NEED_ACTIONS",
+    "MATCH_RESPONSE_ACTIONS",
+    "recurring_need_version",
+    "recurring_need_version_of",
+]

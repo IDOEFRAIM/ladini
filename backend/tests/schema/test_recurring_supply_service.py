@@ -434,8 +434,8 @@ def test_pause_skips_future_open_occurrences_within_the_pause_window(market):
 
     need, occs = _run(market[0], fn)
     assert need.status == "PAUSED"
-    skipped = [o for o in occs if o.occurrence_date.date() <= date(2026, 9, 18)]
-    still_open = [o for o in occs if o.occurrence_date.date() > date(2026, 9, 18)]
+    skipped = [o for o in occs if o.occurrence_date.date() < date(2026, 9, 18)]  # B25 : paused_until = jour de reprise (exclu)
+    still_open = [o for o in occs if o.occurrence_date.date() >= date(2026, 9, 18)]
     assert all(o.status == "SKIPPED" for o in skipped)
     assert all(o.status == "OPEN" for o in still_open)
 
@@ -453,7 +453,7 @@ def test_resume_reactivates_the_need_without_reverting_past_skips(market):
 
     need, occs = _run(market[0], fn)
     assert need.status == "ACTIVE" and need.paused_until is None
-    skipped_by_pause = [o for o in occs if o.occurrence_date.date() <= date(2026, 9, 18)]
+    skipped_by_pause = [o for o in occs if o.occurrence_date.date() < date(2026, 9, 18)]
     assert all(o.status == "SKIPPED" for o in skipped_by_pause)  # un skip reste un fait historique
 
 

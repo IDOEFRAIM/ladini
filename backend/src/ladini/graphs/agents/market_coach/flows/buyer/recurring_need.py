@@ -1053,12 +1053,18 @@ async def _update_from_message(state: Dict[str, Any], mc_runtime: MarketRuntime)
 
     _arbitration_log(state, intent=intent, relation="CORRECTION", reason="contextual_correction", resolution=resolution)
     result: Dict[str, Any] = {}
+    expected_version = need.get("need_version")  # version lue avec la liste : une intention périmée est refusée (B25)
     for service_action, kwargs in steps:
         try:
-            result = await gw.update_recurring_need(phone=str(phone), recurring_need_id=need_id, action=service_action, **kwargs)
+            result = await gw.update_recurring_need(
+                phone=str(phone), recurring_need_id=need_id, action=service_action, expected_version=expected_version, **kwargs)
         except MCPCallError as exc:
             logger.warning("recurring_need.update_failed | need=%s | action=%s | %s", need_id, service_action, exc)
             return {"final_response": "Je n'ai pas pu appliquer ce changement.", "status": "COMPLETED"}
+        if isinstance(result, dict) and result.get("status") == "conflict":
+            return {"final_response": _version_conflict_reply(product_label, result), "status": "COMPLETED",
+                    "relation_to_context": "CORRECTION"}
+        expected_version = result.get("need_version") if isinstance(result, dict) else None
     return {"final_response": _render_update_summary(need, steps), "status": "COMPLETED", "result": result,
             "relation_to_context": "CORRECTION"}
 
@@ -1105,7 +1111,7 @@ async def _next_open_occurrence(gw: RecurringSupplyGateway, phone: Any, need_id:
         detail = await gw.get_recurring_need_detail(phone=str(phone), recurring_need_id=need_id)
     except MCPCallError:
         return None
-    if isinstance(detail, dict) and detail.get("status") == "success" and detail.get("occurrence_status") == "OPEN":
+    if isinstance(detail, dict) and detail.get("status") == "success" and detail.get("occurrence_status") in ("OPEN", "MATCHED"):
         return str(detail.get("occurrence_date") or "")[:10] or None
     return None
 
@@ -1120,7 +1126,7 @@ async def _propose_command(
     réponse fermée. « annuler » est ambigu (ignorer la prochaine ? tout arrêter ?) : le menu propose les deux."""
     need_id, product = str(need["recurring_need_id"]), str(need.get("product") or "")
     phone = state.get("user_phone")
-    base: Dict[str, Any] = {"recurring_need_id": need_id}
+    base: Dict[str, Any] = {"recurring_need_id": need_id, "expected_version": need.get("need_version"), "product": product}
 
     def log(reason: str) -> None:
         _arbitration_log(state, intent="UPDATE_RECURRING_NEED", relation="AMBIGUOUS", reason=reason, resolution=resolution)
@@ -1183,15 +1189,29 @@ async def _propose_command(
                                "Le besoin récurrent reste inchangé.", [("Oui, changer cette livraison", "EXEC:<k>", cmd), keep])
 
 
+def _version_conflict_reply(product: str, conflict: Dict[str, Any]) -> str:
+    """Conflit de version (B25) : le besoin a changé depuis ce que l'acheteur a vu. Message métier — jamais d'erreur technique,
+    jamais d'application silencieuse : l'état courant est montré et la demande est à REFORMULER sur cette version."""
+    current = conflict.get("current") or {}
+    state = ""
+    if current:
+        state = f" Il est maintenant à {_fmt_qty(current.get('quantity'))} {current.get('unit') or ''} {_frequency_label(current)}".rstrip() + "."
+    return (f"Votre besoin de {product} a été modifié entre-temps.{state} Rien n'a été changé : "
+            "redites votre demande pour l'appliquer sur cette version.")
+
+
 async def _execute_command(state: Dict[str, Any], mc_runtime: MarketRuntime, command: Dict[str, Any]) -> Dict[str, Any]:
     """Exécute le SNAPSHOT confirmé par une réponse fermée. Le service revalide la propriété (buyer_id) et l'état de
     l'occurrence : un besoin/une date devenus invalides sont refusés, jamais forcés."""
     gw = RecurringSupplyGateway(mc_runtime)
-    kwargs: Dict[str, Any] = {k: command[k] for k in ("occurrence_date", "quantity") if command.get(k) is not None}
+    kwargs: Dict[str, Any] = {k: command[k] for k in ("occurrence_date", "quantity", "expected_version") if command.get(k) is not None}
     try:
         outcome = await gw.update_recurring_need(
             phone=str(state.get("user_phone")), recurring_need_id=str(command["recurring_need_id"]),
             action=str(command["action"]), **kwargs)
+        if isinstance(outcome, dict) and outcome.get("status") == "conflict":
+            return {"final_response": _version_conflict_reply(str(command.get("product") or ""), outcome),
+                    "status": "COMPLETED"}
         if not isinstance(outcome, dict) or outcome.get("status") != "success":
             raise MCPCallError(tool="update_recurring_need", message="refus du service", error_code="BUSINESS_RULE", request_id="n/a")
     except MCPCallError as exc:

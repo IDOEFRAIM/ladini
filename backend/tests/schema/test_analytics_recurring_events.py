@@ -269,8 +269,8 @@ def test_skip_emits_occurrence_skipped_once_and_replay_emits_nothing(market):
         )
 
     out = _run(dsn, skip)
-    with pytest.raises(BusinessRuleException):
-        _run(dsn, skip)
+    assert out["outcome"] == "APPLIED"
+    assert _run(dsn, skip)["outcome"] == "ALREADY_APPLIED"  # B25 : rejeu idempotent, aucun 2e événement
 
     async def fn(session):
         return await _events(session, "RECURRING_OCCURRENCE_SKIPPED", entity_id=out["occurrence_id"])

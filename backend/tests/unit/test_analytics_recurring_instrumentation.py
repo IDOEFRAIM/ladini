@@ -120,10 +120,18 @@ class TestSkip:
         session = SimpleNamespace(flush=AsyncMock())
         svc = _svc(session)
         svc._get_mutable_occurrence = AsyncMock(return_value=occ)
+
+        async def _persist_skip(*_a, **_k):  # la primitive de réécriture (B25) pose le statut en base
+            occ.status = "SKIPPED"
+            return [occ.id]
+
+        svc._reset_uncommitted_occurrences = AsyncMock(side_effect=_persist_skip)
         need = _need()
-        run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17)))
-        assert occ.status == "SKIPPED"
-        run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17)))
+        need.updated_at = datetime(2026, 9, 15, 12, 0, 0)
+        first = run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17)))
+        assert occ.status == "SKIPPED" and first["outcome"] == "APPLIED"
+        replay = run(svc._apply_occurrence_skip(need, occurrence_date=date(2026, 9, 17)))
+        assert replay["outcome"] == "ALREADY_APPLIED"  # rejeu : aucun 2e événement
         assert list(outbox) == [f"RECURRING_OCCURRENCE_SKIPPED:{occ.id}"]
 
     def test_invalid_skip_emits_nothing(self, outbox):

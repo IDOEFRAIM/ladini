@@ -104,6 +104,8 @@ jobs:
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
+        # Une panne réseau/TLS de Codecov lève une exception AVANT `fail_ci_if_error` : l'upload ne doit jamais rougir la CI.
+        continue-on-error: true
         with:
           file: backend/coverage.xml
           fail_ci_if_error: false
