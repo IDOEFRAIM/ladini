@@ -11,21 +11,16 @@ import pathlib
 
 import pytest
 
-from ladini.graphs.agents.market_coach.core.base import validate_config_drift
-from ladini.graphs.agents.market_coach.core.goals import (
-    ALL_BUYER_TUNNEL_GOALS,
-    NAVIGATION_BREAKOUT_GOALS,
-    PRODUCER_ESCROW_GOALS,
-    PRODUCER_RESOLVER_GOALS,
-    PRODUCER_UPDATE_GOALS,
+from ladini.graphs.agents.market_coach.interpreter.intent import (
+    INTENT_CONFIG, INTENT_ROLE, INTENT_DISAMBIGUATION,
 )
 from ladini.graphs.agents.market_coach.core.slots import _EXPECTED_INPUT_MAP
-from ladini.graphs.agents.market_coach.interpreter.intent import (
-    INTENT_CONFIG,
-    INTENT_DISAMBIGUATION,
-    INTENT_ROLE,
+from ladini.graphs.agents.market_coach.core.goals import (
+    ALL_BUYER_TUNNEL_GOALS, PRODUCER_RESOLVER_GOALS, PRODUCER_UPDATE_GOALS,
+    PRODUCER_ESCROW_GOALS, NAVIGATION_BREAKOUT_GOALS,
 )
-from ladini.graphs.agents.market_coach.registry import iter_actions, load_all_actions
+from ladini.graphs.agents.market_coach.registry import load_all_actions, iter_actions
+from ladini.graphs.agents.market_coach.core.base import validate_config_drift
 
 load_all_actions()
 REGISTERED = {intent for intent, _ in iter_actions()}
@@ -210,21 +205,15 @@ class TestNoDuplicatedSourceOfTruth:
     « par nœud » du projet. On verrouille l'unicité des plus sensibles."""
 
     def test_production_type_vocabulary_is_shared(self):
-        from ladini.graphs.agents.market_coach.interpreter.entities import (
-            _PRODUCTION_TYPE_WORDS,
-        )
+        from ladini.graphs.agents.market_coach.interpreter.entities import _PRODUCTION_TYPE_WORDS
         from ladini.graphs.agents.market_coach.services.domain.slot_enrichment import (
             PRODUCTION_TYPE_WORDS,
         )
         assert _PRODUCTION_TYPE_WORDS is PRODUCTION_TYPE_WORDS
 
     def test_ephemeral_working_keys_are_shared(self):
-        from ladini.graphs.agents.market_coach.nodes.cleaner import (
-            _EPHEMERAL_WORKING_KEYS as A,
-        )
-        from ladini.graphs.agents.market_coach.nodes.memory import (
-            _EPHEMERAL_WORKING_KEYS as B,
-        )
+        from ladini.graphs.agents.market_coach.nodes.cleaner import _EPHEMERAL_WORKING_KEYS as A
+        from ladini.graphs.agents.market_coach.nodes.memory import _EPHEMERAL_WORKING_KEYS as B
         assert set(A) == set(B)
 
     def test_confirmation_summary_has_a_single_builder(self):

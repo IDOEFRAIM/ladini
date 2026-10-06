@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import StubRuntime, make_state, run
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from tests.conftest import StubRuntime, make_state, run
 from tests.harness.state import clears
 
 
@@ -95,37 +95,27 @@ class TestExtractPriceCorrection:
         ("prix 150,5", 150.5),
     ])
     def test_extracts_price(self, text, expected):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_price_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_price_correction
         assert _extract_price_correction(text) == expected
 
     def test_zero_or_negative_price_is_rejected(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_price_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_price_correction
         assert _extract_price_correction("prix 0") is None
 
     def test_no_price_mentioned_returns_none(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_price_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_price_correction
         assert _extract_price_correction("bonjour comment allez vous") is None
 
 
 class TestExtractQuantityCorrection:
     def test_recognized_unit_wins(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_quantity_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         qty, unit = _extract_quantity_correction("quantité 500 kg")
         assert qty == 500
         assert unit is not None
 
     def test_bare_quantity_without_unit_word_is_still_accepted_via_fallback(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_quantity_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         qty, unit = _extract_quantity_correction("quantité 500")
         assert qty == 500.0
         assert unit is None
@@ -133,16 +123,12 @@ class TestExtractQuantityCorrection:
     def test_price_text_is_not_confused_with_quantity(self):
         """Régression documentée dans le fichier source : "225 fcfa" ne doit
         JAMAIS être lu comme une quantité=225."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_quantity_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         qty, unit = _extract_quantity_correction("225 fcfa")
         assert qty is None
 
     def test_no_number_returns_none_none(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_quantity_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         assert _extract_quantity_correction("bonjour") == (None, None)
 
     def test_a_long_verbal_connector_between_trigger_and_number_is_still_recognized(self):
@@ -150,9 +136,7 @@ class TestExtractQuantityCorrection:
         (19 caractères entre "quantite" et "95") ne matchait plus rien avec
         l'ancienne borne `\\D{0,10}` — la quantité disparaissait
         silencieusement d'une double correction prix+quantité."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_quantity_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         qty, unit = _extract_quantity_correction("la quantite est maintenant de 95")
         assert qty == 95.0
         assert unit is None
@@ -161,9 +145,7 @@ class TestExtractQuantityCorrection:
         """La borne élargie reste bornée : un nombre séparé du déclencheur
         par une clause entièrement différente ne doit toujours pas être pris
         pour la quantité."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_quantity_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         qty, unit = _extract_quantity_correction(
             "la quantité, on en reparlera une autre fois si besoin, le prix est 400"
         )
@@ -172,97 +154,69 @@ class TestExtractQuantityCorrection:
 
 class TestExtractNameCorrection:
     def test_explicit_rename_trigger_is_required(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_name_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_name_correction
         assert _extract_name_correction("le kg d'oignon coûte 225 fcfa") is None
 
     def test_extracts_the_new_name_after_trigger(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_name_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_name_correction
         assert _extract_name_correction("nom mil") == "mil"
 
     def test_stops_at_a_linking_stopword(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_name_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_name_correction
         result = _extract_name_correction("le nom c'est mais et la quantité est 3632 kg")
         assert result == "mais"
 
     def test_captures_up_to_two_words(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_name_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_name_correction
         assert _extract_name_correction("nom petit mil rouge") == "petit mil"
 
 
 class TestExtractDateCorrection:
     def test_iso_date_is_recognized(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_date_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_date_correction
         assert _extract_date_correction("date 2026-12-31") == "2026-12-31"
 
     def test_french_date_is_recognized(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_date_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_date_correction
         assert _extract_date_correction("disponible le 13 décembre 2026") == "2026-12-13"
 
     def test_slash_date_is_recognized(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_date_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_date_correction
         assert _extract_date_correction("le 13/12/2026") == "2026-12-13"
 
     def test_invalid_slash_date_is_rejected(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_date_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_date_correction
         assert _extract_date_correction("le 99/99/2026") is None
 
     def test_no_date_returns_none(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_date_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_date_correction
         assert _extract_date_correction("aucune date ici") is None
 
 
 class TestExtractOtpCode:
     def test_code_trigger_word_is_preferred(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_otp_code,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_otp_code
         assert _extract_otp_code("mon code est 1234") == "1234"
 
     def test_bare_four_digit_number_is_accepted_without_trigger(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_otp_code,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_otp_code
         assert _extract_otp_code("livré, 5678") == "5678"
 
     def test_no_code_returns_none(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _extract_otp_code,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_otp_code
         assert _extract_otp_code("pas encore livré") is None
 
 
 class TestParseUpdateCorrection:
     def test_combines_multiple_fields(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _parse_update_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
         fields = _parse_update_correction("prix 300, quantité 50 kg, nom mil", allow_type_date=False)
         assert fields["price"] == 300.0
         assert fields["quantity"] == 50
         assert fields["product"] == "mil"
 
     def test_date_and_type_only_extracted_when_allowed(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _parse_update_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
         text = "disponible le 2026-12-31"
         with_dates = _parse_update_correction(text, allow_type_date=True)
         without_dates = _parse_update_correction(text, allow_type_date=False)
@@ -270,9 +224,7 @@ class TestParseUpdateCorrection:
         assert "estimated_available_at" not in without_dates
 
     def test_empty_text_yields_empty_fields(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _parse_update_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
         assert _parse_update_correction("bonjour", allow_type_date=True) == {}
 
     def test_price_correction_with_a_per_unit_basis_updates_the_display_unit(self):
@@ -282,9 +234,7 @@ class TestParseUpdateCorrection:
         prix mais rien ne captait "PAR UNITE" comme base de prix, et
         `_format_pending_recap` affiche toujours `unit` (jamais un champ
         `price_unit` séparé, qui n'existe pas dans ce mini-flow)."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _parse_update_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
         fields = _parse_update_correction(
             "nonnn c est 3500 FCFA PAR UNITE", allow_type_date=False
         )
@@ -296,9 +246,7 @@ class TestParseUpdateCorrection:
         prix ne doit jamais laisser la base de prix écraser l'unité de la
         quantité (ce mini-flow n'a qu'un seul champ `unit` affiché pour les
         deux — la quantité, plus précise, doit gagner)."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _parse_update_correction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
         fields = _parse_update_correction(
             "500 kg, prix 3500 fcfa l'unite", allow_type_date=False
         )
@@ -307,9 +255,7 @@ class TestParseUpdateCorrection:
 
 class TestFormatPendingRecap:
     def test_includes_all_provided_fields(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _format_pending_recap,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _format_pending_recap
         recap = _format_pending_recap(
             {"product": "mil", "price": 300, "quantity": 50, "unit": "kg",
              "estimated_available_at": "2026-12-31", "production_type": "future"},
@@ -318,9 +264,7 @@ class TestFormatPendingRecap:
         assert "mil" in recap and "300" in recap and "50" in recap and "2026-12-31" in recap
 
     def test_unit_only_line_shown_when_no_price_or_quantity(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _format_pending_recap,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _format_pending_recap
         recap = _format_pending_recap({"unit": "sac"}, noun="lot")
         assert "Nouvelle unité" in recap
 
@@ -331,25 +275,19 @@ class TestFormatPendingRecap:
 
 class TestResolveAuction:
     def test_no_results_returns_a_completed_message(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_auction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_auction
         runtime = rt({"get_auctions": {"status": "success", "count": 0}})
         result = run(_resolve_auction(runtime, "+2260", {"product": "mais"}))
         assert result["status"] == "COMPLETED"
 
     def test_gateway_failure_returns_a_completed_message(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_auction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_auction
         runtime = rt({"get_auctions": {"status": "error"}})
         result = run(_resolve_auction(runtime, "+2260", {}))
         assert result["status"] == "COMPLETED"
 
     def test_success_builds_a_selection_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_auction,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_auction
         runtime = rt({"get_auctions": {
             "status": "success", "count": 2,
             "mapping": {"1": "a1", "2": "a2"},
@@ -366,32 +304,24 @@ class TestResolveAuction:
 
 class TestResolveMyBids:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_my_bids,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_my_bids
         result = run(_resolve_my_bids(rt(), "", {}))
         assert result["status"] == "ERROR"
 
     def test_gateway_failure_returns_completed_message(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_my_bids,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_my_bids
         runtime = rt({"get_my_active_bids": {"status": "error"}})
         result = run(_resolve_my_bids(runtime, "+2260", {}))
         assert result["status"] == "COMPLETED"
 
     def test_empty_data_returns_no_active_offers_message(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_my_bids,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_my_bids
         runtime = rt({"get_my_active_bids": {"status": "success", "data": []}})
         result = run(_resolve_my_bids(runtime, "+2260", {}))
         assert "aucune offre" in result["final_response"].lower()
 
     def test_success_builds_a_selection_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_my_bids,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_my_bids
         runtime = rt({"get_my_active_bids": {"status": "success", "data": [
             {"bid_id": "b1", "product": "mais", "offered_price": 250, "status": "PENDING"},
         ]}})
@@ -504,16 +434,12 @@ class TestProducerAuctionResolverDeviations:
 
 class TestResolveDefaultFarm:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         result = run(_resolve_default_farm(rt(), "", {}))
         assert result["status"] == "ERROR"
 
     def test_cached_farms_skip_the_network_call(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         runtime = rt()
         state = {"user_farms_cache": [{"id": "f1"}]}
         result = run(_resolve_default_farm(runtime, "+2260", {}, state=state))
@@ -521,34 +447,26 @@ class TestResolveDefaultFarm:
         assert "get_farms" not in runtime.calls
 
     def test_zero_farms_defers_to_planning(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         runtime = rt({"get_farms": {"status": "success", "data": []}})
         result = run(_resolve_default_farm(runtime, "+2260", {}))
         assert result["status"] == "PLANNING"
 
     def test_single_farm_autofills_silently(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         runtime = rt({"get_farms": {"status": "success", "data": [{"id": "f1", "name": "Ferme A"}]}})
         result = run(_resolve_default_farm(runtime, "+2260", {}))
         assert result["status"] == "PLANNING"
         assert result["transaction_payload"]["farm_id"] == "f1"
 
     def test_single_farm_without_id_is_an_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         runtime = rt({"get_farms": {"status": "success", "data": [{"name": "Ferme sans id"}]}})
         result = run(_resolve_default_farm(runtime, "+2260", {}))
         assert "farm_id_unresolved" in result["validation_errors"]
 
     def test_multiple_farms_with_selection_index_resolves(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         runtime = rt({"get_farms": {"status": "success", "data": [
             {"id": "f1", "name": "Ferme A"}, {"id": "f2", "name": "Ferme B"},
         ]}})
@@ -557,9 +475,7 @@ class TestResolveDefaultFarm:
         assert clears(result["transaction_payload"], "selection_index")
 
     def test_multiple_farms_without_selection_shows_a_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_default_farm,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm
         runtime = rt({"get_farms": {"status": "success", "data": [
             {"id": "f1", "name": "Ferme A", "size": 5}, {"id": "f2", "name": "Ferme B"},
         ]}})
@@ -580,16 +496,12 @@ class TestResolveDefaultFarm:
 
 class TestResolveCycleForUpdate:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         result = run(_resolve_cycle_for_update(rt(), "", {}, {}, "", ""))
         assert result["status"] == "ERROR"
 
     def test_confirm_phase_with_a_new_correction_updates_the_recap(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {
             "update_phase": "CONFIRM", "update_cycle_id": "c1", "update_listing": _LOT_LISTING,
             "update_pending": _certified_lot_pending("200 le kg"),
@@ -602,9 +514,7 @@ class TestResolveCycleForUpdate:
         assert pending["price_offer"]["quantity"] == "500"
 
     def test_confirm_event_success_writes_and_clears_state(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": _certified_lot_pending()}
         runtime = rt({"update_production_fields": {"status": "success", "message": "OK"}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, working, "oui", "CONFIRM"))
@@ -629,42 +539,32 @@ class TestResolveCycleForUpdate:
         assert result["response_strategy"] == "ERROR"
 
     def test_confirm_event_gateway_failure_result(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": _certified_lot_pending()}
         runtime = rt({"update_production_fields": {"status": "error", "message": "Refusé"}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, working, "oui", "CONFIRM"))
         assert result["final_response"] == "Refusé"
 
     def test_reject_event_cancels_without_writing(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
         result = run(_resolve_cycle_for_update(rt(), "+2260", {}, working, "non", "REJECT"))
         assert "annulée" in result["final_response"]
 
     def test_ambiguous_reply_reshows_the_recap(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
         result = run(_resolve_cycle_for_update(rt(), "+2260", {}, working, "peut-etre", ""))
         assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
     def test_collect_phase_no_correction_asks_what_to_update(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
         result = run(_resolve_cycle_for_update(rt(), "+2260", {"cycle_id": "c1"}, working, "bonjour", ""))
         assert to_tunnel_category(get_pending_interaction(result)) == "UPDATE_FIELD"
 
     def test_collect_phase_with_correction_moves_to_confirm(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
         result = run(_resolve_cycle_for_update(
             rt(_LIST_ONE_LOT), "+2260", {"cycle_id": "c1"}, working, "prix 400 le kg", "",
@@ -678,9 +578,7 @@ class TestResolveCycleForUpdate:
         """Chantier résilience 2026-08 : la branche "ni correction ni CONFIRM
         ni REJECT clair" doit accuser réception via le LLM avant de rejouer
         le récap, pas juste le répéter mot pour mot."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
         runtime = rt_with_llm("D'accord, dites-moi si vous voulez changer autre chose.")
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, working, "attendez je réfléchis", ""))
@@ -688,9 +586,7 @@ class TestResolveCycleForUpdate:
         assert "prix" in result["final_response"].lower()
 
     def test_collect_phase_unknown_event_gets_an_adaptive_note(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
         runtime = rt_with_llm("Je ne suis pas sûr de comprendre votre question.")
         result = run(_resolve_cycle_for_update(
@@ -702,9 +598,7 @@ class TestResolveCycleForUpdate:
     def test_collect_phase_answer_event_does_not_call_the_llm(self):
         """Sur l'entrée fraîche (juste après la sélection du lot, event pas
         classé UNKNOWN/OUT_OF_SCOPE), pas d'appel LLM inutile."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
 
         class _BoomLLM(_StubLLM):
@@ -731,25 +625,19 @@ class TestResolveCycleForUpdate:
         assert result["status"] == "ERROR"
 
     def test_select_phase_status_failure(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         runtime = rt({"list_producer_productions": {"status": "error"}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, {}, "", ""))
         assert result["status"] == "ERROR"
 
     def test_select_phase_empty_items(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         runtime = rt({"list_producer_productions": {"status": "success", "data": []}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, {}, "", ""))
         assert result["status"] == "COMPLETED"
 
     def test_select_phase_success_shows_a_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_cycle_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         runtime = rt({"list_producer_productions": {"status": "success", "data": [
             {"cycle_id": "c1", "product_label": "mais", "quantity": 100, "unit": "kg", "price": 250},
         ]}})
@@ -764,18 +652,14 @@ class TestResolveCycleForUpdate:
 
 class TestResolveProductForUpdate:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         result = run(_resolve_product_for_update(rt(), "", {}, {}, "", ""))
         assert result["status"] == "ERROR"
 
     def test_confirm_event_success_renames_product_field(self):
         """`update_product` reçoit `name=` (pas `product=`) — vérifie le
         renommage de clé avant l'appel gateway."""
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         working = {"update_phase": "CONFIRM", "update_product_id": "p1", "update_pending": {"product": "mil"}}
         runtime = rt({"update_product_price_and_qty": {"status": "success", "message": "OK"}})
         result = run(_resolve_product_for_update(runtime, "+2260", {}, working, "oui", "CONFIRM"))
@@ -783,24 +667,18 @@ class TestResolveProductForUpdate:
         assert result["response_strategy"] == "SUCCESS"
 
     def test_reject_event_cancels(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         working = {"update_phase": "CONFIRM", "update_product_id": "p1", "update_pending": {"price": 200}}
         result = run(_resolve_product_for_update(rt(), "+2260", {}, working, "non", "REJECT"))
         assert "annulée" in result["final_response"]
 
     def test_collect_phase_no_correction_asks(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         result = run(_resolve_product_for_update(rt(), "+2260", {"product_id": "p1"}, {}, "bonjour", ""))
         assert to_tunnel_category(get_pending_interaction(result)) == "UPDATE_FIELD"
 
     def test_ambiguous_confirm_reply_gets_an_adaptive_note(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         working = {"update_phase": "CONFIRM", "update_product_id": "p1", "update_pending": {"price": 200}}
         runtime = rt_with_llm("Pas de souci, dites-moi ce que vous voulez ajuster.")
         result = run(_resolve_product_for_update(runtime, "+2260", {}, working, "hmm attendez", ""))
@@ -808,9 +686,7 @@ class TestResolveProductForUpdate:
         assert "prix" in result["final_response"].lower()
 
     def test_collect_phase_unknown_event_gets_an_adaptive_note(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         runtime = rt_with_llm("Je note votre remarque.")
         result = run(_resolve_product_for_update(
             runtime, "+2260", {"product_id": "p1"}, {}, "c'est pas clair", "OUT_OF_SCOPE",
@@ -833,17 +709,13 @@ class TestResolveProductForUpdate:
         assert result["status"] == "ERROR"
 
     def test_select_phase_empty_catalog(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         runtime = rt({"get_my_products": {"status": "success", "data": []}})
         result = run(_resolve_product_for_update(runtime, "+2260", {}, {}, "", ""))
         assert result["status"] == "COMPLETED"
 
     def test_select_phase_success_shows_a_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_product_for_update,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         runtime = rt({"get_my_products": {"status": "success", "data": [
             {"id": "p1", "name": "mais", "quantity_for_sale": 100, "unit": "kg", "price": 250},
         ]}})
@@ -857,16 +729,12 @@ class TestResolveProductForUpdate:
 
 class TestResolveDeliveryOtp:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_delivery_otp,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         result = run(_resolve_delivery_otp(rt(), "", {}, {}, "", ""))
         assert result["status"] == "ERROR"
 
     def test_no_code_asks_for_it(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_delivery_otp,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         result = run(_resolve_delivery_otp(rt(), "+2260", {}, {}, "pas encore livré", ""))
         assert to_tunnel_category(get_pending_interaction(result)) == "OTP_CODE"
 
@@ -885,27 +753,21 @@ class TestResolveDeliveryOtp:
         assert result["response_strategy"] == "ERROR"
 
     def test_invalid_code_stays_in_the_tunnel(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_delivery_otp,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         runtime = rt({"verify_delivery_otp": {"status": "error", "message": "Code invalide"}})
         result = run(_resolve_delivery_otp(runtime, "+2260", {}, {}, "code 1234", ""))
         assert to_tunnel_category(get_pending_interaction(result)) == "OTP_CODE"
         assert result["final_response"] == "Code invalide"
 
     def test_valid_code_unlocks_funds(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_delivery_otp,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         runtime = rt({"verify_delivery_otp": {"status": "success", "message": "Livraison confirmée"}})
         result = run(_resolve_delivery_otp(runtime, "+2260", {}, {}, "code 1234", ""))
         assert result["status"] == "COMPLETED"
         assert result["transaction_payload"] == {"__reset__": True}
 
     def test_code_can_come_from_payload_directly(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            _resolve_delivery_otp,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         runtime = rt({"verify_delivery_otp": {"status": "success", "message": "OK"}})
         result = run(_resolve_delivery_otp(runtime, "+2260", {"otp_code": "9999"}, {}, "", ""))
         assert result["status"] == "COMPLETED"
@@ -917,17 +779,14 @@ class TestResolveDeliveryOtp:
 
 class TestProducerContextResolver:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            producer_context_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(user_phone="")
         result = run(producer_context_resolver(state, rt()))
         assert result["status"] == "ERROR"
 
     def test_farm_id_auto_resolution_runs_first_for_eligible_goals(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            GOALS_NEEDING_FARM_ID,
-            producer_context_resolver,
+            producer_context_resolver, GOALS_NEEDING_FARM_ID,
         )
         goal = next(iter(GOALS_NEEDING_FARM_ID))
         state = make_state(user_phone="+2260", current_goal=goal, transaction_payload={})
@@ -939,8 +798,7 @@ class TestProducerContextResolver:
 
     def test_farm_id_already_present_skips_auto_resolution(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            GOALS_NEEDING_FARM_ID,
-            producer_context_resolver,
+            producer_context_resolver, GOALS_NEEDING_FARM_ID,
         )
         goal = next(iter(GOALS_NEEDING_FARM_ID))
         state = make_state(user_phone="+2260", current_goal=goal, transaction_payload={"farm_id": "f1"})
@@ -959,18 +817,14 @@ class TestProducerContextResolver:
             return {"status": "COMPLETED", "final_response": "auction resolver called"}
 
         monkeypatch.setattr(auctions_mod, "producer_auction_resolver", _fake_resolver)
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            producer_context_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(user_phone="+2260", current_goal=goal, transaction_payload={})
         result = run(producer_context_resolver(state, rt()))
         assert result["final_response"] == "auction resolver called"
         assert calls == [goal]
 
     def test_production_update_future_goal_routes_to_cycle_resolver(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            producer_context_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(
             user_phone="+2260", current_goal="PRODUCTION_UPDATE_FUTURE",
             transaction_payload={}, working_memory={},
@@ -980,9 +834,7 @@ class TestProducerContextResolver:
         assert result["status"] == "COMPLETED"
 
     def test_sales_update_product_goal_routes_to_product_resolver(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            producer_context_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(
             user_phone="+2260", current_goal="SALES_UPDATE_PRODUCT",
             transaction_payload={}, working_memory={},
@@ -992,9 +844,7 @@ class TestProducerContextResolver:
         assert result["status"] == "COMPLETED"
 
     def test_delivery_otp_goal_routes_to_otp_resolver(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            producer_context_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(
             user_phone="+2260", current_goal="PRODUCER_CONFIRM_DELIVERY_OTP",
             transaction_payload={}, working_memory={}, normalized_text="pas de code",
@@ -1013,9 +863,7 @@ class TestProducerContextResolver:
     # fictif / F4 sécurité — voir interpreter/intent.py).
 
     def test_default_fallback_returns_planning(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import (
-            producer_context_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(user_phone="+2260", current_goal="SOME_UNRELATED_GOAL", transaction_payload={})
         result = run(producer_context_resolver(state, rt()))
         assert result["status"] == "PLANNING"

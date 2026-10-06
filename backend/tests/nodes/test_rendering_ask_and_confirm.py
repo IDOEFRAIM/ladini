@@ -21,17 +21,13 @@ def ctx(**state_overrides):
 
 class TestRenderOnboarding:
     def test_default_prompt_when_none_precomputed(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_onboarding,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_onboarding
         c = ctx(onboarding_prompt=None)
         result = run(render_onboarding(c))
         assert "Bienvenue sur Ladini" in result["final_response"]
 
     def test_precomputed_prompt_is_reused(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_onboarding,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_onboarding
         c = ctx(onboarding_prompt="Question personnalisée")
         result = run(render_onboarding(c))
         assert result["final_response"] == "Question personnalisée"
@@ -39,17 +35,13 @@ class TestRenderOnboarding:
 
 class TestRenderAskMissingField:
     def test_no_goal_asks_generic_intent_question(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
         c = ctx(current_goal=None, final_response=None)
         result = run(render_ask_missing_field(c))
         assert "vendre, acheter" in result["final_response"]
 
     def test_candidates_present_renders_a_list_menu_component(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
         c = ctx(
             current_goal="SALES_PUBLISH_PRODUCT",
             final_response=None,
@@ -60,17 +52,13 @@ class TestRenderAskMissingField:
         assert result["ag_ui_component"]["id"] == ["ag_ui", "ListMenu"]
 
     def test_no_candidates_renders_a_form_input_component(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", final_response=None, missing_fields=["price"])
         result = run(render_ask_missing_field(c))
         assert result["ag_ui_component"]["id"] == ["ag_ui", "FormInputComponent"]
 
     def test_progress_prefixes_the_question_with_a_step_counter(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
         c = ctx(
             current_goal="SALES_PUBLISH_PRODUCT", final_response=None,
             missing_fields=["price"],
@@ -80,9 +68,7 @@ class TestRenderAskMissingField:
         assert result["final_response"].startswith("[2/3]")
 
     def test_precomputed_final_response_is_reused_without_llm_call(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", final_response="Déjà calculé")
         result = run(render_ask_missing_field(c))
         assert result["final_response"] == "Déjà calculé"
@@ -171,6 +157,7 @@ class TestTechnicalFailureNeverFakesAnAcknowledgement:
         les prix disponibles ?" pendant une collecte de prix rejouait juste
         la question du champ suivant, en ignorant complètement la question
         posée. Voir [[precommande-architecture-consolidation-2026-08]]."""
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
 
         class _Msg:
             content = "Les prix varient selon la saison, je n'ai pas de liste fixe à te donner."
@@ -199,9 +186,7 @@ class TestTechnicalFailureNeverFakesAnAcknowledgement:
             strategy="ASK_MISSING_FIELD", status="", goal="PROCUREMENT_CREATE_REQUEST",
             salutation="", payload={},
         )
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field as _r,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field as _r
         result = run(_r(c))
         assert result["final_response"].startswith("Les prix varient selon la saison")
 
@@ -209,9 +194,7 @@ class TestTechnicalFailureNeverFakesAnAcknowledgement:
         """Non-régression : le chemin normal (event=ANSWER) appelle le LLM
         UNE seule fois (génération de la question du champ suivant) — pas
         d'appel supplémentaire de reconnaissance d'écart."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            render_ask_missing_field,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
 
         calls = {"n": 0}
 
@@ -250,16 +233,12 @@ class TestTechnicalFailureNeverFakesAnAcknowledgement:
 
 class TestGenerateLlmQuestion:
     def test_no_llm_on_runtime_returns_the_fallback(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            generate_llm_question,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import generate_llm_question
         result = run(generate_llm_question(None, "SALES_PUBLISH_PRODUCT", "price", "prix", {}))
         assert "prix" in result
 
     def test_llm_success_returns_its_content(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            generate_llm_question,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import generate_llm_question
 
         class _Msg:
             content = "Quel est le prix par kilo ?"
@@ -282,9 +261,7 @@ class TestGenerateLlmQuestion:
         assert result == "Quel est le prix par kilo ?"
 
     def test_llm_exception_falls_back(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            generate_llm_question,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import generate_llm_question
 
         class _LLM:
             class chat:
@@ -298,9 +275,7 @@ class TestGenerateLlmQuestion:
         assert "prix" in result
 
     def test_last_field_hint_and_progress_context_included(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
-            generate_llm_question,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.ask import generate_llm_question
         captured = {}
 
         class _Msg:
@@ -346,9 +321,7 @@ def _confirm_pending(goal):
 
 class TestRenderConfirmation:
     def test_no_goal_asks_what_to_confirm(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         c = ctx(current_goal=None)
         result = run(render_confirmation(c))
         assert "récapitulatif" in result["final_response"]
@@ -359,9 +332,7 @@ class TestRenderConfirmation:
         affiché — même si goal/confirmation_summary sont renseignés (ex:
         périmés d'un tour antérieur), sans le signal canonique CONFIRM_ACTION
         ce rendu ne doit JAMAIS afficher le récap tel quel."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         c = ctx(
             current_goal="SALES_PUBLISH_PRODUCT",
             confirmation_summary="Vente de mais\nPrix: 250 FCFA/KG",
@@ -375,9 +346,7 @@ class TestRenderConfirmation:
         assert result["response_strategy"] == "CLARIFICATION"
 
     def test_uses_precomputed_confirmation_summary(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         payload = {"product": "mais"}
         c = ctx(
             current_goal="SALES_PUBLISH_PRODUCT",
@@ -394,9 +363,7 @@ class TestRenderConfirmation:
         assert [b["id"] for b in buttons] == ["CONFIRM", "REJECT"]
 
     def test_builds_a_summary_when_none_precomputed(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         c = ctx(
             current_goal="SALES_PUBLISH_PRODUCT",
             confirmation_summary=None,
@@ -414,9 +381,7 @@ class TestRenderConfirmation:
         n'a pas de gabarit `BUYER_PREORDER_*` et le récap vit dans
         `PreorderDraft`, pas dans `transaction_payload`. `render_confirmation`
         doit rendre `draft.render_summary()`."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         draft = {
             "draft_id": "d-1", "version": 1, "status": "DRAFT",
             "items": [{
@@ -447,9 +412,7 @@ class TestRenderConfirmation:
         tentatives (seul le produit changeait). Le résumé stocké ne doit
         être honoré que si le payload ayant servi à le construire correspond
         EXACTEMENT au payload courant."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         c = ctx(
             current_goal="BUYER_PREORDER_INIT",
             confirmation_summary="Confirmez-vous cette opération pour 35 KG de *champignons* ?",
@@ -463,9 +426,7 @@ class TestRenderConfirmation:
         assert "chevres" in result["final_response"]
 
     def test_a_stale_summary_with_a_different_goal_is_also_rejected(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         c = ctx(
             current_goal="SALES_PUBLISH_PRODUCT",
             confirmation_summary="Vente de mais\nPrix: 250 FCFA/KG",
@@ -488,9 +449,7 @@ class TestRenderConfirmation:
         récapitulatif littéralement "Voici le récapitulatif :\\nNone\\n\\n
         Confirmez-vous ?". Ce cas doit dégrader exactement comme `not
         ctx.goal` — jamais tenter un rendu sans données."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         c = ctx(
             current_goal="BUYER_LIST_ORDERS",
             confirmation_summary=None,
@@ -507,9 +466,7 @@ class TestRenderConfirmation:
         de `PreorderDraft` — pas de `confirmation_summary`/`transaction_payload`
         — voir `test_preorder_recap_is_rendered_from_the_draft_not_the_generic_fallback`
         ci-dessus pour le cas nominal complet."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         draft = {
             "draft_id": "d-1", "version": 1, "status": "DRAFT",
             "items": [{

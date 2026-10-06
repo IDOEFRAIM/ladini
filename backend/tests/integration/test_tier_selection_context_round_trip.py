@@ -24,6 +24,7 @@ from ladini.workspace.checkpointer import WorkspaceCheckpointer, _SerializedValu
 from ladini.workspace.models import Workspace
 from tests.conftest import run
 from tests.integration.test_checkpointer_state_machine import (
+    FakeWorkspaceStore,
     config_for,
     make_checkpoint,
     make_checkpointer,

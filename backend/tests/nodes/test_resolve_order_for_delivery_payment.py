@@ -6,11 +6,11 @@ reprend directement le motif (auto-résolution / `selection_index` / menu
 strict — jamais un choix implicite, mandat §20)."""
 from __future__ import annotations
 
+from tests.conftest import StubRuntime, run
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from tests.conftest import StubRuntime, run
 
 
 def rt(responses=None):

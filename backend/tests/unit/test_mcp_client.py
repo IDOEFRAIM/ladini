@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from tests.conftest import run
+
 
 # =====================================================================
 # MCPTransportConfig.from_settings
@@ -300,10 +302,7 @@ class _FakeFastMCPClient:
 class TestFastMCPProcessAdapter:
     def test_connect_raises_without_fastmcp_installed(self, monkeypatch, tmp_path):
         import ladini.infrastructure.mcp.client as client_mod
-        from ladini.infrastructure.mcp.client import (
-            FastMCPProcessAdapter,
-            MCPTransportConfig,
-        )
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", None)
         adapter = FastMCPProcessAdapter(MCPTransportConfig(kind="stdio", stdio_script="anything.py"))
@@ -312,10 +311,7 @@ class TestFastMCPProcessAdapter:
 
     def test_connect_raises_when_script_is_missing(self, monkeypatch, tmp_path):
         import ladini.infrastructure.mcp.client as client_mod
-        from ladini.infrastructure.mcp.client import (
-            FastMCPProcessAdapter,
-            MCPTransportConfig,
-        )
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", _FakeFastMCPClient)
         missing = tmp_path / "does_not_exist.py"
@@ -325,10 +321,7 @@ class TestFastMCPProcessAdapter:
 
     def test_connect_success_wires_the_client_and_transport(self, monkeypatch, tmp_path):
         import ladini.infrastructure.mcp.client as client_mod
-        from ladini.infrastructure.mcp.client import (
-            FastMCPProcessAdapter,
-            MCPTransportConfig,
-        )
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
 
         script = tmp_path / "server.py"
         script.write_text("# fake mcp server")
@@ -353,10 +346,7 @@ class TestFastMCPProcessAdapter:
         assert adapter._client is None
 
     def test_list_tools_and_call_tool_require_a_connected_client(self):
-        from ladini.infrastructure.mcp.client import (
-            FastMCPProcessAdapter,
-            MCPTransportConfig,
-        )
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
         adapter = FastMCPProcessAdapter(MCPTransportConfig(kind="stdio", stdio_script="x.py"))
         with pytest.raises(RuntimeError, match="Client FastMCP non initialisé"):
             run(adapter.list_tools())
@@ -364,10 +354,7 @@ class TestFastMCPProcessAdapter:
             run(adapter.call_tool("t", {}))
 
     def test_list_tools_and_call_tool_delegate_once_connected(self):
-        from ladini.infrastructure.mcp.client import (
-            FastMCPProcessAdapter,
-            MCPTransportConfig,
-        )
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
         adapter = FastMCPProcessAdapter(MCPTransportConfig(kind="stdio", stdio_script="x.py"))
         adapter._client = _FakeFastMCPClient(transport=None)
         assert run(adapter.list_tools()) == [{"name": "t1"}]
@@ -466,11 +453,7 @@ class TestAgriMCPClientLifecycle:
 
     def test_create_adapter_dispatches_by_kind(self):
         from ladini.infrastructure.mcp.client import (
-            AgriMCPClient,
-            FastMCPProcessAdapter,
-            GrpcMCPAdapter,
-            HttpMCPAdapter,
-            MCPTransportConfig,
+            AgriMCPClient, MCPTransportConfig, FastMCPProcessAdapter, HttpMCPAdapter, GrpcMCPAdapter,
         )
         assert isinstance(AgriMCPClient(MCPTransportConfig(kind="stdio"))._create_adapter(), FastMCPProcessAdapter)
         assert isinstance(AgriMCPClient(MCPTransportConfig(kind="http"))._create_adapter(), HttpMCPAdapter)
@@ -533,7 +516,6 @@ class TestAgriMCPClientLifecycle:
         déclencher une reconnexion automatique — sans ça, une session MCP
         silencieusement coupée reste inutilisable jusqu'au prochain crash."""
         import asyncio
-
         import ladini.infrastructure.mcp.client as client_mod
 
         monkeypatch.setattr(client_mod.AgriMCPClient, "_WATCHDOG_INTERVAL_S", 0.01)
@@ -819,11 +801,7 @@ class TestAgriMCPClientIdempotencyKey:
 
 class TestAgriMCPClientHandlers:
     def test_handle_elicitation_declines_by_default(self):
-        from ladini.infrastructure.mcp.client import (
-            AgriMCPClient,
-            ElicitResult,
-            MCPTransportConfig,
-        )
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig, ElicitResult
         client = AgriMCPClient(MCPTransportConfig(kind="stdio"))
         result = run(client._handle_elicitation("msg", None, None, None))
         if ElicitResult:

@@ -6,13 +6,14 @@ JAMAIS d'un LLM (§29 : déterministe, fonctionne même si tout est down)."""
 
 from __future__ import annotations
 
+from tests.unit.llm_gateway.conftest import make_fake_redis
+
 from ladini.graphs.agents.market_coach.llm_gateway.alerting import (
     IncidentDeduplicator,
     LLMIncidentAlert,
     LogOnlyNotifier,
     WebhookNotifier,
 )
-from tests.unit.llm_gateway.conftest import make_fake_redis
 
 
 def _alert(**overrides) -> LLMIncidentAlert:

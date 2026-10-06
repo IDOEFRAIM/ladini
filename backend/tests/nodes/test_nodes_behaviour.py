@@ -11,16 +11,17 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from ladini.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from ladini.graphs.agents.market_coach.flows.buyer.helpers import (
     clear_active_goal,
     detect_cart_action,
 )
-from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
-from ladini.graphs.agents.market_coach.nodes.memory import memory_update
-from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, make_state, run
+
 
 # =====================================================================
 # VALIDATOR — jamais réclamer un identifiant technique

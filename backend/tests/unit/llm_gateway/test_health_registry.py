@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 
+from tests.conftest import run
+from tests.unit.llm_gateway.conftest import make_fake_redis
+
 from ladini.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
     _key,
@@ -20,7 +23,6 @@ from ladini.graphs.agents.market_coach.llm_gateway.types import (
     LLMProfile,
     ModelCandidate,
 )
-from tests.unit.llm_gateway.conftest import make_fake_redis
 
 
 def _candidate(provider="bedrock_gateway", model="deepseek.v3.2") -> ModelCandidate:

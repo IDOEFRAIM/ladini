@@ -20,10 +20,11 @@ import uuid
 
 import pytest
 
-from ladini.services.database.auction import AuctionMixin
-from ladini.services.database.errors import BusinessRuleException
 from tests.conftest import run
 from tests.unit.certified_bids import certified_bid_columns
+
+from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 def _bid(**overrides):

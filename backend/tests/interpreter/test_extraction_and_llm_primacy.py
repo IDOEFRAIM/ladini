@@ -16,7 +16,7 @@ from ladini.graphs.agents.market_coach.interpreter.routing import (
     _interpret_fast_path,
     make_input_interpreter,
 )
-from tests.conftest import ScriptedLLM, StubRuntime, make_state, run
+from tests.conftest import ForbiddenLLM, ScriptedLLM, StubRuntime, make_state, run
 
 
 def fast(text, expected_input, goal="SALES_PUBLISH_PRODUCT", skip=False, payload=None):

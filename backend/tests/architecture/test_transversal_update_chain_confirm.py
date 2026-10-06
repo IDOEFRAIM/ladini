@@ -25,28 +25,25 @@ que toute cette architecture existe pour rendre impossible — voir
 "affichage", ce fichier verrouille l'équivalent "exécution")."""
 from __future__ import annotations
 
-from ladini.graphs.agents.market_coach.domain.preorder_draft import (
-    ConfirmPreorderDraft,
-    PreorderDraftStatus,
-    PreorderOutcomeKind,
+from tests.architecture.test_procurement_draft_persistence import (
+    _draft as _procurement_draft,
 )
-from ladini.graphs.agents.market_coach.domain.preorder_draft import (
-    apply_domain_action as apply_preorder_action,
+from tests.architecture.test_preorder_draft_persistence import (
+    _draft as _preorder_draft,
 )
+
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ConfirmationTarget,
     ConfirmProcurementDraft,
     ProcurementDraftStatus,
     ProcurementOutcomeKind,
-)
-from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     apply_domain_action as apply_procurement_action,
 )
-from tests.architecture.test_preorder_draft_persistence import (
-    _draft as _preorder_draft,
-)
-from tests.architecture.test_procurement_draft_persistence import (
-    _draft as _procurement_draft,
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
+    ConfirmPreorderDraft,
+    PreorderDraftStatus,
+    PreorderOutcomeKind,
+    apply_domain_action as apply_preorder_action,
 )
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731

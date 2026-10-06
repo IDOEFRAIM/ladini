@@ -9,7 +9,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from tests.conftest import run
+
 
 # =====================================================================
 # channels/whatsapp.py
@@ -46,17 +49,17 @@ class TestWhatsAppChunking:
 
 class TestWhatsAppIsConfigured:
     def test_cloud_provider_delegates_to_cloud_api_client(self, monkeypatch):
-        import ladini.services.whatsapp.cloud_api_client as wa
-        from ladini.core.settings import settings
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        from ladini.core.settings import settings
+        import ladini.services.whatsapp.cloud_api_client as wa
 
         monkeypatch.setattr(settings, "MESSAGING_PROVIDER", "whatsapp_cloud", raising=False)
         monkeypatch.setattr(wa, "is_configured", lambda: True)
         assert WhatsAppChannel().is_configured() is True
 
     def test_twilio_provider_requires_all_three_credentials(self, monkeypatch):
-        from ladini.core.settings import settings
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "MESSAGING_PROVIDER", "twilio", raising=False)
         monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "", raising=False)
@@ -65,8 +68,8 @@ class TestWhatsAppIsConfigured:
         assert WhatsAppChannel().is_configured() is False
 
     def test_twilio_provider_true_when_fully_configured(self, monkeypatch):
-        from ladini.core.settings import settings
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "MESSAGING_PROVIDER", "twilio", raising=False)
         monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "sid", raising=False)
@@ -95,8 +98,8 @@ class TestWhatsAppSend:
         assert result.error == "missing_recipient_phone"
 
     def test_send_via_cloud_api_success(self, monkeypatch):
-        import ladini.services.whatsapp.cloud_api_client as wa
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        import ladini.services.whatsapp.cloud_api_client as wa
 
         channel = WhatsAppChannel()
         monkeypatch.setattr(channel, "is_configured", lambda: True)
@@ -107,8 +110,8 @@ class TestWhatsAppSend:
         assert result.provider_ref == "wamid.abc123"
 
     def test_send_via_cloud_api_failure_when_no_message_ids(self, monkeypatch):
-        import ladini.services.whatsapp.cloud_api_client as wa
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        import ladini.services.whatsapp.cloud_api_client as wa
 
         channel = WhatsAppChannel()
         monkeypatch.setattr(channel, "is_configured", lambda: True)
@@ -119,8 +122,8 @@ class TestWhatsAppSend:
         assert result.error == "send_failed"
 
     def test_send_via_cloud_api_exception_is_caught_as_a_failure(self, monkeypatch):
-        import ladini.services.whatsapp.cloud_api_client as wa
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        import ladini.services.whatsapp.cloud_api_client as wa
 
         channel = WhatsAppChannel()
         monkeypatch.setattr(channel, "is_configured", lambda: True)
@@ -146,9 +149,8 @@ class TestWhatsAppSend:
         morceau de `_chunk()` est envoyé, dans l'ordre, et que le SID retourné
         est celui du DERNIER message (pas le premier)."""
         import sys
-
-        from ladini.core.settings import settings
         from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "sid", raising=False)
         monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "token", raising=False)
@@ -264,9 +266,9 @@ class TestOutboxDispatcher:
         assert _to_job(row)["payload"] == {}
 
     def test_run_delivers_and_marks_sent_on_success(self, monkeypatch):
-        import ladini.workers.outbox.dispatcher as dispatcher_module
-        from ladini.workers.outbox.channels.base import SendResult
         from ladini.workers.outbox.dispatcher import OutboxDispatcher
+        from ladini.workers.outbox.channels.base import SendResult
+        import ladini.workers.outbox.dispatcher as dispatcher_module
 
         self._patch_worker_session(monkeypatch)
         row = SimpleNamespace(id="job-1", channel="WHATSAPP", recipient_phone="+2260",
@@ -290,8 +292,8 @@ class TestOutboxDispatcher:
         mark_sent.assert_awaited_once_with(mark_sent.await_args.args[0], "job-1")
 
     def test_run_marks_failed_on_unknown_channel(self, monkeypatch):
-        import ladini.workers.outbox.dispatcher as dispatcher_module
         from ladini.workers.outbox.dispatcher import OutboxDispatcher
+        import ladini.workers.outbox.dispatcher as dispatcher_module
 
         self._patch_worker_session(monkeypatch)
         row = SimpleNamespace(id="job-2", channel="CARRIER_PIGEON", recipient_phone="+2260",
@@ -309,8 +311,8 @@ class TestOutboxDispatcher:
         assert "unknown_channel:CARRIER_PIGEON" in report.errors[0]
 
     def test_run_marks_failed_when_channel_not_configured(self, monkeypatch):
-        import ladini.workers.outbox.dispatcher as dispatcher_module
         from ladini.workers.outbox.dispatcher import OutboxDispatcher
+        import ladini.workers.outbox.dispatcher as dispatcher_module
 
         self._patch_worker_session(monkeypatch)
         row = SimpleNamespace(id="job-3", channel="EMAIL", recipient_phone=None,
@@ -329,8 +331,8 @@ class TestOutboxDispatcher:
         assert "channel_not_configured:EMAIL" in report.errors[0]
 
     def test_run_with_nothing_claimed_is_a_noop(self, monkeypatch):
-        import ladini.workers.outbox.dispatcher as dispatcher_module
         from ladini.workers.outbox.dispatcher import OutboxDispatcher
+        import ladini.workers.outbox.dispatcher as dispatcher_module
 
         self._patch_worker_session(monkeypatch)
         monkeypatch.setattr(dispatcher_module.outbox_repo, "claim_due", AsyncMock(return_value=[]))

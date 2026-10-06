@@ -20,10 +20,11 @@ import uuid
 
 import pytest
 
-from ladini.services.database.auction import AuctionMixin
-from ladini.services.database.errors import BusinessRuleException
-from ladini.services.database.producer import ProducerMgmtMixin
 from tests.conftest import run
+
+from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.producer import ProducerMgmtMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 async def _async_return(value):

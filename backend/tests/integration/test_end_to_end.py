@@ -7,8 +7,12 @@ validateur, résolveurs, confirmation, exécuteur, rendu).
 from __future__ import annotations
 
 import dataclasses
+import json
+
+import pytest
 
 from tests.conftest import run
+
 
 # =====================================================================
 # PARCOURS COMPLETS (suite de démonstration embarquée)
@@ -54,10 +58,7 @@ class TestCheckpointerResilience:
     goal et brouillon perdus au tour suivant."""
 
     def _make_checkpoint(self, channel_values):
-        from ladini.workspace.checkpointer import (
-            WorkspaceCheckpointer,
-            _SerializedValue,
-        )
+        from ladini.workspace.checkpointer import _SerializedValue, WorkspaceCheckpointer
         cp = WorkspaceCheckpointer()
         checkpoint = {
             "v": 1, "ts": "2026-01-01T00:00:00",
@@ -99,9 +100,8 @@ class TestCheckpointerResilience:
 class TestWorkers:
     def test_every_scheduled_task_resolves_to_a_registered_celery_task(self):
         """Un nom de tâche erroné dans le beat = cron silencieusement mort."""
-        import importlib
-
         from ladini.api.celery_app import celery_app
+        import importlib
         for mod in celery_app.conf.include:
             importlib.import_module(mod)
         for name, entry in celery_app.conf.beat_schedule.items():
@@ -127,10 +127,9 @@ class TestWorkers:
         c'est CE module qui ouvre la session, pas le wrapper Celery
         lui-même. Vérifié en conséquence."""
         import inspect
-
-        from ladini.graphs.agents.market_coach.flows.buyer import preorder_payment
         from ladini.workers.crons import order_expiry
         from ladini.workers.payments import paydunya_ipn_task
+        from ladini.graphs.agents.market_coach.flows.buyer import preorder_payment
 
         for mod in (order_expiry, preorder_payment):
             src = inspect.getsource(mod)
@@ -174,9 +173,8 @@ class TestSecurityConfig:
     def test_cors_never_allows_credentials_with_wildcard_origin(self):
         """Faille : `*` + credentials => Starlette réfléchit l'Origin, donc
         n'importe quel site peut faire des requêtes authentifiées."""
-        from starlette.middleware.cors import CORSMiddleware
-
         from ladini.api.main import app
+        from starlette.middleware.cors import CORSMiddleware
         for mw in app.user_middleware:
             if mw.cls is CORSMiddleware:
                 kw = mw.kwargs
@@ -200,16 +198,13 @@ class TestSecurityConfig:
 
     def test_oversized_input_is_truncated(self):
         from ladini.graphs.agents.market_coach.nodes.input_normalizer import (
-            _MAX_INPUT_LEN,
-            _harden_text,
+            _harden_text, _MAX_INPUT_LEN,
         )
         cleaned, truncated = _harden_text("a" * 50_000)
         assert len(cleaned) <= _MAX_INPUT_LEN
         assert truncated is True
 
     def test_control_characters_are_stripped(self):
-        from ladini.graphs.agents.market_coach.nodes.input_normalizer import (
-            _harden_text,
-        )
+        from ladini.graphs.agents.market_coach.nodes.input_normalizer import _harden_text
         cleaned, _ = _harden_text("mais\x00tomate")
         assert "\x00" not in cleaned

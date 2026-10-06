@@ -20,10 +20,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from ladini.graphs.agents.market_coach.core.pending_interaction import (
-    get_pending_interaction,
-    to_tunnel_category,
-)
 from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
@@ -34,6 +30,10 @@ from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, run
 from tests.integration.test_tier_selection_full_node_chain import apply_patch
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 
 
 def _tiered_vendor() -> Dict[str, Any]:

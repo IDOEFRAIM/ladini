@@ -15,6 +15,7 @@ import pytest
 
 from tests.conftest import run
 
+
 # =====================================================================
 # runtime.py — run_async / worker_session
 # =====================================================================
@@ -30,7 +31,6 @@ class TestRunAsync:
 
     def test_uses_the_persistent_worker_loop_when_available(self, monkeypatch):
         import asyncio
-
         import ladini.workers.runtime as runtime_module
 
         persistent_loop = asyncio.new_event_loop()
@@ -138,21 +138,13 @@ class _FakeExecResult:
 
 class TestOutboxRepo:
     def test_backoff_delay_clamps_at_the_last_tier_for_high_attempt_counts(self):
+        from ladini.workers.repositories.outbox_repo import backoff_delay, _BACKOFF_MINUTES
         from datetime import timedelta
-
-        from ladini.workers.repositories.outbox_repo import (
-            _BACKOFF_MINUTES,
-            backoff_delay,
-        )
         assert backoff_delay(999) == timedelta(minutes=_BACKOFF_MINUTES[-1])
 
     def test_backoff_delay_clamps_at_the_first_tier_for_zero_or_negative(self):
+        from ladini.workers.repositories.outbox_repo import backoff_delay, _BACKOFF_MINUTES
         from datetime import timedelta
-
-        from ladini.workers.repositories.outbox_repo import (
-            _BACKOFF_MINUTES,
-            backoff_delay,
-        )
         assert backoff_delay(0) == timedelta(minutes=_BACKOFF_MINUTES[0])
         assert backoff_delay(-5) == timedelta(minutes=_BACKOFF_MINUTES[0])
 
@@ -240,9 +232,7 @@ class TestOutboxRepo:
 
 class TestSolicitationRepo:
     def test_fetch_auctions_to_solicit_returns_scalars(self):
-        from ladini.workers.repositories.solicitation_repo import (
-            fetch_auctions_to_solicit,
-        )
+        from ladini.workers.repositories.solicitation_repo import fetch_auctions_to_solicit
 
         auctions = [SimpleNamespace(id="a1"), SimpleNamespace(id="a2")]
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(scalars_rows=auctions)))
@@ -250,9 +240,7 @@ class TestSolicitationRepo:
         assert result == auctions
 
     def test_upsert_auction_solicitations_returns_empty_without_hitting_db_on_no_producers(self):
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_auction_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id=None)
@@ -266,9 +254,7 @@ class TestSolicitationRepo:
         contrainte d'idempotence sur `(auction_id, target_producer_id)`. Il
         doit apparaître dans `skipped` avec une raison explicite (chantier
         traçabilité 2026-08-24), pas juste disparaître silencieusement."""
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_auction_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id=None)
@@ -282,9 +268,7 @@ class TestSolicitationRepo:
         session.execute.assert_not_awaited()
 
     def test_upsert_auction_solicitations_returns_newly_created_rows(self):
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_auction_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[("sol-1", "prod-1")])))
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id="z1")
@@ -300,9 +284,7 @@ class TestSolicitationRepo:
         sollicité) — ce producteur doit apparaître dans `skipped`, pas juste
         se traduire par un compteur `solicitations_created` inférieur au
         nombre de producteurs sans aucune explication."""
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_auction_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         # Un seul des deux producteurs revient dans `RETURNING` : l'autre a
         # été ignoré par ON CONFLICT DO NOTHING (déjà sollicité).
@@ -314,9 +296,7 @@ class TestSolicitationRepo:
         assert result["skipped"] == [{"producer_id": "prod-2", "reason": "already_solicited"}]
 
     def test_upsert_offer_solicitations_returns_empty_on_no_buyers(self):
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_offer_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_offer_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         result = run(upsert_offer_solicitations(
@@ -326,9 +306,7 @@ class TestSolicitationRepo:
         session.execute.assert_not_awaited()
 
     def test_upsert_offer_solicitations_filters_buyers_without_an_id(self):
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_offer_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_offer_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         result = run(upsert_offer_solicitations(
@@ -339,9 +317,7 @@ class TestSolicitationRepo:
         session.execute.assert_not_awaited()
 
     def test_upsert_offer_solicitations_returns_newly_created_rows(self):
-        from ladini.workers.repositories.solicitation_repo import (
-            upsert_offer_solicitations,
-        )
+        from ladini.workers.repositories.solicitation_repo import upsert_offer_solicitations
 
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[("sol-9", "buy-9")])))
         result = run(upsert_offer_solicitations(

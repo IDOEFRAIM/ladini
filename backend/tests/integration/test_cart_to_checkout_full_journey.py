@@ -47,12 +47,19 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from tests.conftest import StubRuntime, run
+from tests.evals.runners.harness import RecordingRuntime
+from tests.architecture.test_preorder_draft_persistence import (
+    _install_fake_db as _install_fake_preorder_db,
+)
+from tests.integration.test_tier_selection_full_node_chain import apply_patch
+
 from ladini.core.settings import settings
+from ladini.graphs.agents.market_coach.core.router import DomainRouter
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from ladini.graphs.agents.market_coach.core.router import DomainRouter
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraftStatus,
 )
@@ -66,12 +73,6 @@ from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanu
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from ladini.graphs.agents.market_coach.nodes.validation import validator
 from ladini.services.database import preorder_draft_store
-from tests.architecture.test_preorder_draft_persistence import (
-    _install_fake_db as _install_fake_preorder_db,
-)
-from tests.conftest import StubRuntime, run
-from tests.evals.runners.harness import RecordingRuntime
-from tests.integration.test_tier_selection_full_node_chain import apply_patch
 
 TIERS = [
     {"tier_id": "t5", "quantity": 5.0, "unit": "L", "price": 500.0,

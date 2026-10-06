@@ -63,10 +63,7 @@ def _forbidden(t, *, allow=()):
     ("mets-en 3", None), ("rechercher maintenant", None), ("", None),
 ])
 def test_closed_reply_detector_requires_the_whole_message_to_be_a_menu_index(text, closed):
-    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
-        closed_menu_index,
-        fold,
-    )
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import closed_menu_index, fold
 
     assert closed_menu_index(fold(text)) == closed
 

@@ -17,12 +17,12 @@ d'un test unitaire, déjà fail-open par construction — voir
 vers "pas de cache" si Redis est indisponible)."""
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict
 
+from ladini.graphs.agents.market_coach.interpreter import routing as routing_module
 from ladini.graphs.agents.market_coach.interpreter import (
     new_task_micro as new_task_micro_module,
 )
-from ladini.graphs.agents.market_coach.interpreter import routing as routing_module
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )

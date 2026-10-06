@@ -10,10 +10,11 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from tests.conftest import run
+
 from ladini.api.routes import webchat
 from ladini.api.routes.webchat import WebChatRequest, _run
 from ladini.core.reply_sink import active_sink, collect_replies
-from tests.conftest import run
 
 _PNG = base64.b64encode(b"\x89PNG-fake").decode()
 _PHOTO = "ladini.workers.media.product_photo_task"

@@ -19,6 +19,9 @@ from typing import Any, Dict, List, Optional
 
 import ladini.graphs.agents.market_coach.interpreter.active_slot_micro as active_slot_micro_module
 from ladini.graphs.agents.market_coach.core.policies import FastPathPolicy
+from ladini.graphs.agents.market_coach.interpreter.active_slot_contract import (
+    ActiveSlotContext,
+)
 from ladini.graphs.agents.market_coach.interpreter.active_slot_prompts import (
     ACTIVE_SLOT_PROMPT_VERSION,
     build_active_slot_user_prompt,

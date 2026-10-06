@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from ladini.core.location import LocationOutcome, persist_shared_location
 from tests.conftest import run
+
+from ladini.core.location import LocationOutcome, persist_shared_location
 
 PHONE = "+22670000001"
 

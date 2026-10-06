@@ -36,15 +36,20 @@ import time
 import types
 from typing import Any, Dict, Optional
 
+import pytest
+
+from tests.conftest import make_state, run
+
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
+    ProcurementOutcomeKind,
 )
 from ladini.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
     resolve_procurement_confirmation,
 )
 from ladini.services.database import procurement_draft_store as store_mod
-from tests.conftest import make_state, run
+
 
 # =====================================================================
 # FAUX MOTEUR SQL — reproduit fidèlement UPDATE...WHERE...->rowcount
@@ -556,6 +561,7 @@ class TestStaleExecutingDetection:
         """Un `EXECUTED`/`FAILED` ancien n'est PAS un problème — seul
         `EXECUTING` bloqué en est un (les statuts terminaux ont déjà une
         issue tranchée)."""
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
         from ladini.graphs.agents.market_coach.domain.procurement_draft import (
             ProcurementExecutionResult,
             finalize_after_execution,

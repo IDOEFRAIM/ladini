@@ -25,9 +25,10 @@ from __future__ import annotations
 import types
 import uuid
 
+from tests.conftest import run
+
 from ladini.services.database.auction import AuctionMixin
 from ladini.services.database.producer import ProducerMgmtMixin
-from tests.conftest import run
 
 
 async def _async_return(value):

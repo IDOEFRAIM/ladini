@@ -24,12 +24,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from tests.conftest import run
+
 from ladini.agents.onboarding import (
     OnboardingState,
     OnboardingStep,
     run_onboarding_step,
 )
-from tests.conftest import run
 
 
 def _extractor(**payload: Any):

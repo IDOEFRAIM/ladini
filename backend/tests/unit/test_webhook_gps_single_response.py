@@ -23,7 +23,7 @@ NB : `twilio_webhook.py`/`whatsapp_webhook.py` importent `api.tasks`
 le paquet `celery` (pré-existant, sans rapport avec cette feature)."""
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest

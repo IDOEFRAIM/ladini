@@ -35,10 +35,11 @@ import uuid
 import pytest
 from sqlalchemy.sql.dml import Update as _UpdateStmt
 
-from ladini.services.database.auction import AuctionMixin
-from ladini.services.database.errors import BusinessRuleException
 from tests.conftest import run
+
+from ladini.services.database.auction import AuctionMixin
 from tests.unit.certified_bids import certified_bid_columns
+from ladini.services.database.errors import BusinessRuleException
 
 
 def _bid(**overrides):

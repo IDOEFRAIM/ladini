@@ -9,6 +9,9 @@ import threading
 
 import pytest
 
+from tests.conftest import run
+from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
+
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     IllegalDraftTransition,
     PaymentOutcomeKind,
@@ -18,8 +21,6 @@ from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     finalize_after_payment_expiry,
 )
 from ladini.services.database import preorder_draft_store as store_mod
-from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
-from tests.conftest import run
 
 
 def _awaiting_payment_draft(**fields):

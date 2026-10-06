@@ -15,10 +15,11 @@ actions RÉELLEMENT différentes (`confirm_order_by_producer` vs
 `cancel_confirmed_order`)."""
 from __future__ import annotations
 
+from tests.conftest import StubRuntime, run
+
 from ladini.graphs.agents.market_coach.flows.producer.flow import (
     _resolve_pending_order_action,
 )
-from tests.conftest import StubRuntime, run
 
 
 def rt(responses=None):

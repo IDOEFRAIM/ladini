@@ -22,11 +22,7 @@ from tests.integration.test_sales_publish_packaging_tiers import (  # noqa: F401
     _miel_60,
     conv,
 )
-from tests.unit.test_create_preorder_draft_pricing_tiers import (
-    _FakeSession,
-    _service,
-    _tiered_product,
-)
+from tests.unit.test_create_preorder_draft_pricing_tiers import _FakeSession, _service, _tiered_product
 
 pytestmark = pytest.mark.integration
 
@@ -72,11 +68,7 @@ class TestSingleTierWithoutPackagingWord:
         assert "commercial_offer" not in call
 
     def test_buyer_can_order_it_and_the_stock_debit_is_the_content_not_the_count(self):
-        from ladini.domain.pricing_tiers import (
-            resolve_stock_debit,
-            tiers_to_dicts,
-            validate_pricing_tiers,
-        )
+        from ladini.domain.pricing_tiers import resolve_stock_debit, tiers_to_dicts, validate_pricing_tiers
 
         tiers = tiers_to_dicts(validate_pricing_tiers(self._unnamed(), "LITRE"))
         product = _tiered_product(name="miel", price=700.0, quantity_for_sale=60.0, pricing_tiers=tiers)

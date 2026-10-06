@@ -16,12 +16,13 @@ l'acheteur aurait confirmé un total, et la commande réellement créée en
 aurait porté un autre."""
 from __future__ import annotations
 
+from tests.conftest import run
+from tests.architecture.test_preorder_draft_persistence import _install_fake_db
+from tests.evals.runners.harness import RecordingRuntime
+
 from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
     bootstrap_preorder_draft,
 )
-from tests.architecture.test_preorder_draft_persistence import _install_fake_db
-from tests.conftest import run
-from tests.evals.runners.harness import RecordingRuntime
 
 
 class TestBootstrapUsesServerAuthoritativePricingNotStaleCartSnapshot:

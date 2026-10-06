@@ -8,6 +8,8 @@ demandés (§46) applicables à ce module. Style conforme à `tests/architecture
 
 from __future__ import annotations
 
+from tests.conftest import make_state, run
+
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     CART_TUNNEL_KINDS,
     InteractionKind,
@@ -17,7 +19,6 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     resolve_pending_interaction,
     set_pending_interaction,
 )
-from tests.conftest import make_state
 
 
 class TestOnlyOneInteractionActiveAtATime:

@@ -47,8 +47,8 @@ import inspect
 import pytest
 
 from ladini.graphs.agents.market_coach.interpreter.intent import (
-    _TUNNEL_ASSIGNMENTS,
     INTENT_CONFIG,
+    _TUNNEL_ASSIGNMENTS,
 )
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     _classifiable_intents,

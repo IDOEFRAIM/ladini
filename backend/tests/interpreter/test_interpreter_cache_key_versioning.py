@@ -14,10 +14,10 @@ Deux niveaux de test :
      cache observable (pas seulement la fonction isolée)."""
 from __future__ import annotations
 
+from ladini.graphs.agents.market_coach.interpreter import routing as routing_module
 from ladini.graphs.agents.market_coach.interpreter import (
     new_task_micro as new_task_micro_module,
 )
-from ladini.graphs.agents.market_coach.interpreter import routing as routing_module
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     _llm_cache_key,
     make_input_interpreter,

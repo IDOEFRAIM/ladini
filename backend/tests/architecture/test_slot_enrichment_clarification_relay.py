@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import pytest
+
 from ladini.graphs.agents.market_coach.interpreter.strategy import (
     response_strategy,
 )

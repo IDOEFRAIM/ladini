@@ -28,8 +28,9 @@ import uuid
 
 import pytest
 
-from ladini.services.database.auction import AuctionMixin
 from tests.conftest import run
+
+from ladini.services.database.auction import AuctionMixin
 
 
 def _fake_producer_profile():

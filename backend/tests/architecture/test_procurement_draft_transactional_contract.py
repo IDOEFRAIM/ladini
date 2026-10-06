@@ -11,30 +11,35 @@ version précise, confirmation atomique/idempotente.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 from pathlib import Path
 
+import pytest
+
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+    CancelProcurementDraft,
     ConfirmationTarget,
     ConfirmProcurementDraft,
     NoProcurementAction,
     ProcurementDraft,
     ProcurementDraftStatus,
     ProcurementOutcomeKind,
+    RejectProcurementConfirmation,
     UpdateProcurementDraft,
-    apply_domain_action,
     check_confirmation_target_invariant,
+    apply_domain_action,
     resolve_domain_action,
-)
-from ladini.graphs.agents.market_coach.interpreter.routing import (
-    _interpret_fast_path,
 )
 from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
-from tests.conftest import make_state, run
+from ladini.graphs.agents.market_coach.interpreter.routing import (
+    _interpret_fast_path,
+)
+from tests.conftest import make_state, run, stub_runtime
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731 - petites fonctions de test
 

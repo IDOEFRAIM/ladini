@@ -7,6 +7,8 @@ quantity regardless of which packaging was actually purchased.
 """
 from __future__ import annotations
 
+import pytest
+
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,

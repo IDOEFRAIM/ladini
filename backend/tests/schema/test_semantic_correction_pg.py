@@ -9,10 +9,7 @@ from __future__ import annotations
 import pytest
 
 from tests.harness import new_task
-from tests.integration.test_semantic_context_arbitration_e2e import (
-    UPDATE_QTY_3,
-    ScriptLLM,
-)
+from tests.integration.test_semantic_context_arbitration_e2e import UPDATE_QTY_3, ScriptLLM
 from tests.schema import test_recurring_entrypoint_pg as entry
 from tests.schema import test_semantic_context_arbitration_pg as base
 from tests.schema.test_recurring_entrypoint_pg import Conv, _user, real_db  # noqa: F401

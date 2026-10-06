@@ -30,6 +30,14 @@ from __future__ import annotations
 
 import threading
 
+from tests.conftest import make_state, run
+from tests.architecture.test_procurement_draft_persistence import (
+    _install_fake_db as _install_fake_draft_db,
+)
+from tests.unit.test_mcp_idempotency import (
+    _install_fake_db as _install_fake_idempotency_db,
+)
+
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
@@ -39,16 +47,7 @@ from ladini.graphs.agents.market_coach.flows.buyer.procurement_confirmation impo
     resolve_procurement_confirmation,
 )
 from ladini.services.database import mcp_idempotency_store, procurement_draft_store
-from ladini.services.reconciliation import (
-    procurement_reconciliation_service as recon_svc,
-)
-from tests.architecture.test_procurement_draft_persistence import (
-    _install_fake_db as _install_fake_draft_db,
-)
-from tests.conftest import make_state, run
-from tests.unit.test_mcp_idempotency import (
-    _install_fake_db as _install_fake_idempotency_db,
-)
+from ladini.services.reconciliation import procurement_reconciliation_service as recon_svc
 
 
 def _install(monkeypatch):

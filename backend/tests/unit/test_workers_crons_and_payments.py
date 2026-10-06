@@ -39,8 +39,8 @@ def _patch_worker_session(monkeypatch, module) -> None:
 
 class TestOrderExpiryCron:
     def test_run_returns_the_service_result(self, monkeypatch):
-        import ladini.services.database.d as db_mod
         import ladini.workers.crons.order_expiry as mod
+        import ladini.services.database.d as db_mod
 
         _patch_worker_session(monkeypatch, mod)
         fake_service = SimpleNamespace(expire_pending_payments=AsyncMock(
@@ -52,8 +52,8 @@ class TestOrderExpiryCron:
         assert result == {"expired_count": 2, "expired_order_ids": ["o1", "o2"]}
 
     def test_run_with_zero_expired_does_not_crash(self, monkeypatch):
-        import ladini.services.database.d as db_mod
         import ladini.workers.crons.order_expiry as mod
+        import ladini.services.database.d as db_mod
 
         _patch_worker_session(monkeypatch, mod)
         fake_service = SimpleNamespace(expire_pending_payments=AsyncMock(return_value={"expired_count": 0}))
@@ -161,9 +161,9 @@ class TestOutboxDispatchCron:
 
 class TestPaydunyaIpnTask:
     def test_confirm_failure_returns_an_error_status_without_touching_the_db(self, monkeypatch):
-        import ladini.services.database.d as db_mod
-        import ladini.services.payments.paydunya_client as client_mod
         import ladini.workers.payments.paydunya_ipn_task as mod
+        import ladini.services.payments.paydunya_client as client_mod
+        import ladini.services.database.d as db_mod
 
         class _FakeError(Exception):
             pass
@@ -179,9 +179,9 @@ class TestPaydunyaIpnTask:
         fake_service.mark_escrow_paid.assert_not_awaited()
 
     def test_non_completed_status_is_ignored_without_touching_the_db(self, monkeypatch):
-        import ladini.services.database.d as db_mod
-        import ladini.services.payments.paydunya_client as client_mod
         import ladini.workers.payments.paydunya_ipn_task as mod
+        import ladini.services.payments.paydunya_client as client_mod
+        import ladini.services.database.d as db_mod
 
         fake_client = SimpleNamespace(confirm_invoice=AsyncMock(return_value={"status": "pending"}))
         monkeypatch.setattr(client_mod, "PaydunyaClient", lambda: fake_client)
@@ -205,11 +205,11 @@ class TestPaydunyaIpnTask:
         `PreorderReconciliationService` (mandat §26) — `paydunya_ipn_task.py`
         n'est plus qu'un fin wrapper Celery autour. `worker_session` est
         donc patché sur le module RÉEL qui l'ouvre désormais."""
+        import ladini.workers.payments.paydunya_ipn_task as mod
         import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
+        import ladini.services.payments.paydunya_client as client_mod
         import ladini.services.database.d as db_mod
         import ladini.services.database.preorder_draft_store as store_mod
-        import ladini.services.payments.paydunya_client as client_mod
-        import ladini.workers.payments.paydunya_ipn_task as mod
 
         _patch_worker_session(monkeypatch, payment_mod)
         # Aucun `PreorderDraft` ne correspond à cet `order_id` dans ce test

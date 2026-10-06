@@ -25,11 +25,12 @@ import uuid
 
 import pytest
 
+from tests.conftest import run
+
 from ladini.domain.models import Order, OrderItem
 from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.errors import BusinessRuleException
 from ladini.services.database.producer import ProducerMgmtMixin
-from tests.conftest import run
 
 
 async def _async_return(value):

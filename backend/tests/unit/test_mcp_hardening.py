@@ -23,6 +23,7 @@ import pytest
 
 from tests.conftest import run
 
+
 # =====================================================================
 # 1. PORTE PRÉ-EXÉCUTION — le verdict doit être APPLIQUÉ
 # =====================================================================
@@ -90,10 +91,7 @@ class TestProductPhotoTool:
 
     def test_add_product_photo_resolves_and_dispatches_without_being_blocked(self):
         from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
-        from ladini.infrastructure.mcp.security import (
-            HostBlockedError,
-            PermissionDenied,
-        )
+        from ladini.infrastructure.mcp.security import HostBlockedError, PermissionDenied
 
         srv = AgriDBMCPServer()
         try:
@@ -194,7 +192,6 @@ def http_app_client():
     daemon démarre une fois et sert tous les tours ensuite.
     """
     from fastapi.testclient import TestClient
-
     import ladini.protocols.mcp.servers.http_server as hs
 
     with TestClient(hs.app) as client:
@@ -423,11 +420,7 @@ class TestExternalCallsAreBounded:
 
     def test_outbox_channel_passes_an_explicit_timeout(self, monkeypatch):
         import twilio.rest
-
-        from ladini.workers.outbox.channels.whatsapp import (
-            _TWILIO_TIMEOUT_S,
-            WhatsAppChannel,
-        )
+        from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel, _TWILIO_TIMEOUT_S
 
         seen = {}
 
@@ -444,7 +437,6 @@ class TestExternalCallsAreBounded:
 
     def test_sender_masks_the_recipient_number_in_logs(self, monkeypatch, caplog):
         import logging
-
         import ladini.services.twilio_sender as ts
 
         class _FakeClient:

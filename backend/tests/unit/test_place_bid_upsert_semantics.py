@@ -18,8 +18,9 @@ from __future__ import annotations
 import types
 import uuid
 
-from ladini.services.database.auction import AuctionMixin
 from tests.conftest import run
+
+from ladini.services.database.auction import AuctionMixin
 
 
 def _auction(**overrides):
@@ -125,9 +126,8 @@ class TestOneBidPerProducerPerAuction:
         """Un bid déjà WINNING/LOST/WITHDRAWN ne peut plus être "corrigé"
         par un nouvel appel `place_bid` — même producteur, même enchère,
         mais l'engagement est déjà tranché."""
-        import pytest
-
         from ladini.services.database.errors import BusinessRuleException
+        import pytest
 
         auction = _auction()
         existing = _existing_bid(status="WINNING")

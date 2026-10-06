@@ -45,23 +45,20 @@ from __future__ import annotations
 
 import pytest
 
-from ladini.graphs.agents.market_coach.domain.preorder_draft import (
-    IllegalDraftTransition as PreorderIllegalTransition,
-)
-from ladini.graphs.agents.market_coach.domain.preorder_draft import (
-    PreorderDraftStatus,
-)
-from ladini.graphs.agents.market_coach.domain.procurement_draft import (
-    IllegalDraftTransition as ProcurementIllegalTransition,
-)
-from ladini.graphs.agents.market_coach.domain.procurement_draft import (
-    ProcurementDraftStatus,
+from tests.architecture.test_procurement_draft_persistence import (
+    _draft as _procurement_draft,
 )
 from tests.architecture.test_preorder_draft_persistence import (
     _draft as _preorder_draft,
 )
-from tests.architecture.test_procurement_draft_persistence import (
-    _draft as _procurement_draft,
+
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+    IllegalDraftTransition as ProcurementIllegalTransition,
+    ProcurementDraftStatus,
+)
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
+    IllegalDraftTransition as PreorderIllegalTransition,
+    PreorderDraftStatus,
 )
 
 

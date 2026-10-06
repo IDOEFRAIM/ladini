@@ -21,11 +21,14 @@ assertion pour la preuve qu'aucun état périmé n'est réutilisé."""
 
 from __future__ import annotations
 
+from tests.conftest import make_state, run
+
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.core.router import _cart_guard
+from ladini.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from ladini.graphs.agents.market_coach.domain.selection_actions import (
     ActionType,
     build_selection_context,
@@ -33,7 +36,6 @@ from ladini.graphs.agents.market_coach.domain.selection_actions import (
 from ladini.graphs.agents.market_coach.interpreter.strategy import (
     response_strategy,
 )
-from tests.conftest import make_state, run
 
 
 def _print_turn_state(label: str, state: dict) -> None:

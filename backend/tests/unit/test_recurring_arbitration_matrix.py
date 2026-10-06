@@ -10,9 +10,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     set_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.interpreter import context_arbitration as ca
-from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
-    ArbitrationKind as K,
-)
+from ladini.graphs.agents.market_coach.interpreter.context_arbitration import ArbitrationKind as K
 
 
 def _detail_state(*, created_at: float | None = None, actions=None):

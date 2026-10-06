@@ -7,6 +7,10 @@ localisation demandait de toucher plusieurs endroits, et il était facile
 d'en oublier un. Voir [[precommande-architecture-consolidation-2026-08]]."""
 from __future__ import annotations
 
+from typing import Any, Dict
+
+from tests.conftest import run
+
 from ladini.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
     _GPS_FIRST_TIME_PROMPT,
     _GPS_HABITUAL_PROMPT,
@@ -14,7 +18,6 @@ from ladini.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
     enter_gps_stage,
     resolve_gps_stage,
 )
-from tests.conftest import run
 
 _MODULE = "ladini.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
 

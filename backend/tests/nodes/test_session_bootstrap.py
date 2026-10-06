@@ -36,18 +36,14 @@ class TestDefaultRole:
         """(mandat §3, interdiction explicite) : une valeur inconnue ne doit
         JAMAIS tomber sur PRODUCER par défaut."""
         _patch_deps(monkeypatch)
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_role="", user_phone="")
         result = run(session_bootstrap(state, None))
         assert result["user_role"] == "UNKNOWN"
 
     def test_existing_user_role_is_not_overwritten(self, monkeypatch):
         _patch_deps(monkeypatch)
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_role="BUYER", user_phone="")
         result = run(session_bootstrap(state, None))
         assert "user_role" not in result
@@ -100,18 +96,14 @@ class TestPhoneExtractionAndProfileLoading:
 
     def test_successful_profile_load_updates_role(self, monkeypatch):
         _patch_deps(monkeypatch, profile_updates={"user_context_loaded": True, "user_role": "PRODUCER"})
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         assert result["user_role"] == "PRODUCER"
 
     def test_new_user_activates_onboarding(self, monkeypatch):
         _patch_deps(monkeypatch, profile_updates={"_new_user": True})
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         assert result["is_onboarding"] is True
@@ -120,9 +112,7 @@ class TestPhoneExtractionAndProfileLoading:
 
     def test_profile_unavailable_returns_early_with_clear_message(self, monkeypatch):
         _patch_deps(monkeypatch, profile_updates={"_profile_unavailable": True})
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         assert result["status"] == "BLOCKED"
@@ -154,9 +144,7 @@ class TestNoFarmPreloadDrift:
 
     def test_successful_profile_load_never_touches_user_farms_cache(self, monkeypatch):
         _patch_deps(monkeypatch, profile_updates={"user_context_loaded": True, "user_role": "PRODUCER"})
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         assert "user_farms_cache" not in result
@@ -169,9 +157,7 @@ class TestNoDeadTunnelBookkeeping:
 
     def test_active_goal_no_longer_writes_working_memory(self, monkeypatch):
         _patch_deps(monkeypatch)
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="", current_goal="SALES_PUBLISH_PRODUCT", working_memory={})
         result = run(session_bootstrap(state, None))
         assert "working_memory" not in result
@@ -189,9 +175,7 @@ class TestTransactionPayloadPhoneShim:
 
     def test_new_user_onboarding_writes_both_user_phone_and_the_shim(self, monkeypatch):
         _patch_deps(monkeypatch, profile_updates={"_new_user": True})
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         # `user_phone` (primaire) ET le shim (repli) sont posés ENSEMBLE —
@@ -222,9 +206,7 @@ class TestPurityContract:
         sortie d'`input_interpreter`, jamais de `session_bootstrap` — même
         pendant l'onboarding (`input_interpreter::_emit_onboarding` les
         pose lui-même, inconditionnellement, sur les 3 chemins onboarding)."""
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260", is_onboarding=True, onboarding_step="COLLECT_NAME")
         result = run(session_bootstrap(state, None))
         assert "interpreted_event" not in result
@@ -233,18 +215,14 @@ class TestPurityContract:
 
     def test_does_not_write_current_goal(self, monkeypatch):
         _patch_deps(monkeypatch)
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         assert "current_goal" not in result
 
     def test_does_not_write_execution_authorized(self, monkeypatch):
         _patch_deps(monkeypatch)
-        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
-            session_bootstrap,
-        )
+        from ladini.graphs.agents.market_coach.nodes.session_bootstrap import session_bootstrap
         state = make_state(user_phone="+2260")
         result = run(session_bootstrap(state, None))
         assert "execution_authorized" not in result

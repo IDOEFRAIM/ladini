@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import pytest
 
+
 # =====================================================================
 # IDENTITÉ ÉPINGLÉE À LA SESSION — jamais au payload utilisateur
 # =====================================================================

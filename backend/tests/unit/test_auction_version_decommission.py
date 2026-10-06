@@ -21,8 +21,9 @@ from __future__ import annotations
 import types
 import uuid
 
-from ladini.services.database.buyer import BuyerMixin
 from tests.conftest import run
+
+from ladini.services.database.buyer import BuyerMixin
 
 
 def _buyer_profile():

@@ -4,6 +4,7 @@ mais cette méthode est aussi un outil MCP appelable directement)."""
 from __future__ import annotations
 
 import uuid
+from unittest.mock import MagicMock
 
 from tests.conftest import run
 

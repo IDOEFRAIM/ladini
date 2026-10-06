@@ -15,6 +15,8 @@ SALES, `domain/sales_publish_draft.py`). Les goals PAS ENCORE migrés
 """
 from __future__ import annotations
 
+import pytest
+
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
@@ -314,9 +316,7 @@ class TestPostRejectRoutingRoundTrip:
         """Le tour suivant (une correction de prix) doit ré-entrer dans le
         formulaire d'appel d'offres au lieu d'être traité comme un nouveau
         message sans contexte."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
-            buyer_request_resolver,
-        )
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
         from tests.conftest import StubRuntime
 
         state = make_state(
@@ -420,15 +420,11 @@ class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
         assert "35 KG" not in prompt_text
 
     def test_render_confirmation_places_the_note_before_the_recap(self):
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import RenderContext
         from ladini.graphs.agents.market_coach.core.pending_interaction import (
             InteractionKind,
             set_pending_interaction,
-        )
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
-            RenderContext,
-        )
-        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import (
-            render_confirmation,
         )
 
         state = {

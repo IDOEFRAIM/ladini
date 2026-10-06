@@ -30,6 +30,10 @@ from __future__ import annotations
 
 import threading
 
+from tests.conftest import make_state, run
+from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
+from tests.unit.test_mcp_idempotency import _install_fake_db as _install_fake_idempotency_db
+
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PaymentOutcomeKind,
     PreorderDraft,
@@ -45,11 +49,6 @@ from ladini.graphs.agents.market_coach.flows.buyer.preorder_payment import (
 )
 from ladini.services.database import mcp_idempotency_store, preorder_draft_store
 from ladini.services.reconciliation import preorder_reconciliation_service as svc
-from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
-from tests.conftest import make_state, run
-from tests.unit.test_mcp_idempotency import (
-    _install_fake_db as _install_fake_idempotency_db,
-)
 
 
 def _install(monkeypatch):

@@ -18,8 +18,9 @@ import types
 import uuid
 from decimal import Decimal
 
-from ladini.services.database.marketplace import MarketplaceMixin
 from tests.conftest import run
+
+from ladini.services.database.marketplace import MarketplaceMixin
 
 PRODUCER_PHONE = "+22670000001"
 FARM_ID = str(uuid.uuid4())

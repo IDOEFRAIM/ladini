@@ -5,11 +5,13 @@ l'agent. Priorité maximale : une régression ici touche TOUTE écriture DB.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from tests.conftest import run
+
 
 # =====================================================================
 # errors.py — barrière anti-fuite (pure, testée en isolation d'abord)
@@ -17,10 +19,7 @@ from tests.conftest import run
 
 class TestIsSafeBusinessException:
     def test_business_rule_exception_is_safe(self):
-        from ladini.services.database.errors import (
-            BusinessRuleException,
-            is_safe_business_exception,
-        )
+        from ladini.services.database.errors import BusinessRuleException, is_safe_business_exception
         assert is_safe_business_exception(BusinessRuleException("Stock insuffisant")) is True
 
     def test_value_error_is_safe_when_message_is_clean(self):
@@ -41,10 +40,7 @@ class TestIsSafeBusinessException:
         assert is_safe_business_exception(RuntimeError("connection refused")) is False
 
     def test_safe_database_error_is_always_safe(self):
-        from ladini.services.database.errors import (
-            SafeDatabaseError,
-            is_safe_business_exception,
-        )
+        from ladini.services.database.errors import SafeDatabaseError, is_safe_business_exception
         assert is_safe_business_exception(SafeDatabaseError("generic")) is True
 
 
@@ -54,34 +50,22 @@ class TestSanitizeErrorMessage:
         assert sanitize_error_message(ValueError("Prix nul interdit")) == "Prix nul interdit"
 
     def test_safe_database_error_returns_its_own_safe_message(self):
-        from ladini.services.database.errors import (
-            SafeDatabaseError,
-            sanitize_error_message,
-        )
+        from ladini.services.database.errors import SafeDatabaseError, sanitize_error_message
         exc = SafeDatabaseError("custom safe msg")
         assert sanitize_error_message(exc) == "custom safe msg"
 
     def test_technical_exception_is_replaced_by_the_generic_message(self):
-        from ladini.services.database.errors import (
-            _GENERIC_SAFE_MESSAGE,
-            sanitize_error_message,
-        )
+        from ladini.services.database.errors import sanitize_error_message, _GENERIC_SAFE_MESSAGE
         exc = RuntimeError("psycopg2.errors.UniqueViolation: duplicate key")
         assert sanitize_error_message(exc) == _GENERIC_SAFE_MESSAGE
 
     def test_business_exception_with_leaked_technical_content_falls_back_to_generic(self):
-        from ladini.services.database.errors import (
-            _GENERIC_SAFE_MESSAGE,
-            sanitize_error_message,
-        )
+        from ladini.services.database.errors import sanitize_error_message, _GENERIC_SAFE_MESSAGE
         exc = ValueError('relation "orders" does not exist')
         assert sanitize_error_message(exc) == _GENERIC_SAFE_MESSAGE
 
     def test_empty_business_message_falls_back_to_generic(self):
-        from ladini.services.database.errors import (
-            _GENERIC_SAFE_MESSAGE,
-            sanitize_error_message,
-        )
+        from ladini.services.database.errors import sanitize_error_message, _GENERIC_SAFE_MESSAGE
         assert sanitize_error_message(ValueError("")) == _GENERIC_SAFE_MESSAGE
 
 
@@ -103,10 +87,7 @@ class TestScrubErrorResult:
         assert scrub_error_result(result) == result
 
     def test_technical_message_is_neutralized(self):
-        from ladini.services.database.errors import (
-            _GENERIC_SAFE_MESSAGE,
-            scrub_error_result,
-        )
+        from ladini.services.database.errors import scrub_error_result, _GENERIC_SAFE_MESSAGE
         result = {"status": "error", "message": 'duplicate key value violates unique constraint "x"'}
         scrubbed = scrub_error_result(result)
         assert scrubbed["message"] == _GENERIC_SAFE_MESSAGE
@@ -381,7 +362,6 @@ class TestTransactionalExceptionHandling:
 
     def test_cancelled_error_rolls_back_and_reraises_uncoerced(self, monkeypatch):
         import asyncio
-
         import ladini.services.database.base_service as base_mod
 
         session = _FakeSession()
@@ -531,9 +511,8 @@ class TestIsConnectionLost:
         assert _is_connection_lost(ValueError("Prix nul interdit")) is False
 
     def test_asyncpg_connection_does_not_exist_error_is_detected_by_type(self):
-        import asyncpg
-
         from ladini.services.database.base_service import _is_connection_lost
+        import asyncpg
         exc = asyncpg.exceptions.ConnectionDoesNotExistError("gone")
         assert _is_connection_lost(exc) is True
 

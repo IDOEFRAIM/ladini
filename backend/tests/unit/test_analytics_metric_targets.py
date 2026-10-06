@@ -7,11 +7,7 @@ from datetime import date
 
 import pytest
 
-from ladini.domain.analytics.metric_targets import (
-    EXAMPLE_TARGETS,
-    MetricTarget,
-    TargetScopeType,
-)
+from ladini.domain.analytics.metric_targets import EXAMPLE_TARGETS, MetricTarget, TargetScopeType
 
 
 class TestMetricTargetValidation:

@@ -397,9 +397,7 @@ class TestK_PublishedTiersAreWhatTheBuyerPays:
     def test_the_buyer_sees_both_packagings_and_pays_2_x_1000_and_debits_18_l(self, conv):
         from ladini.domain.pricing_tiers import resolve_stock_debit
         from tests.conftest import run
-        from tests.unit.test_create_preorder_draft_pricing_tiers import (
-            _FakeSession as _BuyerSession,
-        )
+        from tests.unit.test_create_preorder_draft_pricing_tiers import _FakeSession as _BuyerSession
         from tests.unit.test_create_preorder_draft_pricing_tiers import _service
 
         product = self._persisted_product(self._publish(conv))
@@ -429,9 +427,7 @@ class TestK_PublishedTiersAreWhatTheBuyerPays:
 
 class TestL_ProducerCatalogNeverShowsTheLegacyShadowAsAPrice:
     def test_tiered_product_shows_its_packagings_and_no_per_litre_price(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.success import (
-            _render_catalog_section,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.success import _render_catalog_section
 
         text, _ = _render_catalog_section(
             [{"name": "Miel", "price": 700.0, "unit": "LITRE", "quantity_for_sale": 60.0,
@@ -442,9 +438,7 @@ class TestL_ProducerCatalogNeverShowsTheLegacyShadowAsAPrice:
         assert "FCFA/LITRE" not in text and "💰" not in text
 
     def test_historical_per_unit_product_keeps_its_display(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.success import (
-            _render_catalog_section,
-        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.success import _render_catalog_section
 
         text, _ = _render_catalog_section(
             [{"name": "Maïs", "price": 300.0, "unit": "KG", "quantity_for_sale": 100.0}]
@@ -472,9 +466,7 @@ class TestLegacyShadowIsNeverACommercialPrice:
         assert view.pricing_label == "300 FCFA — base historique non certifiée"
 
     def test_dto_shadow_is_the_raw_first_tier_price_and_never_rebased(self):
-        from ladini.graphs.agents.market_coach.actions.sales_dto import (
-            SalesPublishProductPayload,
-        )
+        from ladini.graphs.agents.market_coach.actions.sales_dto import SalesPublishProductPayload
 
         dto = SalesPublishProductPayload.from_payload(
             {"product": "miel", "quantity": 60.0, "unit": "LITRE", "pricing_tiers": [B5, B9]}
@@ -482,9 +474,7 @@ class TestLegacyShadowIsNeverACommercialPrice:
         assert dto.price == 700.0 and len(dto.pricing_tiers) == 2
 
     def test_no_price_and_no_tiers_is_still_refused(self):
-        from ladini.graphs.agents.market_coach.actions.sales_dto import (
-            SalesPublishProductPayload,
-        )
+        from ladini.graphs.agents.market_coach.actions.sales_dto import SalesPublishProductPayload
 
         with pytest.raises(ValueError):
             SalesPublishProductPayload.from_payload({"product": "miel", "quantity": 60.0, "unit": "LITRE"})

@@ -30,8 +30,11 @@ from __future__ import annotations
 import types
 import uuid
 
-from ladini.services.database.producer import ProducerMgmtMixin
+import pytest
+
 from tests.conftest import run
+
+from ladini.services.database.producer import ProducerMgmtMixin
 
 
 def _fake_producer_profile():

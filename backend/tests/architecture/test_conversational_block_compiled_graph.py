@@ -27,9 +27,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from ladini.graphs.agents.market_coach.core.goals import ALL_BUYER_TUNNEL_GOALS
-from ladini.graphs.agents.market_coach.core.graph_builder import (
-    _route_after_clarification,
-)
 from ladini.graphs.agents.market_coach.core.state import MarketAgentState
 from ladini.graphs.agents.market_coach.nodes.clarification import (
     clarification_node,
@@ -40,6 +37,9 @@ from ladini.graphs.agents.market_coach.nodes.routing import (
 )
 from ladini.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     semantic_disambiguation,
+)
+from ladini.graphs.agents.market_coach.core.graph_builder import (
+    _route_after_clarification,
 )
 from tests.conftest import make_state, run
 

@@ -17,6 +17,8 @@ Ce fichier verrouille que `raw_analysis["path"]` est bien TOUJOURS présent,
 pour que cette décision reste vraie dans le temps."""
 from __future__ import annotations
 
+import pytest
+
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )

@@ -15,6 +15,7 @@ from conftest import (
     run,
 )
 
+
 # =====================================================================
 # 1. Question de coaching — fallback statique obligatoire
 # =====================================================================
@@ -40,11 +41,10 @@ def test_ask_question_survives_llm_500(runtime_with, crashing_llm):
 def test_ask_question_survives_timeout(runtime_with):
     """Rupture prévenue : timeout réseau (asyncio.TimeoutError) — même contrat
     que le 500 : fallback statique, zéro exception."""
-    import asyncio as _a
-
     from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
         generate_llm_question,
     )
+    import asyncio as _a
 
     rt = runtime_with(llm=CrashingLLM(exc=_a.TimeoutError("chaos timeout")))
     question = run(generate_llm_question(rt, "BUYER_ADD_TO_CART", "quantity", "quantité", {}))
@@ -298,8 +298,8 @@ def test_llm_call_sites_are_threaded_and_bounded():
     bloque la boucle (tous les utilisateurs du worker) ou pend sans borne.
     Vérifie les 3 sites critiques du graphe."""
     from ladini.graphs.agents.market_coach.interpreter import routing
-    from ladini.graphs.agents.market_coach.nodes import clarification
     from ladini.graphs.agents.market_coach.nodes.rendering import ask
+    from ladini.graphs.agents.market_coach.nodes import clarification
 
     for module in (routing, ask, clarification):
         src = inspect.getsource(module)

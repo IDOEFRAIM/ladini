@@ -17,9 +17,7 @@ from __future__ import annotations
 import pytest
 
 from ladini.domain.quantity_unit import parse_packaging_message
-from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
-    NewTaskPricingTier,
-)
+from ladini.graphs.agents.market_coach.interpreter.new_task_contract import NewTaskPricingTier
 from tests.integration.test_sales_publish_packaging_tiers import (  # noqa: F401  (fixture `conv`)
     B5,
     B9,
@@ -61,10 +59,7 @@ class TestDeterministicParserNeverClaimsAWrongResult:
 
 class TestExtractionContractIsDocumented:
     def test_both_prompts_carry_the_formulations_and_the_packaging_null_rule(self):
-        from ladini.graphs.agents.market_coach.interpreter import (
-            active_slot_prompts,
-            new_task_prompts,
-        )
+        from ladini.graphs.agents.market_coach.interpreter import active_slot_prompts, new_task_prompts
 
         # NEW_TASK : budget de tokens gardé (TestPromptSizeGuard) -> seule la règle `packaging=null`.
         assert "`packaging` : mot DIT, sinon `null`." in new_task_prompts._SYSTEM_PROMPT_HEADER

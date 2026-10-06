@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import time
 
+from tests.unit.llm_gateway.conftest import make_fake_redis
+
 from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     CircuitBreaker,
     Decision,
@@ -24,7 +26,6 @@ from ladini.graphs.agents.market_coach.llm_gateway.types import (
     LLMProfile,
     ModelCandidate,
 )
-from tests.unit.llm_gateway.conftest import make_fake_redis
 
 
 def _candidate() -> ModelCandidate:

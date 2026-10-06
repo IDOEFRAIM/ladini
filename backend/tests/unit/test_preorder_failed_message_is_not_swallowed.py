@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import run
+
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraft,
     PreorderDraftStatus,
@@ -37,7 +39,6 @@ from ladini.graphs.agents.market_coach.domain.preorder_draft import (
 from ladini.graphs.agents.market_coach.nodes.response_handlers import (
     final_response as final_response_node,
 )
-from tests.conftest import run
 
 
 def _draft(status: PreorderDraftStatus) -> PreorderDraft:

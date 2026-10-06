@@ -22,12 +22,6 @@ from __future__ import annotations
 import typing
 from typing import Any, Dict
 
-from ladini.graphs.agents.market_coach.core.pending_interaction import (
-    InteractionKind,
-    get_pending_interaction,
-    set_pending_interaction,
-    to_tunnel_category,
-)
 from ladini.graphs.agents.market_coach.core.state import MarketAgentState
 from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 from ladini.graphs.agents.market_coach.interpreter.routing import (
@@ -36,6 +30,12 @@ from ladini.graphs.agents.market_coach.interpreter.routing import (
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, run
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+    set_pending_interaction,
+    to_tunnel_category,
+)
 
 _HINTS = typing.get_type_hints(MarketAgentState, include_extras=True)
 

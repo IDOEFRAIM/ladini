@@ -10,10 +10,16 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import pytest
+
 from ladini.core.settings import settings
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
+)
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
+    PreorderDraft,
+    PreorderDraftStatus,
 )
 from ladini.services.database import preorder_draft_store as store_mod
 from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
