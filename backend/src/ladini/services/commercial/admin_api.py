@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ladini.core.settings import settings
@@ -53,6 +53,8 @@ class ListParams:
     sort: str = "recent"  # recent | oldest_no_response | longest
     limit: int = 50
     offset: int = 0
+    q: Optional[str] = None  # recherche nom / numéro
+    role: Optional[str] = None  # BUYER | PRODUCER | ADMIN | ...
 
 
 def parse_list_params(query: Any) -> ListParams:
@@ -71,7 +73,9 @@ def parse_list_params(query: Any) -> ListParams:
         raise ApiError(400, "limit/offset invalides.") from None
     if not (1 <= limit <= 200) or offset < 0:
         raise ApiError(400, "limit doit être entre 1 et 200, offset >= 0.")
-    return ListParams(status_filter=status_filter, sort=sort, limit=limit, offset=offset)
+    q = str(query.get("q") or "").strip()[:60] or None
+    role = str(query.get("role") or "").strip().upper()[:20] or None
+    return ListParams(status_filter=status_filter, sort=sort, limit=limit, offset=offset, q=q, role=role)
 
 
 def _uuid_or_404(raw: str) -> uuid.UUID:
@@ -82,7 +86,8 @@ def _uuid_or_404(raw: str) -> uuid.UUID:
 
 
 async def list_conversations(session: AsyncSession, params: ListParams) -> dict[str, Any]:
-    """Une ligne par utilisateur ayant au moins un tour d'agent, agrégée.
+    """Une ligne par utilisateur joignable (numéro WhatsApp renseigné), AVEC ou SANS conversation : le commercial doit
+    pouvoir contacter tout le monde, pas seulement ceux qui ont déjà parlé à l'agent (`turns=0` = aucun échange).
 
     Source : `intelligence.agent_turns` (télémétrie, alimentée à CHAQUE tour réel
     WhatsApp/webchat) — PAS `intelligence.conversations`, qui n'est pas alimentée
@@ -122,7 +127,8 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
             CommercialFollowup.assigned_commercial_id,
             CommercialFollowup.last_follow_up_at,
         )
-        .join(agg, agg.c.user_id == User.id)
+        .outerjoin(agg, agg.c.user_id == User.id)
+        .where(User.phone.is_not(None), User.phone != "")
         .outerjoin(last_intent_sq, last_intent_sq.c.user_id == User.id)
         .outerjoin(CommercialFollowup, CommercialFollowup.user_id == User.id)
     )
@@ -133,6 +139,12 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
     now = datetime.now(timezone.utc)
     long_threshold = settings.COMMERCIAL_LONG_CONVERSATION_TURNS
     no_response_cutoff = now - timedelta(hours=settings.COMMERCIAL_NO_RESPONSE_HOURS)
+
+    if params.q:
+        like = f"%{params.q}%"
+        stmt = stmt.where(or_(User.name.ilike(like), User.phone.ilike(like)))
+    if params.role:
+        stmt = stmt.where(User.role == params.role)
 
     status_filter = params.status_filter
     if status_filter == "to_follow_up":
@@ -147,11 +159,11 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
         stmt = stmt.where(agg.c.last_activity <= no_response_cutoff)
 
     if params.sort == "recent":
-        stmt = stmt.order_by(agg.c.last_activity.desc())
+        stmt = stmt.order_by(agg.c.last_activity.desc().nulls_last(), User.name)
     elif params.sort == "oldest_no_response":
-        stmt = stmt.order_by(agg.c.last_activity.asc())
+        stmt = stmt.order_by(agg.c.last_activity.asc().nulls_last(), User.name)
     elif params.sort == "longest":
-        stmt = stmt.order_by(agg.c.turns.desc())
+        stmt = stmt.order_by(func.coalesce(agg.c.turns, 0).desc(), User.name)
 
     total = (await session.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
     rows = (await session.execute(stmt.limit(params.limit).offset(params.offset))).all()
@@ -162,13 +174,13 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
             "name": r.name,
             "phone_masked": _mask_phone(r.phone),
             "role": r.role,
-            "turns": r.turns,
+            "turns": int(r.turns or 0),
             "last_activity": r.last_activity.isoformat() if r.last_activity else None,
             "last_intent": r.intent,
             "commercial_status": r.status or "NONE",
             "assigned_commercial_id": str(r.assigned_commercial_id) if r.assigned_commercial_id else None,
             "last_follow_up_at": r.last_follow_up_at.isoformat() if r.last_follow_up_at else None,
-            "is_long": r.turns >= long_threshold,
+            "is_long": int(r.turns or 0) >= long_threshold,
             "is_no_response": bool(r.last_activity and r.last_activity <= no_response_cutoff),
         }
         for r in rows
