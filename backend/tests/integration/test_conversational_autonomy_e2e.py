@@ -86,6 +86,7 @@ UNDERSTANDING: Dict[str, Dict[str, Any]] = {
     "montre les autres": {"reference": {"reference_type": "PAGINATION"}},
     "le septième": {"reference": {"reference_type": "ORDINAL", "ordinal": 7}},
     "ferme extra1": {"reference": {"reference_type": "ATTRIBUTE", "producer_name": "Ferme Extra1"}},
+    "annule ce choix": {"disposition": "REJECT"},
     "le dixième": {"reference": {"reference_type": "ORDINAL", "ordinal": 10}},
     # le modèle hostile : prend « 10 litres » pour l'option 10 (bruit) — le domaine ne doit RIEN muter.
     "je veux 10 litres": {"selection_index": 10},
@@ -113,6 +114,8 @@ class AutonomyLLM:
         if "tunnel d'achat" in sysm:
             self.calls.append("structured")
             body = UNDERSTANDING.get(text)
+            if body is not None and "disposition" in body:
+                return _Comp(json.dumps({"confidence": 0.95, **body}))
             if body is None:
                 return _Comp(json.dumps({"disposition": "UNKNOWN", "confidence": 0.2}))
             action = "SELECT_PRICING_TIER" if "conditionnement parmi" in user else "SELECT_PRODUCER"
@@ -330,3 +333,33 @@ class TestRefinementAndRejection:
         st = c.say("aucun ne me convient")
         assert "appel d'offres" in _reply(st) and not st.get("active_cart")
         assert len(st["vendor_selection_context"]["vendors"]) == 5, "le menu reste actif"
+
+
+class TestStaleMenu:
+    def test_a_natural_reference_never_resolves_against_an_expired_menu(self):
+        c = Conv()
+        c.at_menu()
+        ctx = dict(c.graph.get_state(c.cfg).values["vendor_selection_context"])
+        ctx["created_at"] = 1.0  # menu affiché il y a très longtemps
+        c.graph.update_state(c.cfg, {"vendor_selection_context": ctx})
+        st = c.say("le quatrième")
+        assert _chosen(st) is None and not st.get("active_cart")
+        assert "date un peu" in _reply(st) and "Producteurs disponibles" not in _reply(st)
+
+    def test_the_same_phrase_on_a_fresh_menu_still_works(self):
+        c = Conv()
+        c.at_menu()
+        assert _chosen(c.say("le quatrième")) == "Gilbert-prod"
+
+
+class TestCancelScope:
+    def test_cancelling_a_choice_cancels_only_that_choice_and_keeps_the_cart(self):
+        c = Conv()
+        c.at_menu()
+        c.say("je prends gilbert-prod, 10 litres")  # panier : 10 L
+        c.say("Je veux du lait")                      # nouveau menu producteur
+        st = c.say("annule ce choix")
+        assert len(st["active_cart"]) == 1, "le panier n'est jamais détruit par un « annule » de sélection"
+        text = _reply(st)
+        assert "annule ce choix" in text and "panier (1 article) est conservé" in text, text
+        assert "pas bien saisi" not in text

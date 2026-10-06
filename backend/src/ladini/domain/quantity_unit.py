@@ -88,6 +88,9 @@ _QUANTITY_UNIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Mots qui suivent un PRIX (jamais une quantité).
+_CURRENCY_TOKENS = frozenset({"fcfa", "cfa", "xof", "f", "franc", "francs"})
+
 _UNIT_ONLY_RE = re.compile(r"\b([a-zA-ZÀ-ÖØ-öø-ÿ]{1,12})\b", re.IGNORECASE)
 
 
@@ -248,7 +251,12 @@ def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:
         if mapped_unit is not None:
             return QuantityUnitResult(quantity=qty_val, unit=mapped_unit)
 
-    qty_val, mapped_unit = _extract_match(matches[0])
+    # Repli historique (premier nombre brut, sans unité) — MAIS jamais un nombre suivi d'une MONNAIE : « à 250 FCFA/kg » est un PRIX,
+    # pas une quantité (incident : « J'ai des oignons à vendre à 250 FCFA/kg » publiait « 250 kg d'oignon à 250 FCFA par kg »).
+    bare = [m for m in matches if (m.group("unit") or "").lower() not in _CURRENCY_TOKENS]
+    if not bare:
+        return QuantityUnitResult()
+    qty_val, mapped_unit = _extract_match(bare[0])
     if qty_val is None and mapped_unit is None:
         return QuantityUnitResult()
     return QuantityUnitResult(quantity=qty_val, unit=mapped_unit)

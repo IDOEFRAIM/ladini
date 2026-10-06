@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
@@ -64,6 +65,9 @@ class SelectionReference(BaseModel):
     packaging: Optional[str] = None
     #: Volume/quantité du conditionnement dit (« 500 ml » -> 0.5, « 1 litre » -> 1).
     volume: Optional[float] = None
+    #: ATTRIBUTE — jour désigné, en décalage de jours par rapport à AUJOURD'HUI (« hier » = -1, « demain » = 1, « aujourd'hui » = 0) ;
+    #: le DOMAINE calcule la date (le modèle ne produit jamais de date) et la compare aux dates AFFICHÉES.
+    date_offset_days: Optional[int] = None
     #: REFINEMENT — prix maximum dit (« pas plus de 600 »).
     max_price: Optional[float] = None
     #: PREFERENCE / REFINEMENT (tri : « moins cher », « plus de stock »)
@@ -85,7 +89,10 @@ class SelectionReference(BaseModel):
             if all(v is None for v in (self.region, self.packaging, self.volume, self.max_price, self.criterion, self.producer_name)):
                 raise ValueError("REFINEMENT requiert au moins une contrainte")
         else:
-            if all(v is None for v in (self.producer_name, self.price, self.availability, self.region, self.packaging, self.volume)):
+            if all(
+                v is None
+                for v in (self.producer_name, self.price, self.availability, self.region, self.packaging, self.volume, self.date_offset_days)
+            ):
                 raise ValueError("ATTRIBUTE requiert au moins un attribut")
         return self
 
@@ -112,6 +119,8 @@ class VisibleOption:
     packagings: Tuple[Tuple[str, Optional[float], Optional[float]], ...] = ()
     price_label: str = ""
     comparable_price: bool = True
+    #: Jour de l'option (création / lancement / livraison) tel qu'AFFICHÉ — `YYYY-MM-DD`.
+    day: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -181,7 +190,13 @@ def _packaging_matches(query: Optional[str], volume: Optional[float], option: Vi
     return False
 
 
-def _matches(ref: SelectionReference, option: VisibleOption) -> bool:
+def _matches(ref: SelectionReference, option: VisibleOption, today: Optional[date] = None) -> bool:
+    if ref.date_offset_days is not None:
+        if not option.day:
+            return False
+        wanted = ((today or date.today()) + timedelta(days=ref.date_offset_days)).isoformat()
+        if option.day[:10] != wanted:
+            return False
     if ref.producer_name and not _name_matches(ref.producer_name, option.name):
         return False
     if ref.price is not None and not _price_matches(ref.price, option):
@@ -282,6 +297,7 @@ def resolve_reference(
     *,
     displayed_count: Optional[int] = None,
     hidden_count: int = 0,
+    today: Optional[date] = None,
 ) -> Resolution:
     """Compare `ref` aux options AFFICHÉES (`options[:displayed_count]`). Pure, sans effet, sans LLM.
 
@@ -299,12 +315,12 @@ def resolve_reference(
     if ref.reference_type == ReferenceType.PREFERENCE:
         return _preference(ref, shown)
 
-    hits = [o for o in shown if _matches(ref, o)]
+    hits = [o for o in shown if _matches(ref, o, today)]
     if len(hits) == 1:
         return Resolution(Status.EXACT, (hits[0].index,))
     if len(hits) > 1:
         return Resolution(Status.AMBIGUOUS, tuple(o.index for o in hits), "several_match", message=clarification(shown, [o.index for o in hits]))
-    hidden = [o for o in ordered[cut:] if _matches(ref, o)]
+    hidden = [o for o in ordered[cut:] if _matches(ref, o, today)]
     if hidden:
         return Resolution(Status.NOT_VISIBLE, tuple(o.index for o in hidden), "match_not_displayed",
                           message="Je n'ai pas encore affiché cette offre — dis « montre les autres » pour la voir.")

@@ -9,6 +9,11 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.domain.search_constraints import (
+    apply_constraints,
+    constraints_from_payload,
+    no_result_message,
+)
 from ladini.graphs.agents.market_coach.domain.selection_actions import (
     ActionType,
     build_selection_context,
@@ -1267,6 +1272,32 @@ async def cart_management(
     vendors = confident_vendors
     has_multiple = len(vendors) > 1
 
+    # FLOW COMPRESSION : les contraintes dites dès le 1er message (prix max par unité, conditionnement) filtrent DÈS la première
+    # recherche — rien n'est relâché en silence ; sans résultat, on le dit et on propose d'élargir.
+    _constraints = constraints_from_payload(payload)
+    _search_constraints = _constraints.to_dict()
+    if vendors and not _constraints.is_empty:
+        _report = apply_constraints(vendors, _constraints)
+        logger.info(
+            "flow_compression | constraints=%s | found=%s | kept=%s | excluded=%s",
+            _search_constraints, len(vendors), len(_report.kept), _report.excluded,
+        )
+        if not _report.kept:
+            return _with_base(
+                {
+                    "status": "WAITING_INPUT",
+                    "response_strategy": "SUCCESS",
+                    "final_response": no_result_message(_constraints, str(product_name), _report.excluded_count),
+                    "working_memory": {
+                        **dict(state.get("working_memory") or {}),
+                        "last_search_constraints": _search_constraints,
+                    },
+                    "ag_ui_component": None,
+                }
+            )
+        vendors = _report.kept
+        has_multiple = len(vendors) > 1
+
     if not vendors:
         return _with_base(
             {
@@ -1293,6 +1324,7 @@ async def cart_management(
         extra_context = {
             "requested_quantity": quantity,
             "requested_unit": payload.get("unit"),
+            "search_constraints": _search_constraints,
         }
         state_patch, _menu = cart_service.build_product_selection_menu(
             str(product_name),
@@ -1377,6 +1409,32 @@ async def cart_management(
                 single_selected_tier_id = single_vendor_tiers[t_idx].get("tier_id")
                 payload["selection_index"] = None
 
+    # SAUT D'ÉTAPE : l'utilisateur a déjà dit le conditionnement voulu (« sachets de 500 ml ») et un seul palier y correspond —
+    # le choix de palier n'a plus lieu d'être demandé. La quantité globale (« 20 L ») n'est PAS convertie en silence en nombre de
+    # paquets (audit 2026-09-01) : on la retire et on demande le nombre de paquets, avec le calcul exact en SUGGESTION.
+    _package_hint = ""
+    if (
+        isinstance(single_vendor_tiers, list)
+        and len(single_vendor_tiers) == 1
+        and not single_selected_tier_id
+        and not _constraints.is_empty
+        and (_constraints.package_type or _constraints.package_size is not None)
+    ):
+        _only_tier = single_vendor_tiers[0]
+        single_selected_tier_id = _only_tier.get("tier_id")
+        _per_pack = _only_tier.get("base_unit_quantity") or _only_tier.get("quantity")
+        try:
+            _wanted = float(quantity) if quantity not in (None, "", 0) else None
+            _count = _wanted / float(_per_pack) if _wanted and _per_pack else None
+        except (TypeError, ValueError, ZeroDivisionError):
+            _count = None
+        if _count is not None and abs(_count - round(_count)) < 1e-9 and round(_count) > 0:
+            _package_hint = f"{chr(10)}💡 _Pour {_wanted:g} {str(payload.get('unit') or '').lower()}, il en faut {round(_count)}._"
+        logger.info("flow_compression | step_skipped=tier_selection | tier=%s | count_hint=%s", single_selected_tier_id, bool(_package_hint))
+        payload["quantity"] = None
+        payload["unit"] = None
+        quantity = None
+
     if (
         isinstance(single_vendor_tiers, list)
         and single_vendor_tiers
@@ -1432,7 +1490,7 @@ async def cart_management(
             base_question = (
                 f"✅ *{product_name}* — conditionnement *{tier_label}* chez *{vendor_label}*"
                 f" ({chosen_tier.get('price')} FCFA).\n\n"
-                f"📦 Combien de *{tier_label}* souhaitez-vous ?"
+                f"📦 Combien de *{tier_label}* souhaitez-vous ?{_package_hint}"
             )
         else:
             base_question = (

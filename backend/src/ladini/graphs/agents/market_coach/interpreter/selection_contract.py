@@ -34,6 +34,10 @@ from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from ladini.graphs.agents.market_coach.domain.selection_reference import (
+    SelectionReference,
+)
+
 
 class SelectionEvent(str, Enum):
     SELECTION = "SELECTION"
@@ -50,6 +54,9 @@ class SelectionInterpretation(BaseModel):
     event: SelectionEvent
     selection_index: Optional[int] = None
     selected_value: Optional[str] = None
+    #: Désignation NATURELLE structurée (« celui à 450 », « l'appel d'offres tomate », « le moins cher », « celui lancé hier ») :
+    #: résolue en Python contre les faits VISIBLES du menu (`domain/selection_reference.py`) — jamais un identifiant.
+    reference: Optional[SelectionReference] = None
     #: B27 — certitude du modèle (0..1) sur la LECTURE du message ; jamais une autorisation : une entrée MUTANTE (accepter,
     #: refuser, exécuter) exige en plus la double lecture sémantique et la cohérence des nombres (voir `context_arbitration`).
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -66,16 +73,17 @@ class SelectionInterpretation(BaseModel):
     @model_validator(mode="after")
     def _check_field_consistency(self) -> "SelectionInterpretation":
         if self.event == SelectionEvent.SELECTION:
-            if self.selection_index is None and not self.selected_value:
+            designations = sum((self.selection_index is not None, bool(self.selected_value), self.reference is not None))
+            if designations == 0:
                 raise ValueError(
-                    "SELECTION requiert selection_index OU selected_value"
+                    "SELECTION requiert selection_index OU selected_value OU reference"
                 )
-            if self.selection_index is not None and self.selected_value:
+            if designations > 1:
                 raise ValueError(
-                    "SELECTION ne doit pas porter à la fois "
-                    "selection_index ET selected_value"
+                    "SELECTION ne doit porter qu'UNE désignation "
+                    "(selection_index, selected_value ou reference)"
                 )
-        elif self.selection_index is not None or self.selected_value:
+        elif self.selection_index is not None or self.selected_value or self.reference is not None:
             raise ValueError(
                 f"{self.event.value} ne doit porter ni selection_index "
                 "ni selected_value"
@@ -121,9 +129,13 @@ def adapt_selection_to_canonical(
         entities: Dict[str, Any] = {}
         if interpretation.selection_index is not None:
             entities["selection_index"] = interpretation.selection_index
+        elif interpretation.reference is not None:
+            pass  # résolue en Python par `selection_micro._apply_generic_reference` (jamais exécutée telle quelle)
         else:
             entities["selected_value"] = interpretation.selected_value
         analysis: Dict[str, Any] = {"path": "selection_microprompt"}
+        if interpretation.reference is not None:
+            analysis["reference"] = interpretation.reference.model_dump(mode="json", exclude_none=True)
         if interpretation.confidence is not None:
             analysis["selection_confidence"] = interpretation.confidence
         refs = {k: v for k, v in (("offset_days", interpretation.date_offset_days), ("day", interpretation.date_day),

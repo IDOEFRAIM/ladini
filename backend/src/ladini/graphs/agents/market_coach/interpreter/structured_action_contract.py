@@ -297,6 +297,17 @@ def resolve_reference_decision(decision: StructuredActionDecision, context: Sele
     """Résout `decision.reference` en Python. `None` si la décision ne porte pas de référence."""
     if decision.reference is None or decision.action is None:
         return None
+    if context.created_at is not None and decision.action == ActionType.SELECT_PRODUCER:
+        import time
+
+        from ladini.graphs.agents.market_coach.domain.menu_facts import is_stale
+
+        if is_stale({"created_at": context.created_at}, time.time()):
+            # Menu PÉRIMÉ : une référence naturelle (« le quatrième ») ne se résout jamais contre une liste qui a pu changer.
+            return Resolution(
+                Status.NOT_FOUND, reason="stale_menu",
+                message="Cette liste date un peu et a pu changer — redis-moi ce que tu cherches et je te la réaffiche à jour.",
+            )
     hidden = context.hidden_count if decision.action == ActionType.SELECT_PRODUCER else 0
     return resolve_reference(
         decision.reference, visible_options_for(decision.action, context), displayed_count=None, hidden_count=hidden

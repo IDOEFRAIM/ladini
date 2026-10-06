@@ -135,7 +135,9 @@ def _reject_result(locked_goal: Optional[str], confidence: float) -> Dict[str, A
         "detected_intent": str(locked_goal or "UNKNOWN").upper(),
         "interpreter_confidence": confidence,
         "extracted_entities": {},
-        "raw_analysis": {"path": "structured_action_micro"},
+        # Portée EXPLICITE de l'annulation : un « annule » prononcé dans un menu de sélection annule CE CHOIX — jamais le panier,
+        # la commande ou un besoin récurrent (`render_clarification` l'accuse et rappelle ce qui est conservé).
+        "raw_analysis": {"path": "structured_action_micro", "cancel_scope": "SELECTION"},
     }
 
 

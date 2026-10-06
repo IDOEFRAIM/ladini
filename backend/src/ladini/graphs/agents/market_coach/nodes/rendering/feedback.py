@@ -263,6 +263,16 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
         }
     turn = int(state.get("turn_count") or 0)
 
+    _analysis = state.get("raw_analysis")
+    if isinstance(_analysis, dict) and _analysis.get("cancel_scope") == "SELECTION":
+        # Annulation à portée EXPLICITE : on annule ce CHOIX, pas le panier — et on le dit.
+        n_items = len([i for i in (state.get("active_cart") or []) if isinstance(i, dict)])
+        kept = (
+            f" Ton panier ({n_items} article{'s' if n_items > 1 else ''}) est conservé."
+            if n_items else ""
+        )
+        return {"final_response": f"{salutation}D'accord, j'annule ce choix.{kept} Dis-moi ce que tu veux faire ensuite.", "ag_ui_component": None}
+
     if turn <= 1 or turn_override:
         fallback_text = f"👋 {salutation}{NEUTRAL_WELCOME}"
     else:

@@ -22,7 +22,7 @@ from typing import List
 # micro-prompt a sa propre version (spec §19).
 # v4 (B27) : lecture NATURELLE d'une réponse de menu — accord/refus libres de l'option affichée, références de date
 # (extraites, jamais calculées), certitude ; aucune liste de phrases.
-SELECTION_PROMPT_VERSION = "selection_v4"
+SELECTION_PROMPT_VERSION = "selection_v5"
 
 SELECTION_SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -78,12 +78,19 @@ _USER_PROMPT_TEMPLATE = (
     "calculée : le système la calcule. \"date_role\" : START si la date est celle "
     "du DÉMARRAGE (« celui qui commence le 5 »), DELIVERY si c'est une LIVRAISON "
     "(« celle de demain »), sinon null.\n"
+    '- "reference" (objet) quand le message désigne l\'option par un FAIT lisible dans la liste ou un critère, au lieu de '
+    'compter toi-même : {{"reference_type": "ATTRIBUTE", "producer_name": "<nom ou produit dit>", "price": <nombre>, '
+    '"availability": <quantité dite>, "region": "<lieu>", "date_offset_days": <-1 hier, 0, 1 demain>}} (« celui à 450 », '
+    '« l\'appel d\'offres tomate », « celui de 100 kg », « celui lancé hier »), {{"reference_type": "PREFERENCE", '
+    '"criterion": "CHEAPEST|HIGHEST_AVAILABILITY|SUBJECTIVE"}} (« la moins chère », « celle avec le plus » ; « la meilleure » '
+    '= SUBJECTIVE) ou {{"reference_type": "ORDINAL", "ordinal": <n>}} / {{"position": "LAST"}} — le système compare '
+    'aux options affichées ; ne calcule JAMAIS le moins cher toi-même ;\n'
     'Pour INTERRUPTION et UNKNOWN : "selection_index" et "selected_value" '
     "doivent être null.\n"
     "\n"
     "Réponds strictement avec cet objet JSON, sans aucun autre texte :\n"
     '{{"event": "SELECTION|INTERRUPTION|UNKNOWN", "selection_index": '
-    '<entier ou null>, "selected_value": "<texte ou null>", "confidence": '
+    '<entier ou null>, "selected_value": "<texte ou null>", "reference": <objet ou null>, "confidence": '
     '<0.0 à 1.0>, "date_offset_days": <entier ou null>, "date_day": <1-31 ou '
     'null>, "date_month": <1-12 ou null>, "date_role": "<START|DELIVERY|null>"}}'
 )

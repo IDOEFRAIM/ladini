@@ -90,3 +90,48 @@ KPI critique : part des interactions résolues **sans** la syntaxe suggérée = 
 - Commandes photo en langage naturel (« les photos du quatrième »), annulation à portée explicite (sélection / panier / action), menus vendeur/enchères/stock : le résolveur est générique, mais seuls les menus **producteur** et **conditionnement** sont branchés dans cette phase.
 - Péremption d'un menu : on réutilise les mécanismes de snapshot existants (`menu_id`, TTL) ; aucune résolution silencieuse sur un nouveau menu n'est ajoutée, mais le comportement « snapshot expiré + référence naturelle » n'a pas de test dédié.
 - Pas de modèle réel appelé en CI : les tests jouent le rôle de la compréhension (LLM scripté) ; le résolveur, le contrat et le graphe sont réels.
+
+## 11. Phase 2 — expansion horizontale + compression de flux
+
+**Un seul moteur** : `domain/selection_reference.py` (résolveur) + B27 (`context_arbitration`) + `selection_contract`. Aucun second moteur.
+
+### Menus génériques (appels d'offres, offres reçues…)
+`MenuOption.facts` (faits LISIBLES : nom, prix, quantité, unité, région, jour) → `ui_engine` fige `working_memory["menu_facts"]` (+ `menu_id`
+du snapshot existant, + `created_at`). Le micro-prompt SELECTION accepte une `reference` (ORDINAL / ATTRIBUTE incl. `date_offset_days` /
+PREFERENCE) ; `selection_micro._apply_generic_reference` la résout contre ces faits : EXACT → index ; ambigu / introuvable / périmé →
+clarification ciblée, aucune mutation. Le DOMAINE calcule la date (« hier » = aujourd'hui − 1), jamais le modèle.
+Migrés : liste des appels d'offres (acheteur et producteur), offres reçues (acheteur ×2). Non migrés (pas de `facts`) : stocks, commandes,
+fermes, cycles, catalogue produit — la désignation naturelle y retombe sur le comportement précédent.
+Recurring need / occurrence : déjà couverts par B27 (`live_menu_view`, `resolve_date_reference`, `reference_candidates`) — non touchés.
+
+### Péremption
+Menu producteur : `vendor_selection_context.created_at` ; menus génériques : `menu_facts.created_at` ; TTL 10 min
+(`menu_facts.MENU_FACTS_TTL_SECONDS`, aligné sur les menus récurrents). Référence naturelle sur menu périmé → « cette liste date un peu… », jamais résolue.
+
+### Compression de flux (1ʳᵉ recherche acheteur)
+Le prompt NEW_TASK extrait `max_price_per_unit` et `package_type`/`package_content_amount`/`package_content_unit` pour BUYER_REQUEST.
+`domain/search_constraints.py` filtre à la 1ʳᵉ recherche : prix max comparé APRÈS normalisation d'unité (« 500 FCFA le sachet de 2 L » = 250/L),
+conditionnement (seuls les paliers qui correspondent restent), jamais de comparaison textuelle. Offre non comparable (lot, unité non convertible) :
+non écartée (rien de prouvé). **Aucune relaxation silencieuse** : sans résultat → « Je n'ai rien trouvé avec ces critères… », contraintes
+conservées (`working_memory.last_search_constraints`), propositions d'élargir / d'appel d'offres. Les contraintes restent dans le snapshot du
+menu (`vendor_selection_context.search_constraints`). **La région dite (« à Ouaga ») est le lieu de LIVRAISON : elle ne filtre pas les producteurs.**
+Saut d'étape : un seul palier compatible avec le conditionnement dit → palier sélectionné d'office ; « 20 L » n'est PAS converti en silence
+en paquets (audit 2026-09-01) : on demande le nombre de paquets avec le calcul exact en suggestion (« il en faut 40 »).
+
+### Bug corrigé en route
+« J'ai des oignons à vendre à 250 FCFA/kg » publiait « 250 kg d'oignon à 250 FCFA par kg » : `parse_quantity_unit_from_text` retombait sur « premier nombre
+brut » — un prix suivi de FCFA. Un nombre suivi d'une monnaie n'est plus jamais une quantité.
+
+### Annulation à portée explicite
+Un « annule » prononcé dans un menu de sélection annule CE CHOIX (`raw_analysis.cancel_scope=SELECTION`) : réponse « j'annule ce choix, ton panier
+(N article) est conservé ». Aucun « annule » ne détruit le panier ou une commande. Il n'existe pas d'intention « vider le panier » dans le repo : non ajoutée.
+
+### Dette explicite
+`tests/integration/conftest.py` désactive la shortlist pour 6 fichiers historiques (menus à 6-7 offres sélectionnés par numéro) ; tous les autres
+tests d'intégration tournent avec le défaut de production (5). Migration de ces 6 fichiers = dette ouverte (aucun changement de comportement produit).
+
+### Non fait
+Photos en langage naturel (la commande « photos <n> » est déterministe côté webhook, avant le graphe : un équivalent naturel exige une intention
+dédiée) ; conflit « 20 L mais 5 sachets » (pas de champ de nombre de paquets dans l'extraction) ; retrait d'une contrainte (« le prix n'importe plus »)
+et « encore moins cher » (la contrainte courante existe dans le snapshot mais aucune action ne la lit encore) ; date de livraison dite (non utilisée pour le tri) ;
+shortlist des menus vendeur/enchères/stock ; tests PostgreSQL (aucune mutation métier nouvelle : la sélection ne mute pas la base).

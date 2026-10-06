@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -330,6 +331,7 @@ class CartDomainService:
             "vendors": vendors,
             "vendors_more": more_vendors,
             "menu_id": menu_id,
+            "created_at": time.time(),
             "available_mapping_kind": "product_vendor",
         }
         if extra_context:

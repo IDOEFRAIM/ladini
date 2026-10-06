@@ -372,6 +372,8 @@ async def browse_auctions(
             index=str(i),
             label=f"{d.get('product')} — {d.get('max_price')} FCFA",
             value=mapping.get(str(i)),
+            facts={"name": d.get("product"), "price": d.get("max_price"), "quantity": d.get("quantity"),
+                   "unit": d.get("unit"), "region": d.get("zone") or d.get("zone_name"), "day": d.get("created_at")},
         )
         for i, d in enumerate(data, start=1)
     ]

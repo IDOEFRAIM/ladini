@@ -128,6 +128,8 @@ class SelectionContext(BaseModel):
     displayed_count: Optional[int] = None
     #: Offres existantes mais pas encore montrées (shortlist) : jamais sélectionnables tant qu'elles ne sont pas affichées.
     hidden_count: int = 0
+    #: Horodatage d'affichage du menu producteur (péremption d'une référence naturelle) ; `None` = menu historique sans horodatage.
+    created_at: Optional[float] = None
 
     model_config = {"frozen": True}
 
@@ -300,6 +302,7 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
                 expected_action=ActionType.SELECT_PRODUCER,
                 producer_options=producer_options,
                 hidden_count=len([m for m in (vendor_ctx.get("vendors_more") or []) if isinstance(m, dict)]),
+                created_at=vendor_ctx.get("created_at") if isinstance(vendor_ctx.get("created_at"), (int, float)) else None,
             )
 
     return SelectionContext()

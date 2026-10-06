@@ -35,6 +35,10 @@ class MenuOption:
     index: str
     label: str
     value: Optional[str] = None
+    #: Faits VISIBLES de l'option (nom, prix, quantité, unité, région, date…) — uniquement ce que l'utilisateur a pu lire dans le
+    #: menu. Servent à résoudre une désignation naturelle (« celui à 450 », « l'appel d'offres tomate ») en Python
+    #: (`domain/selection_reference.py`) ; jamais un identifiant, jamais une donnée non affichée.
+    facts: Dict[str, Any] = field(default_factory=dict)
 
     def effective_value(self) -> str:
         """Retourne ``value`` ou ``index`` en fallback."""
@@ -177,6 +181,20 @@ class MenuRequest:
     def to_working_memory_patch(self) -> Dict[str, Any]:
         """Retourne le fragment de ``working_memory`` à merger."""
         return {"available_mapping_kind": self.kind}
+
+    def to_menu_facts(self, *, created_at: float) -> Optional[Dict[str, Any]]:
+        """Instantané SÉMANTIQUE du menu affiché (`index`, `entity_id`, faits visibles) + horodatage de péremption ; `None` si aucune
+        option ne porte de faits (menu non migré : la désignation naturelle n'est alors pas résolue par ce chemin)."""
+        if not any(o.facts for o in self.options):
+            return None
+        return {
+            "kind": self.kind,
+            "created_at": created_at,
+            "options": [
+                {"index": str(o.index), "entity_id": o.effective_value(), "label": o.label, "facts": dict(o.facts)}
+                for o in self.options
+            ],
+        }
 
 
 @dataclass(slots=True)
