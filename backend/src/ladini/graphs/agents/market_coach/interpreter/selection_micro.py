@@ -132,7 +132,62 @@ def _outcome_for_interpretation(
 ) -> Tuple[SelectionOutcome, Optional[Dict[str, Any]]]:
     if interpretation.event == SelectionEvent.INTERRUPTION:
         return SelectionOutcome.INTERRUPTION, None
-    return SelectionOutcome.RESULT, _apply_domain_date_reference(adapt_selection_to_canonical(interpretation), state, text)
+    result = adapt_selection_to_canonical(interpretation)
+    if interpretation.reference is not None:
+        return SelectionOutcome.RESULT, _apply_generic_reference(result, interpretation.reference, state)
+    return SelectionOutcome.RESULT, _apply_domain_date_reference(result, state, text)
+
+
+def _clarify(result: Dict[str, Any], message: str, reason: str) -> Dict[str, Any]:
+    """Aucune mutation : message ciblé (affiché par `render_selection_menu`), pas de menu rejoué, pas de retry."""
+    return {
+        **result,
+        "interpreted_event": "UNKNOWN",
+        "interpreter_confidence": 0.3,
+        "extracted_entities": {},
+        "raw_analysis": {
+            **(result.get("raw_analysis") or {}),
+            "selection_clarification": message,
+            "selection_resolution": reason,
+            "interaction_mode": "CLARIFICATION",
+        },
+    }
+
+
+def _apply_generic_reference(result: Dict[str, Any], reference: Any, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Désignation NATURELLE d'une option d'un menu générique (enchères, offres, stocks…) : résolue en Python contre les faits
+    VISIBLES figés à l'affichage (`working_memory["menu_facts"]`). Péremption respectée ; le modèle ne produit jamais d'index
+    ici, et une ambiguïté / un manque -> clarification ciblée sans aucune mutation."""
+    import time
+
+    from ladini.graphs.agents.market_coach.domain.menu_facts import (
+        is_stale,
+        visible_options,
+    )
+    from ladini.graphs.agents.market_coach.domain.selection_reference import (
+        ReferenceType,
+        Status,
+        resolve_reference,
+    )
+
+    facts = ((state or {}).get("working_memory") or {}).get("menu_facts")
+    if not isinstance(facts, dict) or not facts.get("options"):
+        return _clarify(result, "Je ne retrouve pas la liste à laquelle tu fais référence — redemande-la et je te la réaffiche.", "no_menu_facts")
+    if is_stale(facts, time.time()):
+        logger.info("interaction_mode=CLARIFICATION | stale_menu | kind=%s", facts.get("kind"))
+        return _clarify(result, "Cette liste date un peu et a pu changer — redemande-la et je te la réaffiche à jour.", "stale_menu")
+    if reference.reference_type in (ReferenceType.PAGINATION, ReferenceType.REFINEMENT, ReferenceType.NONE_OF_THESE):
+        return _clarify(result, "Je n'ai pas d'autres éléments à te montrer pour cette liste — choisis parmi ceux affichés.", "unsupported_reference")
+    resolution = resolve_reference(reference, visible_options(facts))
+    if resolution.status == Status.EXACT and resolution.index is not None:
+        logger.info("interaction_mode=NATURAL_REFERENCE | generic_menu=%s | resolved_index=%s", facts.get("kind"), resolution.index)
+        return {
+            **result,
+            "extracted_entities": {"selection_index": resolution.index},
+            "raw_analysis": {**(result.get("raw_analysis") or {}), "reference_resolved": "reference", "interaction_mode": "NATURAL_REFERENCE"},
+        }
+    logger.info("interaction_mode=CLARIFICATION | status=%s | reason=%s", resolution.status.value, resolution.reason)
+    return _clarify(result, resolution.message or "Je n'ai pas bien identifié l'option — peux-tu préciser ?", resolution.status.value)
 
 
 def _apply_domain_date_reference(

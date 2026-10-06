@@ -1262,13 +1262,15 @@ async def cognitive_guard(
         and pending.target is not None
         and pending.field in STRUCTURED_FIELDS
     )
+    _raw_analysis = state.get("raw_analysis")
+    targeted_clarification = bool(isinstance(_raw_analysis, dict) and _raw_analysis.get("selection_clarification"))
     if (
         event == "UNKNOWN"
         and in_tunnel
         and not location_shared
         and not structured_field_owns_resolution
     ):
-        if retry_count >= 2:
+        if retry_count >= 2 and not targeted_clarification:
             logger.warning(
                 "[CognitiveGuard] Max retries reached for goal=%s — abandoning tunnel",
                 current_goal,
@@ -1314,7 +1316,8 @@ async def cognitive_guard(
                 "current_goal": current_goal,
                 "goal_status": "WAITING_INPUT",
                 "response_strategy": "RECOVERY",
-                "retry_count": retry_count + 1,
+                # Une clarification ciblée (« tu parles de A ou de B ? ») n'est pas un échec de compréhension.
+                "retry_count": retry_count if targeted_clarification else retry_count + 1,
                 "intent_competition": competition,
                 "cognitive_decision": {
                     **decision,

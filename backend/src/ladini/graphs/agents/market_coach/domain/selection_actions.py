@@ -95,11 +95,15 @@ class ProducerOption(BaseModel):
     #: construits à la main (voir `SelectionContext._normalize_legacy_options`).
     offer_id: str = ""
     label: str
+    #: Faits VISIBLES de l'offre (nom, région, prix, stock, conditionnements) copiés du snapshot du menu : de quoi résoudre
+    #: « celui de Ouaga » / « celui à 500 » / « le moins cher » en Python (`domain/selection_reference.py`).
+    facts: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TierOption(BaseModel):
     tier_id: str
     label: str
+    facts: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SelectionContext(BaseModel):
@@ -120,6 +124,12 @@ class SelectionContext(BaseModel):
     # Palier déjà choisi (survit pour permettre une re-sélection explicite —
     # voir domain/pricing_tiers.py::pending_pack_count_tier, même notion).
     active_tier_id: Optional[str] = None
+    #: Nombre d'offres RÉELLEMENT affichées (shortlist) ; `None` = toutes. Une référence naturelle ne désigne que du visible.
+    displayed_count: Optional[int] = None
+    #: Offres existantes mais pas encore montrées (shortlist) : jamais sélectionnables tant qu'elles ne sont pas affichées.
+    hidden_count: int = 0
+    #: Horodatage d'affichage du menu producteur (péremption d'une référence naturelle) ; `None` = menu historique sans horodatage.
+    created_at: Optional[float] = None
 
     model_config = {"frozen": True}
 
@@ -239,7 +249,7 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
         if t.get("packaging"):
             label += f" ({t['packaging']})"
         label += f" — {t.get('price')} FCFA"
-        tier_options.append(TierOption(tier_id=str(t["tier_id"]), label=label))
+        tier_options.append(TierOption(tier_id=str(t["tier_id"]), label=label, facts=dict(t)))
 
     if active_tier_id and any(t.tier_id == active_tier_id for t in tier_options):
         return SelectionContext(
@@ -271,19 +281,28 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
             # "X FCFA/unite" ici. Repli legacy uniquement si l'appelant ne l'a pas fourni (résultat
             # d'une source antérieure à cette phase).
             price_label = v.get("pricing_label") or f"{v.get('price')} FCFA/{v.get('unit')}"
-            label = f"{v.get('vendor_name') or 'producteur'} — {price_label}"
+            # Faits VISIBLES dans le libellé (région, stock) : le modèle et l'utilisateur parlent des mêmes attributs.
+            extras = " · ".join(
+                str(x) for x in (v.get("zone"), f"{v['available_qty']} dispo" if v.get("available_qty") else None) if x
+            )
+            label = f"{v.get('vendor_name') or 'producteur'} — {price_label}" + (f" ({extras})" if extras else "")
             producer_options.append(
                 ProducerOption(
                     producer_id=str(v.get("producer_id") or ""),
                     display_index=position,
                     offer_id=vendor_offer_id(v, position),
                     label=label,
+                    facts={k: v.get(k) for k in (
+                        "vendor_name", "zone", "price", "unit", "available_qty", "pricing_label", "price_basis", "pricing_tiers",
+                    )},
                 )
             )
         if len(producer_options) > 1:
             return SelectionContext(
                 expected_action=ActionType.SELECT_PRODUCER,
                 producer_options=producer_options,
+                hidden_count=len([m for m in (vendor_ctx.get("vendors_more") or []) if isinstance(m, dict)]),
+                created_at=vendor_ctx.get("created_at") if isinstance(vendor_ctx.get("created_at"), (int, float)) else None,
             )
 
     return SelectionContext()

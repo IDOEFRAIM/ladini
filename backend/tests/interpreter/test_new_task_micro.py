@@ -384,7 +384,8 @@ class TestPromptSizeGuard:
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2700, (
+        # Flow compression (2026-10) : +~45 tokens (max_price_per_unit/conditionnement VOULU d'un BUYER_REQUEST) — loin des 5000.
+        assert estimated_tokens < 2750, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -396,7 +397,7 @@ class TestPromptSizeGuard:
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
         # B24 : +~30 tokens (champ `update_action` du schéma JSON) ; le garde anti-5000 tokens ci-dessus reste à 2650.
-        assert 800 <= total_tokens <= 2750
+        assert 800 <= total_tokens <= 2800
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

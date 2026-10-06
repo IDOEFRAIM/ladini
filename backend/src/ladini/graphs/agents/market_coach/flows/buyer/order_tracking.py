@@ -892,7 +892,16 @@ async def list_buyer_auctions(
         label = f"{product}{qty_str}{price_str}"
         lines.append(f"*{i}.* {label}\n   {status_label}{bids_str}")
         mapping[str(i)] = auction_id
-        options.append(MenuOption(index=str(i), label=label, value=auction_id))
+        options.append(
+            MenuOption(
+                index=str(i),
+                label=label,
+                value=auction_id,
+                # Faits LISIBLES dans la ligne du menu (rien d'autre) : de quoi résoudre « celui de 100 kg », « celui de tomate ».
+                facts={"name": product, "quantity": auction.get("quantity"), "unit": unit,
+                       "price": auction.get("max_price") or auction.get("budget"), "day": auction.get("created_at")},
+            )
+        )
 
     # Deux sources de photo bien distinctes, jamais mélangées : la photo de
     # RÉFÉRENCE de l'enchère elle-même (add_auction_photo, optionnelle) VS
@@ -1048,7 +1057,15 @@ async def check_auction_status(
                 label = f"{producer} — {price} FCFA"
             lines.append(f"\n*{i}.* {bid_emoji} {label}")
             mapping[str(i)] = bid_id
-            options.append(MenuOption(index=str(i), label=label, value=bid_id))
+            options.append(
+                MenuOption(
+                    index=str(i),
+                    label=label,
+                    value=bid_id,
+                    facts={"name": producer, "price": None if bid.get("requires_requalification") else (bid.get("price") or bid.get("offered_price")),
+                           "quantity": bid.get("quantity"), "unit": bid.get("unit"), "day": bid.get("created_at")},
+                )
+            )
 
         # Photo du lot proposé (add_bid_photo côté producteur) — le moment de
         # confiance clé avant de désigner un gagnant. Voir

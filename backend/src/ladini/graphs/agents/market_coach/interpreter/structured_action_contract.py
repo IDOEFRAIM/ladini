@@ -62,6 +62,16 @@ from ladini.graphs.agents.market_coach.domain.selection_actions import (
     SelectionContext,
     validate_action,
 )
+from ladini.graphs.agents.market_coach.domain.selection_reference import (
+    ReferenceType,
+    Resolution,
+    SelectionReference,
+    Status,
+    VisibleOption,
+    option_from_vendor,
+    options_from_tiers,
+    resolve_reference,
+)
 
 # Même mapping que `interpreter/routing.py::_ACTION_EVENT` — dupliqué
 # intentionnellement en une seule ligne plutôt qu'importé (éviter tout
@@ -102,6 +112,9 @@ class StructuredActionDecision(BaseModel):
     action: Optional[ActionType] = None
     selection_index: Optional[int] = None
     selected_value: Optional[str] = None
+    #: Référence NATURELLE structurée (« le moins cher », « Gilbert », « celui à 500 »…) — résolue en Python contre les options
+    #: AFFICHÉES ; alternative à `selection_index`/`selected_value`, jamais un identifiant.
+    reference: Optional[SelectionReference] = None
     package_count: Optional[float] = None
     quantity: Optional[float] = None
     unit: Optional[str] = None
@@ -121,6 +134,7 @@ class StructuredActionDecision(BaseModel):
                     self.action,
                     self.selection_index,
                     self.selected_value,
+                    self.reference,
                     self.package_count,
                     self.quantity,
                     self.unit,
@@ -138,14 +152,16 @@ class StructuredActionDecision(BaseModel):
             raise ValueError("ACTION requiert un champ 'action' explicite")
 
         if self.action in _SELECTION_LIKE_ACTIONS:
-            has_index = self.selection_index is not None
-            has_value = bool(self.selected_value)
-            if has_index == has_value:  # ni l'un ni l'autre, ou les deux
+            designations = sum((self.selection_index is not None, bool(self.selected_value), self.reference is not None))
+            if designations != 1:  # aucune, ou plusieurs
                 raise ValueError(
                     f"{self.action.value} requiert exactement un de "
-                    "selection_index/selected_value"
+                    "selection_index/selected_value/reference"
                 )
-            if self.package_count is not None or self.quantity is not None or self.unit is not None:
+            # Seule une RÉFÉRENCE structurée peut s'accompagner d'une quantité/d'un nombre de paquets dits dans la même phrase
+            # (« je prends Gilbert, 10 litres ») : deux FAITS, le domaine valide chacun. Un `selection_index` avec une
+            # quantité reste interdit (incident « le premier, c'est-à-dire 5 L » : 5 lu comme un index).
+            if self.reference is None and (self.package_count is not None or self.quantity is not None or self.unit is not None):
                 raise ValueError(
                     f"{self.action.value} ne doit porter aucun champ "
                     "package_count/quantity/unit"
@@ -266,6 +282,38 @@ def _resolve_selection(
     return None
 
 
+def visible_options_for(action: ActionType, context: SelectionContext) -> List[VisibleOption]:
+    """Options VISIBLES (faits lisibles par l'utilisateur) du snapshot courant — jamais une nouvelle recherche."""
+    if action == ActionType.SELECT_PRODUCER:
+        return [
+            option_from_vendor({**p.facts, "offer_id": p.offer_id, "display_index": p.display_index}, p.display_index)
+            for p in context.producer_options
+        ]
+    tier_options: List[VisibleOption] = options_from_tiers([t.facts for t in context.tier_options])
+    return tier_options
+
+
+def resolve_reference_decision(decision: StructuredActionDecision, context: SelectionContext) -> Optional[Resolution]:
+    """Résout `decision.reference` en Python. `None` si la décision ne porte pas de référence."""
+    if decision.reference is None or decision.action is None:
+        return None
+    if context.created_at is not None and decision.action == ActionType.SELECT_PRODUCER:
+        import time
+
+        from ladini.graphs.agents.market_coach.domain.menu_facts import is_stale
+
+        if is_stale({"created_at": context.created_at}, time.time()):
+            # Menu PÉRIMÉ : une référence naturelle (« le quatrième ») ne se résout jamais contre une liste qui a pu changer.
+            return Resolution(
+                Status.NOT_FOUND, reason="stale_menu",
+                message="Cette liste date un peu et a pu changer — redis-moi ce que tu cherches et je te la réaffiche à jour.",
+            )
+    hidden = context.hidden_count if decision.action == ActionType.SELECT_PRODUCER else 0
+    return resolve_reference(
+        decision.reference, visible_options_for(decision.action, context), displayed_count=None, hidden_count=hidden
+    )
+
+
 def resolve_decision_to_raw_action(
     decision: StructuredActionDecision,
     prompt_context: StructuredActionPromptContext,
@@ -374,6 +422,10 @@ def resolve_and_validate(
 
 
 __all__ = [
+    "ReferenceType",
+    "Status",
+    "resolve_reference_decision",
+    "visible_options_for",
     "StructuredActionDisposition",
     "StructuredActionDecision",
     "StructuredActionOption",

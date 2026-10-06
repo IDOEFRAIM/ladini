@@ -37,7 +37,7 @@ from ladini.graphs.agents.market_coach.interpreter.structured_action_contract im
 # (SELECT_PRICING_TIER), jamais une déviation. v2 ajoute une clarification
 # explicite (achat identique ≠ nouvelle demande) + un exemple contrastif
 # dédié, sans transformer la règle en liste de synonymes.
-STRUCTURED_ACTION_PROMPT_VERSION = "structured_action_v2"
+STRUCTURED_ACTION_PROMPT_VERSION = "structured_action_v3"
 
 _SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -87,15 +87,29 @@ _DISPOSITION_RULES = (
 )
 
 _SELECTION_RULES = (
-    "Pour ACTION sur ce type de choix :\n"
-    '- utilise "selection_index" (entier, 1-based) si tu identifies '
-    "exactement UNE option ;\n"
-    '- sinon utilise "selected_value" (texte court, la désignation humaine '
-    "utile — jamais un identifiant technique) ;\n"
-    "- ne renseigne jamais les deux à la fois, n'invente aucun "
-    "identifiant ;\n"
-    '- ne renseigne JAMAIS "package_count"/"quantity"/"unit" pour ce type '
-    "de choix — une seule signification par réponse.\n"
+    "Pour ACTION sur ce type de choix, l'utilisateur peut répondre avec SES mots, pas seulement un numéro. "
+    "Désigne l'option avec UN SEUL des trois moyens :\n"
+    '- "selection_index" (entier 1-based) : un numéro dit tel quel (« 4 », « le quatrième », « option 4 ») ;\n'
+    '- "reference" : une désignation par les FAITS visibles, SANS choisir toi-même (le système compare aux options) :\n'
+    '    {"reference_type": "ORDINAL", "ordinal": <n>} ou {"reference_type": "ORDINAL", "position": "LAST"|"PENULTIMATE"} '
+    "(« le dernier », « l'avant-dernier ») ;\n"
+    '    {"reference_type": "ATTRIBUTE", "producer_name": "<nom dit>", "price": <nombre>, "availability": <nombre>, '
+    '"region": "<lieu dit>", "packaging": "<conditionnement dit>", "volume": <nombre>} (« Gilbert », « celui à 500 », '
+    "« celui de Ouaga », « le sachet de 500 ml » -> volume 0.5) — ne renseigne QUE ce que l'utilisateur a dit ;\n"
+    '    {"reference_type": "PREFERENCE", "criterion": "CHEAPEST"|"HIGHEST_AVAILABILITY"|"SUBJECTIVE"} '
+    "(« le moins cher », « celui qui a le plus de stock » ; « le plus intéressant » = SUBJECTIVE) — ne calcule JAMAIS toi-même "
+    "quel est le moins cher : le système le fait ;\n"
+    '    {"reference_type": "REFINEMENT", "region": "<lieu>", "packaging": "<conditionnement>", "max_price": <nombre>, '
+    '"criterion": "CHEAPEST"|"HIGHEST_AVAILABILITY"} si l\'utilisateur AJOUTE une contrainte au lieu de choisir '
+    "(« je préfère quelqu'un à Ouaga », « pas plus de 600 », « moins cher », « en sachet ») — ne renseigne que ce qui est dit ;\n"
+    '    {"reference_type": "NONE_OF_THESE"} si aucune offre ne lui convient (« aucun », « rien ne me convient ») ;\n'
+    '    {"reference_type": "PAGINATION"} si l\'utilisateur demande de VOIR LA SUITE de la liste (« montre les autres », « voir plus », '
+    "« suite ») : ce n'est pas un choix.\n"
+    '- "selected_value" (texte court) seulement si aucun des moyens ci-dessus ne convient.\n'
+    "Un seul des trois par réponse ; n'invente aucun identifiant. Un NOMBRE accompagné d'une unité ou d'un mot de quantité "
+    "(« 4 litres », « mets-en 4 », « 500 francs max ») n'est JAMAIS une option : ce n'est pas une désignation. "
+    'Si le message désigne une option ET donne une quantité/un nombre de paquets (« je prends Gilbert, 10 litres »), utilise '
+    '"reference" ET renseigne "quantity"/"unit" (ou "package_count") — avec "selection_index" ou "selected_value", jamais.\n'
 )
 
 _PACKAGE_COUNT_RULES = (
@@ -135,7 +149,7 @@ _JSON_CONTRACT = (
     "Réponds strictement avec cet objet JSON, sans aucun autre texte :\n"
     '{{"disposition": "ACTION|REJECT|DEVIATION|UNKNOWN", "action": '
     '"{action_type}|null", "selection_index": <entier ou null>, '
-    '"selected_value": "<texte ou null>", "package_count": <nombre ou '
+    '"selected_value": "<texte ou null>", "reference": <objet ou null>, "package_count": <nombre ou '
     'null>, "quantity": <nombre ou null>, "unit": "<texte ou null>", '
     '"confidence": <0.0 à 1.0>}}'
 )

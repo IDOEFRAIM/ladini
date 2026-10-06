@@ -97,7 +97,12 @@ def _build_bids_menu(
         else:
             price_txt = f"{b.get('price') or b.get('offered_price') or '?'} FCFA"
         lines.append(f"\n*{i}. {producer}* — 💰 {price_txt}")
-        options.append({"index": str(i), "label": f"{producer} — {price_txt}"})
+        options.append({
+            "index": str(i),
+            "label": f"{producer} — {price_txt}",
+            "facts": {"name": producer, "price": None if b.get("requires_requalification") else (b.get("price") or b.get("offered_price")),
+                      "quantity": b.get("quantity"), "unit": b.get("unit"), "day": b.get("created_at")},
+        })
         if bid_id:
             mapping[str(i)] = bid_id
     lines.append("\n_Répondez avec le numéro pour accepter une offre._")
@@ -114,7 +119,7 @@ def _build_bids_menu(
             title="Offres reçues",
             options=[
                 MenuOption(
-                    index=o["index"], label=o["label"], value=mapping.get(o["index"])
+                    index=o["index"], label=o["label"], value=mapping.get(o["index"]), facts=o.get("facts") or {}
                 )
                 for o in options
             ],

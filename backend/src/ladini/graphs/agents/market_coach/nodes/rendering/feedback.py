@@ -67,6 +67,11 @@ async def render_error(ctx: RenderContext) -> Dict[str, Any]:
 
 async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
     state, goal = ctx.state, ctx.goal
+    analysis = state.get("raw_analysis")
+    clarification = analysis.get("selection_clarification") if isinstance(analysis, dict) else None
+    if clarification:
+        # Référence naturelle ambiguë / introuvable : question CIBLÉE ; le menu et le contexte restent actifs (pas de réaffichage).
+        return {"final_response": str(clarification), "ag_ui_component": None}
     retry_count = int(state.get("retry_count") or 0)
     retry_next = min(retry_count + 1, _RECOVERY_MAX_RETRIES)
 
@@ -257,6 +262,16 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
             "ag_ui_component": state.get("ag_ui_component"),
         }
     turn = int(state.get("turn_count") or 0)
+
+    _analysis = state.get("raw_analysis")
+    if isinstance(_analysis, dict) and _analysis.get("cancel_scope") == "SELECTION":
+        # Annulation à portée EXPLICITE : on annule ce CHOIX, pas le panier — et on le dit.
+        n_items = len([i for i in (state.get("active_cart") or []) if isinstance(i, dict)])
+        kept = (
+            f" Ton panier ({n_items} article{'s' if n_items > 1 else ''}) est conservé."
+            if n_items else ""
+        )
+        return {"final_response": f"{salutation}D'accord, j'annule ce choix.{kept} Dis-moi ce que tu veux faire ensuite.", "ag_ui_component": None}
 
     if turn <= 1 or turn_override:
         fallback_text = f"👋 {salutation}{NEUTRAL_WELCOME}"

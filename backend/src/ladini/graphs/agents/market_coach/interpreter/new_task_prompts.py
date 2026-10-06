@@ -26,7 +26,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
 # v12 (B27) : écran affiché — accord/refus libre = CONFIRM/REJECT, accord + valeur nouvelle = UPDATE (jamais un accord), demande
 # de chercher un autre fournisseur = REFRESH_RECURRING_MATCHING, besoin NOMMÉ = GET_MY_NEEDS(product) ; aucune liste de phrases.
-NEW_TASK_PROMPT_VERSION = "new_task_v12"
+NEW_TASK_PROMPT_VERSION = "new_task_v13"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -123,7 +123,9 @@ donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 (CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/MONTHLY/ \
 ONE_OFF ; ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + \
 excluded_weekdays=[7]. `max_price_per_unit` = prix PAR UNITÉ, jamais un budget total ; `null` \
-si l'unité n'est pas précisée. `starts_at` : date de début dite (`YYYY-MM-DD`) ; `null` sinon ou si "dès que possible".
+si l'unité n'est pas précisée ; aussi pour BUYER_REQUEST (« pas plus de 600 FCFA le litre »), avec \
+`package_type`/`package_content_amount`/`package_content_unit` = conditionnement VOULU dit (« sachets de 500 ml » → \
+"sachet", 500, "ml"), `null` sinon. `starts_at` : date de début dite (`YYYY-MM-DD`) ; `null` sinon ou si "dès que possible".
 - `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
 quantité+unité, en objets {"product","quantity","unit"} — jamais \
 `additional_products`.
@@ -174,6 +176,7 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "farm_name": "<str|null>", "recurrence_type": \
 "<DAILY|WEEKLY_DAYS|WEEKLY|MONTHLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
 "excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>, \
+"package_type": "<str|null>", "package_content_amount": <float|null>, "package_content_unit": "<str|null>", \
 "starts_at": "<YYYY-MM-DD|null>", \
 "additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \

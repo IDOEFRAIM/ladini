@@ -83,6 +83,9 @@ def extract_requested_product(text: str) -> Optional[str]:
             candidate = clean[direct.end():]
     if not candidate:
         return None
+    # Un nom de produit ne continue pas après une virgule : « je prends le sachet de 500 ml, j'en veux 5 » — « j'en veux 5 »
+    # est une AUTRE proposition (quantité), jamais la suite du produit.
+    candidate = re.split(r"[,;]", candidate, maxsplit=1)[0]
     words = [w for w in re.findall(r"[a-z'\-]+", candidate)]
     while words and _is_noise(words[-1]):
         words.pop()

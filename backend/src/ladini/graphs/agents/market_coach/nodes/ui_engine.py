@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
@@ -211,8 +212,14 @@ async def ui_engine(
                 menu.kind,
             )
 
+    # Instantané sémantique (faits visibles) — réécrit à CHAQUE menu, comme `available_mapping_kind` : jamais de fusion avec un
+    # ancien menu. `None` (menu non migré) efface l'ancien pour qu'aucune référence naturelle ne vise un menu périmé.
+    wm_patch["menu_facts"] = menu.to_menu_facts(created_at=time.time())
+
     if snapshot_id is not None:
         wm_patch["menu_snapshot_id"] = snapshot_id
+        if wm_patch["menu_facts"] is not None:
+            wm_patch["menu_facts"]["menu_id"] = snapshot_id
         ag_ui.setdefault("kwargs", {}).setdefault("metadata", {})["menu_snapshot_id"] = (
             snapshot_id
         )
