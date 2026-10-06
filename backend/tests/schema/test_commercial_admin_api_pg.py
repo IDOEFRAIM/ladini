@@ -116,6 +116,48 @@ class TestListConversations:
         assert row["is_long"] is True and row["turns"] == 3
 
 
+class TestEveryReachableUserIsListed:
+    """Le commercial peut contacter TOUT utilisateur ayant un numéro WhatsApp, même sans aucun échange avec l'agent."""
+
+    def test_a_user_without_any_turn_is_listed_with_zero_turns(self, pg_dsn):
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            silent = insert(cur, "auth.users", phone=uniq("+226"), name="Silencieux", role="PRODUCER")
+        conn.close()
+        result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(limit=200)))
+        row = next(r for r in result["items"] if r["user_id"] == str(silent))
+        assert row["turns"] == 0 and row["last_activity"] is None and row["is_long"] is False
+        assert row["commercial_status"] == "NONE"
+
+    def test_a_user_without_a_phone_is_not_listed(self, pg_dsn):
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            cur.execute("select count(*) from auth.users where phone is null or phone = ''")
+            no_phone_before = cur.fetchone()[0]
+        conn.close()
+        result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(limit=200)))
+        assert all(r["phone_masked"] for r in result["items"]) or no_phone_before == 0
+
+    def test_search_and_role_filters(self, pg_dsn):
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            target = insert(cur, "auth.users", phone=uniq("+226"), name="ZorroUnique", role="BUYER")
+            other = insert(cur, "auth.users", phone=uniq("+226"), name="Autre", role="PRODUCER")
+        conn.close()
+        by_name = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(q="zorrounique")))
+        assert [r["user_id"] for r in by_name["items"]] == [str(target)]
+        by_role = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(role="BUYER", limit=200)))
+        assert str(target) in {r["user_id"] for r in by_role["items"]} and str(other) not in {r["user_id"] for r in by_role["items"]}
+
+    def test_the_detail_of_a_silent_user_is_an_empty_timeline_not_an_error(self, pg_dsn):
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            silent = insert(cur, "auth.users", phone=uniq("+226"), name="Muet", role="BUYER")
+        conn.close()
+        detail = _run(pg_dsn, lambda s: api.get_conversation_detail(s, str(silent)))
+        assert detail["timeline"] == [] and detail["name"] == "Muet"
+
+
 class TestConversationDetailTimeline:
     def test_merges_turns_and_commercial_outbound_in_chronological_order(self, pg_dsn, user):
         # `audit_logs.created_at` est écrit par `func.now()` côté serveur (non
