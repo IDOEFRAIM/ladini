@@ -18,10 +18,9 @@ import uuid
 
 import pytest
 
-from tests.conftest import run
-
 from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.errors import BusinessRuleException
+from tests.conftest import run
 
 
 class _Rows(list):
@@ -85,8 +84,8 @@ class _FakeSession:
         return None
 
     async def execute(self, stmt):
-        from sqlalchemy.sql.dml import Insert as _InsertStmt
         from sqlalchemy.dialects import postgresql
+        from sqlalchemy.sql.dml import Insert as _InsertStmt
 
         if isinstance(stmt, _InsertStmt):
             self.outbox_inserts.append(stmt)

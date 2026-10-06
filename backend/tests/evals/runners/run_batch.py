@@ -23,7 +23,6 @@ from tests.evals.runners.harness import (  # noqa: E402
     RecordingRuntime,
     ScenarioResult,
     _run_generic_chain,
-    _run_off_topic_during_confirmation,
     find_scenario,
     load_scenario,
 )

@@ -16,7 +16,6 @@ sans le paquet (pré-existant, sans rapport avec cette feature)."""
 from __future__ import annotations
 
 import threading
-from typing import Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest

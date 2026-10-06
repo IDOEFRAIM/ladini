@@ -9,9 +9,7 @@ site d'appel (routing.py, response_handlers.py, clarification.py,
 slot_enrichment.py, nodes/rendering/ask.py)."""
 from __future__ import annotations
 
-import pytest
-
-from ladini.core.get_llm import _strip_think_block, _GroqAdapter
+from ladini.core.get_llm import _GroqAdapter, _strip_think_block
 
 
 class _Msg:

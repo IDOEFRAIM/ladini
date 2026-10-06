@@ -25,7 +25,6 @@ from ladini.graphs.agents.market_coach.flows.producer.contexts import (
 )
 from tests.conftest import StubRuntime, make_state, run
 
-
 _ORIGINAL_STALE_WM_KEYS = frozenset(
     {
         "bid_phase", "pending_bid_auction", "pending_bid_price",

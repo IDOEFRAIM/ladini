@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from ladini.core.get_llm import _GroqAdapter, _fallback_model_for
+from ladini.core.get_llm import _fallback_model_for, _GroqAdapter
 
 
 class _RateLimitError(Exception):

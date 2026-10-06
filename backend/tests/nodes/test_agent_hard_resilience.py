@@ -15,12 +15,9 @@ fausse :
 """
 from __future__ import annotations
 
-import pytest
-
 from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
 from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from tests.conftest import make_state, run
-
 
 # =====================================================================
 # 1. SORTIE DE SECOURS — le compteur d'échecs doit vivre et aboutir
@@ -244,13 +241,15 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
         vers `EXECUTION_UNKNOWN` (jamais un faux échec ni un faux succès),
         exactement la même doctrine que PROCUREMENT — voir
         `domain/preorder_draft.py::adapt_mcp_result`."""
+        import ladini.graphs.agents.market_coach.domain.preorder_draft as pd_mod
         import ladini.graphs.agents.market_coach.flows.buyer.preorder as mod
         import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
-        import ladini.graphs.agents.market_coach.domain.preorder_draft as pd_mod
         from ladini.core.settings import settings
-        from ladini.graphs.agents.market_coach.domain.preorder_draft import PreorderDraft
         from ladini.services.database import preorder_draft_store as store_mod
-        from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
+        from tests.architecture.test_preorder_draft_persistence import (
+            _draft,
+            _install_fake_db,
+        )
 
         monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)
         _install_fake_db(monkeypatch)

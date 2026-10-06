@@ -9,9 +9,7 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from conftest import run
-
 
 # =====================================================================
 # 1. enforce_contract — battery de payloads hostiles

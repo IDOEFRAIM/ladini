@@ -31,9 +31,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from tests.conftest import make_state, run
-from tests.unit.llm_gateway.conftest import make_fake_redis
-
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
@@ -51,6 +48,8 @@ from ladini.graphs.agents.market_coach.llm_gateway.types import (
 from ladini.graphs.agents.market_coach.nodes.clarification import (
     clarification_node,
 )
+from tests.conftest import make_state, run
+from tests.unit.llm_gateway.conftest import make_fake_redis
 
 
 class _Msg:

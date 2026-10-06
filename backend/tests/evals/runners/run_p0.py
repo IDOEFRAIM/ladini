@@ -11,8 +11,6 @@ text) cannot be executed here — those are marked BLOCKED, not faked.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import sys
 import traceback
 from pathlib import Path
@@ -24,10 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.evals.runners.harness import (  # noqa: E402
     RecordingRuntime,
     ScenarioResult,
-    _run_generic_chain,
     _run_off_topic_during_confirmation,
-    find_scenario,
-    load_scenario,
 )
 from tests.evals.runners.run_batch import _base_state, _print_result, run  # noqa: E402
 
@@ -94,7 +89,9 @@ def drive_P0_SEC_001() -> ScenarioResult:
 # =====================================================================
 
 async def _reject_flow(state: Dict[str, Any], rt: RecordingRuntime) -> Dict[str, Any]:
-    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
+        confirmation_gate,
+    )
     state["interpreted_event"] = "REJECT"
     c = await confirmation_gate(state, rt)
     state.update(c)
@@ -172,7 +169,9 @@ def drive_P0_SEC_004() -> ScenarioResult:
             },
         },
     })
-    from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import check_order_status
+    from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
+        check_order_status,
+    )
     state = _base_state(
         user_phone="+22670000004", user_role="BUYER", role="BUYER",
         current_goal="BUYER_CHECK_ORDER_STATUS",

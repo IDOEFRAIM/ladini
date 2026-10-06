@@ -49,7 +49,7 @@ from ladini.graphs.agents.market_coach.interpreter.routing import (
 )
 from ladini.graphs.agents.market_coach.nodes import cognitive as cognitive_mod
 from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
-from tests.conftest import make_state, run
+from tests.conftest import make_state
 
 _TUNNEL_GOAL = "BUYER_PREORDER_INIT"
 assert _TUNNEL_GOAL in ALL_BUYER_TUNNEL_GOALS

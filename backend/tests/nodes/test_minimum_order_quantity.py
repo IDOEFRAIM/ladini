@@ -15,12 +15,12 @@ seulement sur ce qu'il en fait.
 """
 from __future__ import annotations
 
+from ladini.domain.order_policy import (
+    validate_minimum_order_quantity,
+)
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
-)
-from ladini.domain.order_policy import (
-    validate_minimum_order_quantity,
 )
 from ladini.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,

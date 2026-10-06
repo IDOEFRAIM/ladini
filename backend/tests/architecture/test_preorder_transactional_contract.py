@@ -7,17 +7,10 @@ from __future__ import annotations
 
 import re
 import threading
-from pathlib import Path
-
-import pytest
-
-from tests.conftest import make_state, run
-from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     ConfirmationTarget,
     ConfirmPreorderDraft,
-    PreorderDraft,
     PreorderDraftStatus,
     PreorderOutcomeKind,
     UpdatePreorderDraft,
@@ -27,6 +20,8 @@ from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import 
     resolve_preorder_confirmation,
 )
 from ladini.services.database import preorder_draft_store as store_mod
+from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
+from tests.conftest import make_state, run
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731
 
@@ -38,6 +33,7 @@ class TestInvariantA_PreorderWorkflowNeverMutatesCanonicalStateDirectly:
         `items`, ou tout autre champ que `apply_response_plan` déciderait
         lui-même (mandat §6 : dérivé de `draft.status`, pas une autorité)."""
         import inspect
+
         import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as mod
 
         source = inspect.getsource(mod.apply_response_plan) + inspect.getsource(mod._phase_projection)
@@ -53,6 +49,7 @@ class TestInvariantB_ResolvedIdDoesNotControlRouting:
         """`resolve_domain_action` ne connaît QUE `interpreted_event` —
         `resolved_id` n'existe même pas dans sa signature (mandat §7)."""
         import inspect
+
         from ladini.graphs.agents.market_coach.domain import preorder_draft as pd_mod
 
         sig = inspect.signature(pd_mod.resolve_domain_action)
@@ -81,6 +78,7 @@ class TestInvariantC_ActiveCartCannotDivergeFromDraftItems:
         `active_cart` — seul `draft.items` alimente le récap et
         `last_order_summary` une fois qu'un draft existe."""
         import inspect
+
         import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as mod
         from ladini.graphs.agents.market_coach.domain import preorder_draft as pd_mod
 

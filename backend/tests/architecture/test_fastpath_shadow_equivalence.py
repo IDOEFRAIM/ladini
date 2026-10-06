@@ -40,8 +40,8 @@ import pytest
 import ladini.graphs.agents.market_coach.interpreter.routing  # noqa: F401
 from ladini.graphs.agents.market_coach.core.policies import get_fast_path_policy
 from ladini.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
-from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from ladini.graphs.agents.market_coach.nodes.cleaner import _ACTIVE_GOAL_STATES
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, make_state, run

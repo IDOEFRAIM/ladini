@@ -3,18 +3,19 @@ aggregates, the DIRECT lifecycle events, and the reshaped DIRECT cohort (PREORDE
 from __future__ import annotations
 
 import asyncio
-import uuid
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import psycopg2
 import pytest
 from factories import Graph, insert
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from ladini.services.analytics.analytics_service import AnalyticsService
-from ladini.services.analytics.daily_metrics_refresh import DailyMetricsRefresher, backfill_quantity_delivered
+from ladini.services.analytics.daily_metrics_refresh import (
+    DailyMetricsRefresher,
+    backfill_quantity_delivered,
+)
 from ladini.services.analytics.data_quality import run_data_quality_checks
 from ladini.services.database.auction import AuctionMixin
 from ladini.services.database.moderation import ModerationMixin

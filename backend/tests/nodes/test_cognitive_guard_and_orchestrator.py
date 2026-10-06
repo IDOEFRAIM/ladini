@@ -26,7 +26,6 @@ from ladini.graphs.agents.market_coach.nodes.cognitive import (
 )
 from tests.conftest import make_state, run
 
-
 # =====================================================================
 # _build_proactive_hint
 # =====================================================================

@@ -659,6 +659,13 @@ def _transactional_fallback_text(
             "Tapez *précommander* pour valider ou ajoutez un autre produit."
         )
     if g.startswith("BUYER_PREORDER") and _tool_matches("BUYER_PREORDER"):
+        if prod_name == "votre demande" or not qty:
+            # Fail-closed : sans produit NI quantité réels on n'annonce JAMAIS une précommande « pour 0 pour votre demande »
+            # (contexte de reprise perdu) — le panier, lui, reste intact.
+            return (
+                f"{salutation}Je n'ai pas pu confirmer le détail de ta précommande. Ton panier est conservé — "
+                "tape *précommander* pour la valider."
+            )
         return (
             f"✅ {salutation}Votre précommande{q_info} pour *{prod_name}* est enregistrée. "
             "Vous recevrez le récapitulatif complet dans un instant."

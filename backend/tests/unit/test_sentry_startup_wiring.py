@@ -18,8 +18,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 
 def test_init_sentry_is_noop_without_dsn():
     """Sans SENTRY_DSN (settings par défaut en test), `init_sentry()` ne fait

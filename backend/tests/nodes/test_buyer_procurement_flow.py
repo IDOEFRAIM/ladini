@@ -9,13 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import pytest
-
-from tests.conftest import StubRuntime, make_state, run
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from tests.conftest import StubRuntime, make_state, run
 from tests.harness.state import clears
 
 
@@ -42,14 +40,18 @@ def _patch_cart_management(monkeypatch, result=None):
 
 class TestBuildProcurementEscalation:
     def test_missing_fields_computed_in_order(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         result = build_procurement_escalation({}, {}, "mais", "KG", "msg")
         assert result["missing_fields"] == ["price", "quantity"]
         assert result["last_missing_field"] == "price"
         assert to_tunnel_category(get_pending_interaction(result)) == "PRICE"
 
     def test_deadline_is_auto_filled_when_absent(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         result = build_procurement_escalation({}, {}, "mais", "KG", "msg")
         assert result["form_data"]["deadline"]
         datetime.fromisoformat(result["form_data"]["deadline"])  # doit être un ISO valide
@@ -60,14 +62,18 @@ class TestBuildProcurementEscalation:
         `form_data` uniquement, donc le champ reste listé "manquant" tant que
         rien ne le recopie dans `form_data` (comportement actuel vérifié,
         pas un défaut à synchroniser dans ce fichier)."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         result = build_procurement_escalation({"deadline": "2030-01-01"}, {}, "mais", "KG", "msg")
         assert "deadline" not in result["form_data"]  # jamais forcé en doublon
 
     def test_existing_form_data_is_preserved_and_extended(self):
         """Réentrée dans un formulaire déjà actif : le progrès (prix, qty)
         déjà collecté ne doit JAMAIS être effacé."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         existing = {"price": 250, "quantity": 100, "product": "mais"}
         result = build_procurement_escalation({}, {}, "mais", "KG", "msg", existing_form_data=existing)
         assert result["form_data"]["price"] == 250
@@ -75,21 +81,27 @@ class TestBuildProcurementEscalation:
         assert result["missing_fields"] == ["deadline"] or result["missing_fields"] == []
 
     def test_selection_fields_are_always_reset(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         payload = {"selection_index": 3, "selected_value": "abc"}
         result = build_procurement_escalation(payload, {}, "mais", "KG", "msg")
         assert result["transaction_payload"]["selection_index"] is None
         assert result["transaction_payload"]["selected_value"] is None
 
     def test_auto_quantity_fill_flag_resets_quantity(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         payload = {"quantity": 50, "_auto_quantity_fill": True}
         result = build_procurement_escalation(payload, {}, "mais", "KG", "msg")
         assert result["transaction_payload"]["quantity"] is None
         assert clears(result["transaction_payload"], "_auto_quantity_fill")
 
     def test_working_memory_locks_the_goal_and_clears_stale_flags(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         wm = {"buyer_request_waiting_choice": True, "buyer_request_catalog_checked": True}
         result = build_procurement_escalation({}, wm, "mais", "KG", "msg")
         assert result["working_memory"]["active_goal"] == "PROCUREMENT_CREATE_REQUEST"
@@ -97,7 +109,9 @@ class TestBuildProcurementEscalation:
         assert result["active_form"] == "AUCTION_CREATE"
 
     def test_no_missing_fields_yields_none_expected_input(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            build_procurement_escalation,
+        )
         existing = {"price": 250, "quantity": 100, "deadline": "2030-01-01", "product": "mais"}
         result = build_procurement_escalation({}, {}, "mais", "KG", "msg", existing_form_data=existing)
         assert result["missing_fields"] == []
@@ -110,12 +124,16 @@ class TestBuildProcurementEscalation:
 
 class TestBuyerRequestResolverEarlyExits:
     def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         result = run(buyer_request_resolver(make_state(user_phone=""), rt()))
         assert result["response_strategy"] == "ERROR"
 
     def test_vendor_ctx_active_with_selection_routes_to_cart_management(self, monkeypatch):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         calls = _patch_cart_management(monkeypatch)
         state = make_state(
             user_phone="+2260",
@@ -127,7 +145,9 @@ class TestBuyerRequestResolverEarlyExits:
         assert calls[0]["current_goal"] == "BUYER_ADD_TO_CART"
 
     def test_vendor_ctx_active_chosen_vendor_no_selection_routes_to_cart_for_quantity(self, monkeypatch):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         calls = _patch_cart_management(monkeypatch)
         state = make_state(
             user_phone="+2260",
@@ -142,7 +162,9 @@ class TestBuyerRequestResolverEarlyExits:
         """Si l'acheteur change de produit, le vendor_ctx périmé (autre
         produit) ne doit PAS forcer un routage cart_management — le flux
         catalogue normal reprend avec le NOUVEAU produit."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         calls = _patch_cart_management(monkeypatch)
         state = make_state(
             user_phone="+2260",
@@ -157,7 +179,9 @@ class TestBuyerRequestResolverEarlyExits:
 
 class TestBuyerRequestResolverEscalation:
     def test_escalate_keyword_with_known_product(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", normalized_text="appel", transaction_payload={"product": "mais"})
         result = run(buyer_request_resolver(state, rt()))
         assert result["active_form"] == "AUCTION_CREATE"
@@ -169,14 +193,18 @@ class TestBuyerRequestResolverEscalation:
         (enchère inversée — les producteurs doivent proposer EN DESSOUS).
         Le décalage de vocabulaire faisait croire à l'utilisateur que l'agent
         avait mal compris son prix, le poussant à rejeter la confirmation."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", normalized_text="appel", transaction_payload={"product": "mais"})
         result = run(buyer_request_resolver(state, rt()))
         assert "prix minimum" not in result["final_response"].lower()
         assert "prix plafond" in result["final_response"].lower()
 
     def test_re_entering_an_active_auction_create_form_preserves_progress(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(
             user_phone="+2260",
             current_goal="PROCUREMENT_CREATE_REQUEST",
@@ -197,7 +225,9 @@ class TestBuyerRequestResolverEscalation:
         (`CONFIRM_KEYWORDS`/`DECLINE_KEYWORDS`, testé ici auparavant via
         `normalized_text="oui"`/`"non"` SANS `interpreted_event`) a été
         supprimé — ces deux tests couvraient exactement ce mécanisme retiré."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(
             user_phone="+2260",
             working_memory={"buyer_request_waiting_choice": True},
@@ -208,7 +238,9 @@ class TestBuyerRequestResolverEscalation:
         assert result["active_form"] == "AUCTION_CREATE"
 
     def test_waiting_choice_reject_via_event_resets_and_completes(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(
             user_phone="+2260",
             working_memory={"buyer_request_waiting_choice": True},
@@ -265,13 +297,17 @@ class TestBuyerRequestResolverCatalogFlow:
         # retomberait sinon sur N'IMPORTE quel token non-vide du texte comme
         # "produit" — volontairement testé à vide pour isoler la vraie branche
         # "aucun produit résolu du tout".
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", transaction_payload={}, normalized_text="")
         result = run(buyer_request_resolver(state, rt()))
         assert to_tunnel_category(get_pending_interaction(result)) == "PRODUCT"
 
     def test_product_and_quantity_bridges_to_cart_management(self, monkeypatch):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         calls = _patch_cart_management(monkeypatch)
         state = make_state(
             user_phone="+2260",
@@ -282,7 +318,9 @@ class TestBuyerRequestResolverCatalogFlow:
         assert calls[0]["current_goal"] == "BUYER_ADD_TO_CART"
 
     def test_single_vendor_asks_for_quantity(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", transaction_payload={"product": "mais"})
         runtime = rt({"search_products": {
             "status": "success",
@@ -302,7 +340,9 @@ class TestBuyerRequestResolverCatalogFlow:
         silence sur le palier de 10 L. Le flux doit désormais déléguer à
         `cart_management` (qui affiche le menu de conditionnements AVANT toute
         question de quantité)."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         calls = _patch_cart_management(monkeypatch)
         state = make_state(user_phone="+2260", transaction_payload={"product": "lait"})
         runtime = rt({"search_products": {
@@ -324,7 +364,9 @@ class TestBuyerRequestResolverCatalogFlow:
         assert calls[0]["_prefetched_vendors"][0]["vendor_name"] == "Mamadou"
 
     def test_multiple_vendors_shows_a_selection_menu(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", transaction_payload={"product": "mais"})
         # `id`/`producer_id` distincts requis : resolve_product_vendors déduplique
         # sur la clé "{id}:{producer_id}" — sans ça les deux entrées fusionnent
@@ -348,7 +390,9 @@ class TestBuyerRequestResolverCatalogFlow:
         traité comme "produit introuvable" (propose un appel d'offres),
         pas comme une suggestion à confirmer. Voir
         [[buyer-search-fuzzy-match-safety-2026-08]]."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", transaction_payload={"product": "oeufs"})
         runtime = rt({
             "search_products": {
@@ -371,7 +415,9 @@ class TestBuyerRequestResolverCatalogFlow:
         `additional_products` (jamais fusionnés en une chaîne — voir
         [[buyer-search-fuzzy-match-safety-2026-08]]). L'utilisateur doit être
         informé que "laitue" a été mis de côté, pas le voir disparaître."""
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(
             user_phone="+2260",
             transaction_payload={"product": "oeufs", "additional_products": ["laitue"]},
@@ -384,7 +430,9 @@ class TestBuyerRequestResolverCatalogFlow:
         assert "laitue" in result["final_response"]
 
     def test_no_vendors_offers_procurement_and_logs_demand(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
         state = make_state(user_phone="+2260", transaction_payload={"product": "produit_rare"})
         runtime = rt({
             "search_products": {"status": "success", "results": []},
@@ -396,7 +444,9 @@ class TestBuyerRequestResolverCatalogFlow:
         assert "record_demand_signal" in runtime.calls
 
     def test_no_vendors_demand_signal_failure_is_non_blocking(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import (
+            buyer_request_resolver,
+        )
 
         class _BoomRuntime:
             llm = None

@@ -38,37 +38,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 _EVALS_RUNNERS = Path(__file__).resolve().parents[1] / "evals" / "runners"
 if str(_EVALS_RUNNERS.parent.parent) not in sys.path:
     sys.path.insert(0, str(_EVALS_RUNNERS.parent.parent))
 
-from tests.conftest import make_state, run
-from tests.evals.runners.harness import RecordingRuntime
-from tests.architecture.test_procurement_draft_persistence import (
-    _install_fake_db as _install_fake_procurement_db,
-)
-from tests.architecture.test_preorder_draft_persistence import (
-    _install_fake_db as _install_fake_preorder_db,
-)
-
 from ladini.core.settings import settings
 from ladini.graphs.agents.market_coach.core.router import DomainRouter
-from ladini.graphs.agents.market_coach.core.pending_interaction import (
-    InteractionKind,
-)
-from ladini.graphs.agents.market_coach.domain.procurement_draft import (
-    ProcurementDraftStatus,
-)
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraftStatus,
 )
-from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
-    confirmation_gate,
-)
-from ladini.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
-    finalize_procurement_execution,
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+    ProcurementDraftStatus,
 )
 from ladini.graphs.agents.market_coach.flows.buyer.preorder import (
     create_preorder,
@@ -76,7 +56,21 @@ from ladini.graphs.agents.market_coach.flows.buyer.preorder import (
 from ladini.graphs.agents.market_coach.flows.buyer.preorder_payment import (
     apply_payment_outcome,
 )
-from ladini.services.database import procurement_draft_store, preorder_draft_store
+from ladini.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
+    finalize_procurement_execution,
+)
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
+    confirmation_gate,
+)
+from ladini.services.database import preorder_draft_store, procurement_draft_store
+from tests.architecture.test_preorder_draft_persistence import (
+    _install_fake_db as _install_fake_preorder_db,
+)
+from tests.architecture.test_procurement_draft_persistence import (
+    _install_fake_db as _install_fake_procurement_db,
+)
+from tests.conftest import make_state, run
+from tests.evals.runners.harness import RecordingRuntime
 
 
 class TestProcurementUserJourney:

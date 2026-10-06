@@ -9,20 +9,6 @@ locales (mêmes garanties de fidélité SQL, une seule source de vérité pour
 la sémantique CAS simulée)."""
 from __future__ import annotations
 
-from typing import Optional
-
-import pytest
-
-from tests.conftest import run
-from tests.architecture.test_procurement_draft_persistence import (
-    _FakeDraftTable,
-    _install_fake_db as _install_fake_draft_db,
-)
-from tests.unit.test_mcp_idempotency import (
-    _FakeIdempotencyTable,
-    _install_fake_db as _install_fake_idempotency_db,
-)
-
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
@@ -30,6 +16,13 @@ from ladini.graphs.agents.market_coach.domain.procurement_draft import (
 )
 from ladini.services.database import mcp_idempotency_store, procurement_draft_store
 from ladini.services.reconciliation import procurement_reconciliation_service as svc
+from tests.architecture.test_procurement_draft_persistence import (
+    _install_fake_db as _install_fake_draft_db,
+)
+from tests.conftest import run
+from tests.unit.test_mcp_idempotency import (
+    _install_fake_db as _install_fake_idempotency_db,
+)
 
 
 def _executing_draft(draft_id: str = "recon1") -> ProcurementDraft:

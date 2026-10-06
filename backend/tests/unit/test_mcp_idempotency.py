@@ -16,11 +16,9 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.conftest import run
-
 from ladini.services.database import mcp_idempotency_store as store_mod
 from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
-
+from tests.conftest import run
 
 # =====================================================================
 # FAUX MOTEUR SQL

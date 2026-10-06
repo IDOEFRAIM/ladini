@@ -15,13 +15,10 @@ en premier, jamais tronquées ; seules les ventes déjà traitées peuvent
 l'être, pour compléter jusqu'à la limite d'affichage."""
 from __future__ import annotations
 
-import types
-
-from tests.conftest import StubRuntime, run
-
 from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
     _producer_sales_block,
 )
+from tests.conftest import StubRuntime, run
 
 
 def _sale(order_id: str, status: str, reference: str) -> dict:

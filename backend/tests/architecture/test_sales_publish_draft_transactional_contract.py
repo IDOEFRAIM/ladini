@@ -7,18 +7,14 @@ from __future__ import annotations
 
 import threading
 
-import pytest
-
-from tests.conftest import make_state, run
-from tests.architecture.test_sales_publish_draft_persistence import _draft, _install_fake_db
-
-from ladini.graphs.agents.market_coach.core.confirmation_target import ConfirmationTarget
+from ladini.graphs.agents.market_coach.core.confirmation_target import (
+    ConfirmationTarget,
+)
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     CancelSalesPublishDraft,
     ConfirmSalesPublishDraft,
     NoSalesPublishAction,
     RejectSalesPublishConfirmation,
-    SalesPublishDraft,
     SalesPublishDraftStatus,
     SalesPublishOutcomeKind,
     UpdateSalesPublishDraft,
@@ -30,6 +26,11 @@ from ladini.graphs.agents.market_coach.flows.producer.sales_confirmation import 
     resolve_sales_confirmation,
 )
 from ladini.services.database import sales_publish_draft_store as store_mod
+from tests.architecture.test_sales_publish_draft_persistence import (
+    _draft,
+    _install_fake_db,
+)
+from tests.conftest import make_state, run
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731
 

@@ -16,9 +16,8 @@ import types
 import uuid
 from datetime import datetime, timezone
 
-from tests.conftest import run
-
 from ladini.services.database.producer import ProducerMgmtMixin
+from tests.conftest import run
 
 
 async def _async_return(value):

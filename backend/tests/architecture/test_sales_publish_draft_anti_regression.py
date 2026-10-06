@@ -32,9 +32,6 @@ une PROJECTION PURE du MÊME objet immuable que celui qui produit
 où une valeur pourrait diverger."""
 from __future__ import annotations
 
-from tests.conftest import make_state, run
-from tests.architecture.test_sales_publish_draft_persistence import _install_fake_db
-
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraftStatus,
 )
@@ -42,6 +39,8 @@ from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
 from ladini.services.database import sales_publish_draft_store
+from tests.architecture.test_sales_publish_draft_persistence import _install_fake_db
+from tests.conftest import make_state, run
 
 
 class TestHistoricalDisplayExecutionMismatchCannotReoccur:
@@ -140,14 +139,14 @@ class TestHistoricalDisplayExecutionMismatchCannotReoccur:
 
         # Jamais l'inverse : A/B ne sont PLUS atteignables — une tentative de
         # confirmer A ou B (cible périmée) est rejetée, jamais exécutée.
+        from ladini.graphs.agents.market_coach.core.confirmation_target import (
+            ConfirmationTarget,
+        )
         from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
             ConfirmSalesPublishDraft,
             SalesPublishDraft,
             SalesPublishOutcomeKind,
             apply_domain_action,
-        )
-        from ladini.graphs.agents.market_coach.core.confirmation_target import (
-            ConfirmationTarget,
         )
 
         current = SalesPublishDraft.from_dict(patch4["sales_publish_draft"])

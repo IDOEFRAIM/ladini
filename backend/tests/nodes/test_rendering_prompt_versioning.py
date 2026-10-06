@@ -24,10 +24,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 import ladini.graphs.agents.market_coach.nodes.clarification as clarification_module
 import ladini.graphs.agents.market_coach.nodes.rendering.ask as ask_module
 import ladini.graphs.agents.market_coach.utils as utils_module
+from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from tests.conftest import run
 
 

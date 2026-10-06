@@ -37,7 +37,6 @@ double, matching this repo's own established testing philosophy
 """
 from __future__ import annotations
 
-import copy
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path

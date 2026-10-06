@@ -15,9 +15,8 @@ import types
 import uuid
 from decimal import Decimal
 
-from tests.conftest import run
-
 from ladini.services.database.producer import ProducerMgmtMixin
+from tests.conftest import run
 
 PHONE = "+22670000001"
 

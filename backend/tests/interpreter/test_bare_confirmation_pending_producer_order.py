@@ -14,11 +14,10 @@ résolution quand la situation est sans ambiguïté (exactement une vente en
 attente)."""
 from __future__ import annotations
 
-from tests.conftest import StubRuntime, run
-
 from ladini.graphs.agents.market_coach.interpreter.routing import (
     _bare_confirmation_for_pending_producer_order,
 )
+from tests.conftest import StubRuntime, run
 
 
 def rt(responses=None):

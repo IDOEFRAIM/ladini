@@ -8,14 +8,12 @@ couvre le chemin générique (ex: create_auction, jamais bypassé côté acheteu
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 from decimal import Decimal
-
-from tests.conftest import make_state, run
+from unittest.mock import AsyncMock
 
 from ladini.domain.bid_pricing_flow import BidPriceParse, BidPriceStatus
 from ladini.domain.commercial_offer import PriceBasis, Provenance
+from tests.conftest import make_state, run
 
 
 def _resolved(amount="550"):
@@ -28,8 +26,12 @@ def _resolved(amount="550"):
 
 class TestSubmitBidPhotoHint:
     def test_a_successful_bid_sets_a_pending_photo_target_and_adds_a_hint(self, monkeypatch):
-        from ladini.graphs.agents.market_coach.flows.producer import auctions as auctions_mod
-        from ladini.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
+        from ladini.graphs.agents.market_coach.flows.producer import (
+            auctions as auctions_mod,
+        )
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            AuctionGateway,
+        )
 
         monkeypatch.setattr(
             AuctionGateway, "place_bid",
@@ -52,8 +54,12 @@ class TestSubmitBidPhotoHint:
     def test_no_photo_hint_when_the_db_result_has_no_bid_id(self, monkeypatch):
         """Repli défensif : un `place_bid` réussi mais sans `bid_id` (forme
         inattendue) ne doit jamais planter — juste pas de hint/marqueur."""
-        from ladini.graphs.agents.market_coach.flows.producer import auctions as auctions_mod
-        from ladini.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
+        from ladini.graphs.agents.market_coach.flows.producer import (
+            auctions as auctions_mod,
+        )
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            AuctionGateway,
+        )
 
         monkeypatch.setattr(
             AuctionGateway, "place_bid",
@@ -72,8 +78,12 @@ class TestSubmitBidPhotoHint:
         assert "📸" not in result["final_response"]
 
     def test_a_failed_bid_never_sets_a_pending_photo_target(self, monkeypatch):
-        from ladini.graphs.agents.market_coach.flows.producer import auctions as auctions_mod
-        from ladini.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
+        from ladini.graphs.agents.market_coach.flows.producer import (
+            auctions as auctions_mod,
+        )
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            AuctionGateway,
+        )
 
         monkeypatch.setattr(
             AuctionGateway, "place_bid",

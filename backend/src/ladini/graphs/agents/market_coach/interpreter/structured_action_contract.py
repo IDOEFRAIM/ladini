@@ -301,6 +301,10 @@ def resolve_decision_to_raw_action(
         idx = _resolve_selection(decision, prompt_context.options)
         if idx is None:
             return None
+        if not 1 <= idx <= len(domain_context.tier_options):
+            # Le modèle a choisi un palier alors que le contexte n'en expose pas (ou moins) : jamais un IndexError
+            # qui ferait tomber le tour — la décision est simplement non résolue (UNKNOWN côté appelant).
+            return None
         tier_id = domain_context.tier_options[idx - 1].tier_id
         return {"action": action, "pricing_tier_id": tier_id}
 

@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import pytest
 
-from tests.architecture.test_sales_publish_draft_persistence import _draft
-
-from ladini.graphs.agents.market_coach.core.confirmation_target import ConfirmationTarget
+from ladini.graphs.agents.market_coach.core.confirmation_target import (
+    ConfirmationTarget,
+)
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     ConfirmSalesPublishDraft,
     SalesPublishOutcomeKind,
-    UpdateSalesPublishDraft,
     apply_domain_action,
 )
+from tests.architecture.test_sales_publish_draft_persistence import _draft
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731
 

@@ -7,24 +7,23 @@ from __future__ import annotations
 
 import pytest
 
+from ladini.graphs.agents.market_coach.interpreter.contracts import enforce_contract
+from ladini.graphs.agents.market_coach.services.domain.slot_enrichment import (
+    enrich_payload_from_text,
+    extract_future_datetime_from_text,
+    extract_production_type_from_text,
+    extract_surface_from_text,
+)
 from ladini.graphs.agents.market_coach.services.ui.confirmation_summary import (
     build_confirmation_summary,
 )
-from ladini.graphs.agents.market_coach.services.domain.slot_enrichment import (
-    enrich_payload_from_text,
-    extract_production_type_from_text,
-    extract_future_datetime_from_text,
-    extract_surface_from_text,
-)
-from ladini.graphs.agents.market_coach.interpreter.contracts import enforce_contract
 from ladini.graphs.agents.market_coach.utils import (
     _normalize_quantity_to_kg,
     canonical_unit_label,
-    normalize_slot_keys,
     is_success_response,
+    normalize_slot_keys,
 )
 from tests.conftest import StubRuntime, run
-
 
 # =====================================================================
 # RÉCAPITULATIF DE CONFIRMATION — ce que l'utilisateur voit avant d'engager

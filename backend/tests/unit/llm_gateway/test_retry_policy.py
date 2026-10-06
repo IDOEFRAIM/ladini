@@ -12,6 +12,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import CircuitBreaker
 from ladini.graphs.agents.market_coach.llm_gateway.error_classification import (
     backoff_seconds,
     classify_llm_failure_kind,
@@ -19,15 +20,15 @@ from ladini.graphs.agents.market_coach.llm_gateway.error_classification import (
     retry_after_seconds,
     should_retry_same_candidate,
 )
-from ladini.graphs.agents.market_coach.llm_gateway.types import ErrorClass, LLMFailureKind
-
-from tests.conftest import run
-from tests.unit.llm_gateway.conftest import make_fake_redis
-from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import CircuitBreaker
 from ladini.graphs.agents.market_coach.llm_gateway.gateway import LLMGateway
 from ladini.graphs.agents.market_coach.llm_gateway.health_registry import HealthRegistry
-from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile, ModelCandidate
-
+from ladini.graphs.agents.market_coach.llm_gateway.types import (
+    ErrorClass,
+    LLMFailureKind,
+    LLMProfile,
+)
+from tests.conftest import run
+from tests.unit.llm_gateway.conftest import make_fake_redis
 
 # =====================================================================
 # A. CLASSIFICATION FINE (spec §4)
@@ -232,8 +233,12 @@ class _ScriptedClient:
 
 
 def _make_gateway(*, provider_clients: Dict[str, Any], settings=None, store=None):
-    from ladini.graphs.agents.market_coach.llm_gateway.alerting import IncidentDeduplicator
-    from ladini.graphs.agents.market_coach.llm_gateway.types import ModelCandidate as _MC
+    from ladini.graphs.agents.market_coach.llm_gateway.alerting import (
+        IncidentDeduplicator,
+    )
+    from ladini.graphs.agents.market_coach.llm_gateway.types import (
+        ModelCandidate as _MC,
+    )
 
     settings = settings or SimpleNamespace(
         LLM_FAST_BUDGET_SECONDS=8.0,

@@ -86,6 +86,8 @@ class TestExactlyOneCallSiteExistsInTheWholeCodebase:
     def test_both_tunnels_go_through_execute_award(self):
         from ladini.graphs.agents.market_coach.flows.buyer import (
             negotiation as negotiation_mod,
+        )
+        from ladini.graphs.agents.market_coach.flows.buyer import (
             order_tracking as order_tracking_mod,
         )
 

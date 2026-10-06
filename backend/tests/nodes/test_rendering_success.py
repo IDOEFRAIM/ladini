@@ -3,8 +3,6 @@ d'outils MCP réussis : listes, catalogues, dashboards fermes/stocks,
 gabarits transactionnels par goal). Zéro appel MCP — rendu pur."""
 from __future__ import annotations
 
-import pytest
-
 from ladini.graphs.agents.market_coach.nodes.rendering.common import RenderContext
 from ladini.graphs.agents.market_coach.nodes.rendering.success import (
     _format_future_cycle_line,
@@ -120,7 +118,9 @@ class TestRenderFarmSections:
             assert page.count("️⃣") <= _STOCK_LIST_MAX_ITEMS_PER_PAGE
 
     def test_pagination_never_cuts_an_item_in_half(self):
-        from ladini.graphs.agents.market_coach.services.text_pagination import PAGE_BREAK
+        from ladini.graphs.agents.market_coach.services.text_pagination import (
+            PAGE_BREAK,
+        )
 
         stocks = [
             {"item_name": f"produit{i}", "quantity": 10, "unit": "kg", "stock_id": f"s{i}"}
@@ -134,7 +134,9 @@ class TestRenderFarmSections:
             assert f"produit{i} : 10 KG" in text.replace(PAGE_BREAK, "\n")
 
     def test_a_small_stock_has_no_page_markers(self):
-        from ladini.graphs.agents.market_coach.services.text_pagination import PAGE_BREAK
+        from ladini.graphs.agents.market_coach.services.text_pagination import (
+            PAGE_BREAK,
+        )
 
         text, _options = _render_farm_sections(
             {"f1": {"farm_name": "Ferme A", "stocks": [{"item_name": "mais", "quantity": 10, "unit": "kg", "stock_id": "s1"}]}}

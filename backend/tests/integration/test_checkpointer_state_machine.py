@@ -8,9 +8,7 @@ réelle : `FakeWorkspaceStore` simule `get`/`save` en mémoire.
 """
 from __future__ import annotations
 
-import copy
 import dataclasses
-import json
 
 import pytest
 

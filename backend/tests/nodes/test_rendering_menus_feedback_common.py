@@ -4,8 +4,6 @@ WhatsApp de l'utilisateur.
 """
 from __future__ import annotations
 
-import pytest
-
 from ladini.graphs.agents.market_coach.nodes.rendering.common import RenderContext
 from tests.conftest import run
 
@@ -29,26 +27,34 @@ def ctx(**state_overrides):
 
 class TestRenderSelectionMenu:
     def test_reuses_a_precomputed_final_response(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
         c = ctx(final_response="menu précalculé", ag_ui_component={"x": 1})
         result = run(render_selection_menu(c))
         assert result["final_response"] == "menu précalculé"
         assert result["ag_ui_component"] == {"x": 1}
 
     def test_no_goal_asks_generically(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
         c = ctx(current_goal=None)
         result = run(render_selection_menu(c))
         assert "choisir" in result["final_response"]
 
     def test_preformatted_working_memory_menu_is_used_verbatim(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
         c = ctx(current_goal="BUYER_LIST_AUCTIONS", working_memory={"auction_menu": "Menu préformaté"})
         result = run(render_selection_menu(c))
         assert result["final_response"] == "Menu préformaté"
 
     def test_candidates_are_numbered_when_no_preformatted_menu(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
         c = ctx(current_goal="BUYER_LIST_AUCTIONS", expected_candidates=["Mais", "Riz"])
         result = run(render_selection_menu(c))
         assert "1. Mais" in result["final_response"]
@@ -58,7 +64,9 @@ class TestRenderSelectionMenu:
 
     def test_does_not_duplicate_the_reply_hint_if_already_present(self):
         """Le préformaté peut déjà contenir « répondez… » — pas de doublon."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
         c = ctx(current_goal="BUYER_LIST_AUCTIONS", working_memory={"bids_menu": "1. X\nRépondez par le numéro"})
         result = run(render_selection_menu(c))
         assert result["final_response"].lower().count("répondez") == 1
@@ -68,7 +76,9 @@ class TestRenderSelectionMenu:
         un choix de menu ("c'est quoi l'option 2 ?") rejouait juste le même
         menu, sans jamais y répondre. Voir
         [[precommande-architecture-consolidation-2026-08]]."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
 
         class _Msg:
             content = "L'option 2, c'est l'offre de Awa à 250 FCFA/kg."
@@ -114,7 +124,9 @@ class TestRenderSelectionMenu:
         la demande. `interpreter/routing.py` pose `interruption_unresolved`
         pour ce cas précis ; ce test verrouille que le rendu le respecte en
         ne générant AUCUN appel LLM d'accompagnement (`ForbiddenLLM`)."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import (
+            render_selection_menu,
+        )
         from tests.conftest import ForbiddenLLM, make_state
 
         state_overrides = dict(
@@ -142,32 +154,42 @@ class TestRenderSelectionMenu:
 
 class TestRenderError:
     def test_scam_detected_shows_a_security_alert(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_error,
+        )
         c = ctx(security_status="SCAM_DETECTED")
         result = run(render_error(c))
         assert "sécurité" in result["final_response"].lower()
         assert result["ag_ui_component"]["kwargs"]["reason"] == "Sécurité renforcée"
 
     def test_missing_unit_warning_shows_a_specific_message(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_error,
+        )
         c = ctx(security_status="WARNING")
         result = run(render_error(c))
         assert "unité" in result["final_response"].lower()
 
     def test_validation_error_reason_is_shown(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_error,
+        )
         c = ctx(validation_errors=["stock insuffisant"])
         result = run(render_error(c))
         assert "stock insuffisant" in result["final_response"]
 
     def test_security_reason_is_used_when_no_validation_errors(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_error,
+        )
         c = ctx(security_reason="raison spécifique")
         result = run(render_error(c))
         assert "raison spécifique" in result["final_response"]
 
     def test_generic_technical_error_when_no_reason_available(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_error,
+        )
         c = ctx()
         result = run(render_error(c))
         assert "erreur technique" in result["final_response"].lower()
@@ -179,7 +201,9 @@ class TestRenderError:
         # n'y a déjà plus rien à annuler au tour suivant (bug réel signalé
         # par un utilisateur : "annuler" tombait sur le fallback générique
         # "je n'ai pas compris" au lieu d'annuler quoi que ce soit).
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_error,
+        )
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", validation_errors=["x"])
         result = run(render_error(c))
         assert "reformuler" in result["final_response"]
@@ -192,32 +216,42 @@ class TestRenderError:
 
 class TestRenderRecovery:
     def test_max_retries_pauses_the_operation(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", retry_count=2)
         result = run(render_recovery(c))
         assert "mise en pause" in result["final_response"]
 
     def test_below_max_retries_asks_for_the_missing_field_with_reason(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", retry_count=0, last_missing_field="price")
         result = run(render_recovery(c))
         assert "prix" in result["final_response"].lower()
         assert result["retry_count"] == 1
 
     def test_falls_back_to_form_step_when_no_missing_field(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", retry_count=0, form_step="quantity")
         result = run(render_recovery(c))
         assert result["final_response"]
 
     def test_falls_back_to_expected_input_when_no_field_or_form_step(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", retry_count=0, expected_input="QUANTITY")
         result = run(render_recovery(c))
         assert result["final_response"]
 
     def test_no_goal_uses_generic_operation_label(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
         c = ctx(current_goal=None, retry_count=0)
         result = run(render_recovery(c))
         assert "votre opération" in result["final_response"]
@@ -228,8 +262,12 @@ class TestRenderRecovery:
         quel que soit le goal — il rejouait le même texte figé quoi que dise
         l'utilisateur ("vous me tiendrez informé ?" ignoré). Voir
         [[precommande-architecture-consolidation-2026-08]]."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import RenderContext
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            RenderContext,
+        )
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_recovery,
+        )
 
         class _Msg:
             content = "Bien sûr, je te tiendrai informé dès qu'il y a du nouveau !"
@@ -275,38 +313,50 @@ class TestRenderRecovery:
 
 class TestRenderInterruption:
     def test_preorder_init_has_a_dedicated_message(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_interruption
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_interruption,
+        )
         c = ctx(detected_intent="BUYER_PREORDER_INIT")
         result = run(render_interruption(c))
         assert "précommande" in result["final_response"]
         assert result["ag_ui_component"] is None
 
     def test_no_suspended_goal_uses_generic_head(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_interruption
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_interruption,
+        )
         c = ctx(current_goal=None, suspended_goal=None)
         result = run(render_interruption(c))
         assert "nouvelle demande" in result["final_response"]
 
     def test_current_goal_label_replaces_generic_head(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_interruption
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_interruption,
+        )
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT")
         result = run(render_interruption(c))
         assert "Je passe à" in result["final_response"]
 
     def test_suspended_goal_with_selection_hint(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_interruption
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_interruption,
+        )
         c = ctx(suspended_goal="SALES_PUBLISH_PRODUCT", expected_input="SELECTION")
         result = run(render_interruption(c))
         assert "numéro du menu" in result["final_response"]
 
     def test_suspended_goal_with_confirmation_hint(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_interruption
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_interruption,
+        )
         c = ctx(suspended_goal="SALES_PUBLISH_PRODUCT", expected_input="CONFIRMATION")
         result = run(render_interruption(c))
         assert "oui / non" in result["final_response"]
 
     def test_suspended_goal_without_expected_input_offers_resume(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_interruption
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_interruption,
+        )
         c = ctx(suspended_goal="SALES_PUBLISH_PRODUCT", expected_input="NONE")
         result = run(render_interruption(c))
         assert "reprendre" in result["final_response"].lower()
@@ -318,19 +368,25 @@ class TestRenderInterruption:
 
 class TestRenderClarification:
     def test_first_turn_shows_a_welcome_message(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_clarification,
+        )
         c = ctx(turn_count=1)
         result = run(render_clarification(c))
         assert "Bienvenue" in result["final_response"]
 
     def test_later_turn_shows_examples(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_clarification,
+        )
         c = ctx(turn_count=5)
         result = run(render_clarification(c))
         assert "bien saisi" in result["final_response"]
 
     def test_later_turn_after_a_goal_error_names_that_goal_instead_of_the_generic_examples(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_clarification,
+        )
         c = ctx(turn_count=5, last_terminated_goal="PROCUREMENT_CREATE_REQUEST")
         result = run(render_clarification(c))
         assert "appel d'offres" in result["final_response"].lower()
@@ -338,13 +394,17 @@ class TestRenderClarification:
         assert "bien saisi" not in result["final_response"]
 
     def test_the_terminated_goal_hint_is_consumed_once(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_clarification,
+        )
         c = ctx(turn_count=5, last_terminated_goal="PROCUREMENT_CREATE_REQUEST")
         result = run(render_clarification(c))
         assert result["last_terminated_goal"] is None
 
     def test_no_terminated_goal_hint_falls_back_to_the_generic_examples(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_clarification,
+        )
         c = ctx(turn_count=5, last_terminated_goal=None)
         result = run(render_clarification(c))
         assert "bien saisi" in result["final_response"]
@@ -360,7 +420,9 @@ class TestRenderClarification:
         même "Je n'ai pas bien saisi..." observée dans des dizaines de
         transcriptions très différentes tout au long de cette session. Voir
         [[precommande-architecture-consolidation-2026-08]]."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        from ladini.graphs.agents.market_coach.nodes.rendering.feedback import (
+            render_clarification,
+        )
         c = ctx(
             turn_count=5,
             final_response="Bien sûr, je peux t'aider avec ça — dis-m'en un peu plus.",
@@ -384,6 +446,7 @@ class TestFmtDate:
 
     def test_datetime_object_is_formatted(self):
         from datetime import datetime
+
         from ladini.graphs.agents.market_coach.nodes.rendering.common import fmt_date
         assert fmt_date(datetime(2026, 12, 31)) == "31/12/2026"
 
@@ -402,35 +465,47 @@ class TestFmtDate:
 
 class TestUnwrapExecutionResult:
     def test_flat_result_passes_through(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import unwrap_execution_result
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            unwrap_execution_result,
+        )
         result = {"status": "success", "message": "ok"}
         assert unwrap_execution_result(result) == result
 
     def test_one_level_of_data_nesting_is_unwrapped(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import unwrap_execution_result
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            unwrap_execution_result,
+        )
         result = {"status": "success", "data": {"status": "success", "message": "inner", "data": [1, 2]}}
         unwrapped = unwrap_execution_result(result)
         assert unwrapped["message"] == "inner"
         assert unwrapped["data"] == [1, 2]
 
     def test_outer_message_is_preserved_when_inner_has_none(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import unwrap_execution_result
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            unwrap_execution_result,
+        )
         result = {"message": "outer msg", "data": {"status": "success", "data": []}}
         unwrapped = unwrap_execution_result(result)
         assert unwrapped["message"] == "outer msg"
 
     def test_non_wrapper_shaped_nested_dict_is_left_alone(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import unwrap_execution_result
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            unwrap_execution_result,
+        )
         result = {"status": "success", "data": {"custom_field": "not a wrapper"}}
         unwrapped = unwrap_execution_result(result)
         assert unwrapped["data"] == {"custom_field": "not a wrapper"}
 
     def test_non_dict_input_returns_empty_dict(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import unwrap_execution_result
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            unwrap_execution_result,
+        )
         assert unwrap_execution_result("not a dict") == {}
 
     def test_raw_result_string_is_parsed_and_merged(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import unwrap_execution_result
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            unwrap_execution_result,
+        )
         result = {"data": {"raw_result": '{"status": "success", "message": "parsed"}'}}
         unwrapped = unwrap_execution_result(result)
         assert unwrapped.get("message") == "parsed"
@@ -438,7 +513,9 @@ class TestUnwrapExecutionResult:
 
 class TestStatusComponent:
     def test_builds_the_expected_shape(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import status_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            status_component,
+        )
         result = status_component("error", reason="x")
         assert result["kwargs"]["type"] == "error"
         assert result["kwargs"]["reason"] == "x"
@@ -454,7 +531,9 @@ class TestListMenuComponent:
         return [{"index": str(i), "label": f"Option {i}"} for i in range(1, n + 1)]
 
     def test_builds_the_expected_shape(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         result = list_menu_component("Titre", self._options())
         assert result["id"] == ["ag_ui", "ListMenu"]
         assert result["kwargs"]["title"] == "Titre"
@@ -462,30 +541,40 @@ class TestListMenuComponent:
         assert len(result["kwargs"]["options"]) == 2
 
     def test_no_options_returns_none(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         assert list_menu_component("Titre", []) is None
 
     def test_more_than_ten_options_returns_none(self):
         """Plafond dur Meta/Twilio — jamais de menu tronqué qui mentirait
         sur le nombre d'options réel : le texte reste la bonne réponse."""
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         assert list_menu_component("Titre", self._options(11)) is None
 
     def test_exactly_ten_options_is_accepted(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         result = list_menu_component("Titre", self._options(10))
         assert result is not None
         assert len(result["kwargs"]["options"]) == 10
 
     def test_a_long_title_is_truncated_to_24_characters(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         long_title = "Un titre de menu vraiment beaucoup trop long pour WhatsApp"
         result = list_menu_component(long_title, self._options())
         assert len(result["kwargs"]["title"]) <= 24
         assert result["kwargs"]["title"].endswith("…")
 
     def test_a_long_option_label_is_truncated_without_cutting_a_word(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         options = [{"index": "1", "label": "Poussins allemand grande race reproducteurs"}]
         result = list_menu_component("Titre", options)
         label = result["kwargs"]["options"][0]["label"]
@@ -493,7 +582,9 @@ class TestListMenuComponent:
         assert label == "Poussins allemand…", label
 
     def test_a_long_description_is_truncated_to_72_characters(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         options = [{
             "index": "1", "label": "x",
             "description": "d" * 100,
@@ -502,60 +593,80 @@ class TestListMenuComponent:
         assert len(result["kwargs"]["options"][0]["description"]) <= 72
 
     def test_a_short_description_is_left_untouched(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         options = [{"index": "1", "label": "x", "description": "5900 tête"}]
         result = list_menu_component("Titre", options)
         assert result["kwargs"]["options"][0]["description"] == "5900 tête"
 
     def test_no_description_key_when_absent_from_the_option(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         result = list_menu_component("Titre", self._options())
         assert "description" not in result["kwargs"]["options"][0]
 
     def test_a_long_button_text_is_truncated_to_20_characters(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         result = list_menu_component(
             "Titre", self._options(), button_text="Un libellé de bouton bien trop long"
         )
         assert len(result["kwargs"]["button_text"]) <= 20
 
     def test_value_is_preserved_when_present(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         options = [{"index": "1", "label": "x", "value": "product-42"}]
         result = list_menu_component("Titre", options)
         assert result["kwargs"]["options"][0]["value"] == "product-42"
 
     def test_metadata_defaults_to_empty_dict(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            list_menu_component,
+        )
         result = list_menu_component("Titre", self._options())
         assert result["kwargs"]["metadata"] == {}
 
 
 class TestResolveGoalForUi:
     def test_current_goal_wins(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import resolve_goal_for_ui
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            resolve_goal_for_ui,
+        )
         assert resolve_goal_for_ui({"current_goal": "SALES_PUBLISH_PRODUCT"}) == "SALES_PUBLISH_PRODUCT"
 
     def test_unknown_current_goal_falls_through_to_next_candidate(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import resolve_goal_for_ui
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            resolve_goal_for_ui,
+        )
         state = {"current_goal": "UNKNOWN", "working_memory": {"active_goal": "BUYER_REQUEST"}}
         assert resolve_goal_for_ui(state) == "BUYER_REQUEST"
 
     def test_no_candidates_returns_none(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import resolve_goal_for_ui
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            resolve_goal_for_ui,
+        )
         assert resolve_goal_for_ui({}) is None
 
 
 class TestApplyCorrections:
     def test_completed_status_clears_recent_corrections_without_appending_text(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import apply_corrections
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            apply_corrections,
+        )
         state = {"status": "COMPLETED", "working_memory": {"recent_corrections": {"price": "300"}}}
         response = apply_corrections(state, {"final_response": "Done"})
         assert response["final_response"] == "Done"
         assert response["working_memory"]["recent_corrections"] is None
 
     def test_dict_shaped_corrections_are_appended_as_an_acknowledgement(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import apply_corrections
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            apply_corrections,
+        )
         state = {
             "status": "WAITING_INPUT",
             "current_goal": "SALES_PUBLISH_PRODUCT",
@@ -566,7 +677,9 @@ class TestApplyCorrections:
         assert "300 FCFA" in response["final_response"]
 
     def test_list_shaped_corrections_are_appended(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import apply_corrections
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            apply_corrections,
+        )
         state = {
             "status": "WAITING_INPUT",
             "current_goal": "SALES_PUBLISH_PRODUCT",
@@ -576,7 +689,9 @@ class TestApplyCorrections:
         assert "Quantité" in response["final_response"]
 
     def test_non_user_facing_field_is_ignored(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import apply_corrections
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            apply_corrections,
+        )
         state = {
             "status": "WAITING_INPUT",
             "working_memory": {"recent_corrections": {"internal_flag": "x"}},
@@ -585,7 +700,9 @@ class TestApplyCorrections:
         assert response["final_response"] == "Recap"
 
     def test_no_corrections_leaves_response_untouched(self):
-        from ladini.graphs.agents.market_coach.nodes.rendering.common import apply_corrections
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import (
+            apply_corrections,
+        )
         state = {"status": "WAITING_INPUT", "working_memory": {}}
         response = apply_corrections(state, {"final_response": "Recap"})
         assert response == {"final_response": "Recap"}

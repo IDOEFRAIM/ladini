@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any, Dict
 
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
@@ -16,6 +18,8 @@ from ladini.graphs.agents.market_coach.nodes.rendering.common import (
     status_component,
 )
 from ladini.graphs.agents.market_coach.utils import llm_deviation_reply
+
+logger = logging.getLogger("Ladini.Market.Rendering.Feedback")
 
 _RECOVERY_MAX_RETRIES = 2
 
@@ -189,6 +193,35 @@ async def render_interruption(ctx: RenderContext) -> Dict[str, Any]:
     return {"final_response": head + tail, "ag_ui_component": None}
 
 
+#: Accueil NEUTRE : montre les trois portes (acheter, vendre, approvisionnement régulier) sans rien demander de personnel.
+NEUTRAL_WELCOME = (
+    "Bienvenue ! Je suis votre assistant Ladini.\n"
+    "Je peux vous aider à :\n"
+    "• Acheter des produits agricoles\n"
+    "• Vendre vos produits / gérer votre stock\n"
+    "• Organiser un approvisionnement régulier\n\n"
+    "Que souhaitez-vous faire ?"
+)
+
+_PROFILE_UP_FRONT = re.compile(
+    r"(?:quel\s+est\s+(?:votre|ton)\s+nom|comment\s+(?:vous\s+appelez|t['’ ]?appelles|dois-je)|(?:votre|ton)\s+nom\b|"
+    r"quelle\s+(?:est\s+)?(?:votre|ta)?\s*r[ée]gion|dans\s+quelle\s+r[ée]gion|cr[ée]er\s+(?:un|votre|ton)\s+compte|"
+    r"inscri(?:re|ption)|(?:votre|ton)\s+r[ôo]le|acheteur\s+ou\s+(?:vendeur|producteur))",
+    re.IGNORECASE,
+)
+
+
+def _asks_profile_up_front(state: Dict[str, Any], text: str) -> bool:
+    """`True` si une réponse ne devrait PAS demander de profil : mode progressif, aucune collecte de profil en cours."""
+    if state.get("profile_gate") or state.get("is_onboarding"):
+        return False
+    from ladini.core.settings import settings
+
+    if not settings.PROGRESSIVE_ONBOARDING_ENABLED:
+        return False
+    return bool(_PROFILE_UP_FRONT.search(text))
+
+
 async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
     """Fallback : coach proactif — refonte double-rôle (vendre ET acheter).
 
@@ -210,6 +243,14 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
     """
     state, salutation = ctx.state, ctx.salutation
     precomputed = state.get("final_response")
+    if precomputed and _asks_profile_up_front(state, str(precomputed)):
+        # Onboarding PROGRESSIF : un accueil/une clarification ne demande JAMAIS nom/région/rôle/compte — c'est l'ACTION
+        # métier (précommande, vente…) qui les exige, au bon moment (`core/profile_gate.py`). Texte déterministe de repli.
+        logger.info("neutral_greeting_guard | replaced=true | reason=profile_asked_up_front")
+        precomputed = None
+        turn_override = True
+    else:
+        turn_override = False
     if precomputed:
         return {
             "final_response": precomputed,
@@ -217,15 +258,8 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
         }
     turn = int(state.get("turn_count") or 0)
 
-    if turn <= 1:
-        fallback_text = (
-            f"👋 {salutation}Bienvenue ! Je suis votre assistant Ladini.\n"
-            "Je peux vous aider à :\n"
-            "• Mettre vos produits en vente / gérer votre stock\n"
-            "• Trouver des produits agricoles / lancer un appel d'offres\n"
-            "• Suivre vos commandes ou celles reçues\n\n"
-            "Que souhaitez-vous faire ?"
-        )
+    if turn <= 1 or turn_override:
+        fallback_text = f"👋 {salutation}{NEUTRAL_WELCOME}"
     else:
         # Un goal qui vient de se terminer en ERROR/FAILED laisse une trace
         # d'un tour (nodes/cleaner.py::state_cleaner_node) — si l'utilisateur

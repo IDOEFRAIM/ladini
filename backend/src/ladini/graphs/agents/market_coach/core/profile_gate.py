@@ -19,6 +19,7 @@ un éventuel profil acheteur ; la vérification producteur n'est JAMAIS contourn
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -107,16 +108,53 @@ def needs_producer_capability(state: Mapping[str, Any], action: ProfileAction) -
     return action is ProfileAction.SELL and isinstance(perms, Mapping) and not perms.get("can_sell")
 
 
-def build_gate(state: Mapping[str, Any], action: ProfileAction, missing: Tuple[ProfileField, ...]) -> Dict[str, Any]:
-    """Snapshot durable de la commande EN ATTENTE : de quoi la reprendre sans que l'utilisateur la répète."""
+#: Valeurs de zone de repli qui ne sont jamais une région : remplacées par la région canonique à la reprise.
+PLACEHOLDER_ZONE_VALUES = frozenset({"", "zone inconnue", "inconnue", "unknown", "none", "null"})
+
+_WHY: Mapping[ProfileField, str] = {
+    ProfileField.NAME: "Je te le demande pour identifier ta commande auprès du producteur et sécuriser l'échange.",
+    ProfileField.REGION: "Je te le demande pour te proposer des producteurs et une livraison près de chez toi.",
+}
+
+
+def why_we_ask(action: ProfileAction, field: ProfileField) -> str:
+    return _WHY.get(field, "J'en ai besoin pour continuer.")
+
+
+def _command_snapshot(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Photographie de la commande métier en pause (objectif, intention, événement, payload, entités) — restaurée à l'identique."""
+    payload = state.get("transaction_payload")
+    entities = state.get("extracted_entities")
     return {
         "goal": resolve_current_goal(dict(state)),
+        "current_goal": resolve_current_goal(dict(state)),
+        "detected_intent": state.get("detected_intent"),
+        "interpreted_event": state.get("interpreted_event"),
+        "interpreter_confidence": state.get("interpreter_confidence"),
+        "status": state.get("status"),
+        "transaction_payload": copy.deepcopy(dict(payload)) if isinstance(payload, Mapping) else {},
+        "extracted_entities": copy.deepcopy(dict(entities)) if isinstance(entities, Mapping) else {},
+    }
+
+
+def command_is_resumable(command: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    """Une commande en pause n'est reprise que si elle porte un objectif réel (jamais une commande reconstruite)."""
+    goal = str(command.get("current_goal") or command.get("goal") or "").strip()
+    return bool(goal) and goal.upper() not in {"NONE", "UNKNOWN", "SMALL_TALK"}
+
+
+def build_gate(state: Mapping[str, Any], action: ProfileAction, missing: Tuple[ProfileField, ...]) -> Dict[str, Any]:
+    """Snapshot durable de la commande EN ATTENTE : de quoi la reprendre sans que l'utilisateur la répète."""
+    command = _command_snapshot(state)
+    return {
+        "goal": command["goal"],
         "action": action.value,
         "missing": [f.value for f in missing],
-        "event": state.get("interpreted_event"),
-        "intent": state.get("detected_intent"),
-        "status": state.get("status"),
+        "event": command["interpreted_event"],
+        "intent": command["detected_intent"],
+        "status": command["status"],
         "capability": "SELL" if action is ProfileAction.SELL else "BUY",
+        "command": command,
     }
 
 
@@ -141,7 +179,7 @@ async def apply_profile_gate(state: Dict[str, Any], mc_runtime: Any) -> Optional
     if missing:
         gate = build_gate(state, action, missing)
         logger.info(
-            "profile_gate_triggered | goal=%s | action=%s | missing_requirement=%s | capability_requested=%s",
+            "profile_gate_paused | goal=%s | action=%s | missing_requirement=%s | capability_requested=%s",
             gate["goal"], action.value, gate["missing"], gate["capability"],
         )
         return {
@@ -174,8 +212,11 @@ async def apply_profile_gate(state: Dict[str, Any], mc_runtime: Any) -> Optional
 
 
 __all__ = [
+    "PLACEHOLDER_ZONE_VALUES",
     "apply_profile_gate",
     "build_gate",
+    "command_is_resumable",
+    "why_we_ask",
     "gate_requirements",
     "is_enabled",
     "needs_producer_capability",

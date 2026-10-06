@@ -26,7 +26,6 @@ from tests.integration.test_recurring_intent_integration_e2e import (
     _detail,
     _system,
     _to_detail,
-    _user,
 )
 from tests.integration.test_recurring_self_service_entrypoint_e2e import UNKNOWN
 
@@ -106,7 +105,10 @@ def test_correction_during_creation_is_the_same_draft_and_creates_exactly_one_ne
 
 def test_a_complete_task_with_a_product_during_a_draft_is_still_a_new_task():
     """La fréquence SEULE corrige ; produit + fréquence = tâche isolée (mandat §9 de la phase 2.5, inchangé)."""
-    from ladini.graphs.agents.market_coach.core.turn_policy import TurnAction, decide_active_draft_reply as decide
+    from ladini.graphs.agents.market_coach.core.turn_policy import TurnAction
+    from ladini.graphs.agents.market_coach.core.turn_policy import (
+        decide_active_draft_reply as decide,
+    )
 
     kw = {"interpreted_event": "NEW_TASK", "detected_intent": "CREATE_RECURRING_NEED", "current_goal": "CREATE_RECURRING_NEED"}
     assert decide(said_entities={"recurrence_type": "MONTHLY"}, **kw) == TurnAction.CORRECT
@@ -457,7 +459,9 @@ def test_pure_relation_and_guard_helpers():
 
 
 def test_update_plan_validates_outside_the_llm():
-    from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import _plan_permanent_changes as plan
+    from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import (
+        _plan_permanent_changes as plan,
+    )
 
     assert plan({"quantity": 3.0})[0] == [("PERMANENT_QUANTITY", {"quantity": 3.0})]
     for bad in (0, -2, float("nan"), float("inf"), "beaucoup"):

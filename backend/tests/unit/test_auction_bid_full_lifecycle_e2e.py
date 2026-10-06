@@ -37,10 +37,9 @@ import uuid
 
 import pytest
 
-from tests.conftest import run
-
 from ladini.services.database.auction import AuctionMixin
 from ladini.services.database.errors import BusinessRuleException
+from tests.conftest import run
 
 
 async def _async_return(value):

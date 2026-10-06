@@ -60,6 +60,7 @@ class TestSendWhatsappMedia:
 
     def test_masks_the_recipient_number_in_logs(self, monkeypatch, caplog):
         import logging
+
         import ladini.services.twilio_sender as ts
 
         class _FakeClient:

@@ -15,9 +15,6 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import run
-from tests.unit.llm_gateway.conftest import make_fake_redis
-
 from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     CircuitBreaker,
 )
@@ -29,6 +26,8 @@ from ladini.graphs.agents.market_coach.llm_gateway.types import (
     LLMProfile,
     ModelCandidate,
 )
+from tests.conftest import run
+from tests.unit.llm_gateway.conftest import make_fake_redis
 
 
 class _StubRegistry:

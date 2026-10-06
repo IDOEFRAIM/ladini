@@ -3,7 +3,9 @@
 (distinct du catalogue de recherche brut, voir test_rendering_success.py)."""
 from __future__ import annotations
 
-from ladini.graphs.agents.market_coach.services.domain.cart_service import CartDomainService
+from ladini.graphs.agents.market_coach.services.domain.cart_service import (
+    CartDomainService,
+)
 
 
 def _svc():
@@ -94,6 +96,7 @@ class TestBuildProductSelectionMenuPhotos:
 class TestResolveProductVendorsImages:
     def test_images_pass_through_from_search_results(self, monkeypatch):
         from unittest.mock import AsyncMock
+
         import ladini.graphs.agents.market_coach.services.mcp.gateway as gw
 
         monkeypatch.setattr(
@@ -120,6 +123,7 @@ class TestResolveProductVendorsImages:
         l'exécution — puis dans `content_variables` envoyées à Twilio."""
         import uuid
         from unittest.mock import AsyncMock
+
         import ladini.graphs.agents.market_coach.services.mcp.gateway as gw
 
         raw_uuid = uuid.uuid4()

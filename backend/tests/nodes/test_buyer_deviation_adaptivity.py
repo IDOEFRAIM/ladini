@@ -14,11 +14,11 @@ maintenant réception avant de rejouer leur texte figé :
 """
 from __future__ import annotations
 
-from tests.conftest import StubRuntime, make_state, run
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from tests.conftest import StubRuntime, make_state, run
 
 
 class _Msg:

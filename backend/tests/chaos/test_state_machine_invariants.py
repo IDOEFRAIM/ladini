@@ -9,9 +9,7 @@ Prouvés sur l'INTÉGRALITÉ du catalogue d'intents, pas sur un échantillon.
 from __future__ import annotations
 
 import pytest
-
 from conftest import RecordingRuntime, run
-
 
 # =====================================================================
 # I1 — Toute écriture exige une confirmation explicite (catalogue ENTIER)

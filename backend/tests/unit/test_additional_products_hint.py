@@ -7,7 +7,9 @@ l'utilisateur est informé de ce qui a été mis de côté, plutôt que de le vo
 disparaître silencieusement."""
 from __future__ import annotations
 
-from ladini.graphs.agents.market_coach.flows.buyer.helpers import additional_products_hint
+from ladini.graphs.agents.market_coach.flows.buyer.helpers import (
+    additional_products_hint,
+)
 
 
 class TestAdditionalProductsHint:

@@ -18,7 +18,6 @@ TestExecutionKey` (which only covers the pure PROCUREMENT function) with:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (

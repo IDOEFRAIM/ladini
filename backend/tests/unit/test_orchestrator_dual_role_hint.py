@@ -24,7 +24,6 @@ Un indice d'ÉTAT, jamais un mot-clé du texte reçu — même principe que
 from __future__ import annotations
 
 from typing import Any, Dict
-from unittest.mock import AsyncMock
 
 import pytest
 

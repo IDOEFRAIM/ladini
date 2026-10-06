@@ -13,9 +13,6 @@ from typing import Any, Dict, List
 
 import pytest
 
-from tests.conftest import run
-from tests.unit.llm_gateway.conftest import make_fake_redis
-
 from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     CircuitBreaker,
 )
@@ -26,8 +23,9 @@ from ladini.graphs.agents.market_coach.llm_gateway.gateway import (
 from ladini.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
 )
-from ladini.graphs.agents.market_coach.llm_gateway.registry import ModelRegistry
 from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+from tests.conftest import run
+from tests.unit.llm_gateway.conftest import make_fake_redis
 
 
 # ── Fakes locaux ─────────────────────────────────────────────────────

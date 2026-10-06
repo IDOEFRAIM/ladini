@@ -10,12 +10,9 @@ le commit qui accompagne ce fichier.
 """
 from __future__ import annotations
 
-from typing import Any, Dict
-
 import pytest
 
 from tests.conftest import run
-
 
 # =====================================================================
 # _guess_scope — repli fail-safe pour un outil non cartographié
@@ -23,19 +20,19 @@ from tests.conftest import run
 
 class TestGuessScope:
     def test_read_prefixes_map_to_read_only(self):
-        from ladini.infrastructure.mcp.security import _guess_scope, PermissionScope
+        from ladini.infrastructure.mcp.security import PermissionScope, _guess_scope
         for name in ("get_thing", "list_things", "search_stuff", "fetch_x", "count_y"):
             assert _guess_scope(name) == PermissionScope.DB_READ_ONLY
 
     def test_schema_prefixes_map_to_schema_modify(self):
-        from ladini.infrastructure.mcp.security import _guess_scope, PermissionScope
+        from ladini.infrastructure.mcp.security import PermissionScope, _guess_scope
         for name in ("migrate_v2", "drop_index", "alter_column", "truncate_logs"):
             assert _guess_scope(name) == PermissionScope.DB_SCHEMA_MODIFY
 
     def test_unknown_prefix_defaults_to_write_fail_safe(self):
         """Un outil inconnu ne doit JAMAIS être auto-autorisé en lecture —
         le défaut fail-safe est écriture (soumis à scrutin), pas confiance."""
-        from ladini.infrastructure.mcp.security import _guess_scope, PermissionScope
+        from ladini.infrastructure.mcp.security import PermissionScope, _guess_scope
         assert _guess_scope("do_something_destructive") == PermissionScope.DB_DATA_WRITE
 
 
@@ -158,7 +155,10 @@ class TestEstimateTokens:
 
 class TestToolExecutionPolicyExecute:
     def _policy(self):
-        from ladini.infrastructure.mcp.security import ToolExecutionPolicy, MCPToolRegistry
+        from ladini.infrastructure.mcp.security import (
+            MCPToolRegistry,
+            ToolExecutionPolicy,
+        )
         return ToolExecutionPolicy(registry=MCPToolRegistry(), max_calls_per_minute=1000)
 
     def test_success_path_returns_an_ok_envelope(self):
@@ -185,7 +185,9 @@ class TestToolExecutionPolicyExecute:
 
     def test_rate_limit_exceeded_raises_permission_denied(self):
         from ladini.infrastructure.mcp.security import (
-            ToolExecutionPolicy, MCPToolRegistry, PermissionDenied,
+            MCPToolRegistry,
+            PermissionDenied,
+            ToolExecutionPolicy,
         )
         policy = ToolExecutionPolicy(registry=MCPToolRegistry(), max_calls_per_minute=1)
 
@@ -256,13 +258,13 @@ class TestMCPToolRegistry:
         assert names == sorted(names)
 
     def test_list_tools_filters_by_server(self):
-        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPServerKind, MCPToolRegistry
         reg = MCPToolRegistry()
         items = reg.list_tools(server=MCPServerKind.DB)
         assert all(i["server"] == "db" for i in items)
 
     def test_sync_discovered_tools_never_overwrites_an_already_known_tool(self):
-        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPServerKind, MCPToolRegistry
         reg = MCPToolRegistry()
         before = reg.get_tool("get_user_profile")
         reg.sync_discovered_tools(MCPServerKind.DB, [
@@ -271,7 +273,7 @@ class TestMCPToolRegistry:
         assert reg.get_tool("get_user_profile") is before, "un outil déjà connu ne doit jamais être réécrasé"
 
     def test_sync_discovered_tools_skips_blank_names(self):
-        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPServerKind, MCPToolRegistry
         reg = MCPToolRegistry()
         count_before = len(reg._tools)
         reg.sync_discovered_tools(MCPServerKind.DB, [{"name": "", "description": "x"}])
@@ -283,7 +285,7 @@ class TestMCPToolRegistry:
         de `TOOL_SCOPE_MAP` — une posture fail-OPEN isolée. Un outil
         totalement inconnu ne doit désormais RECEVOIR AUCUN privilège, pas
         même en lecture : il ne doit tout simplement pas être enregistré."""
-        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPServerKind, MCPToolRegistry
         reg = MCPToolRegistry()
         count_before = len(reg._tools)
         reg.sync_discovered_tools(MCPServerKind.DB, [
@@ -295,7 +297,8 @@ class TestMCPToolRegistry:
 
     def test_sync_discovered_tools_logs_a_warning_for_an_unmapped_tool(self, caplog):
         import logging
-        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+
+        from ladini.infrastructure.mcp.security import MCPServerKind, MCPToolRegistry
 
         reg = MCPToolRegistry()
         with caplog.at_level(logging.WARNING, logger="MCP.Core.Security"):
@@ -314,7 +317,9 @@ class TestMCPToolRegistry:
         TOOL_SCOPE_MAP doit être enregistré avec SON scope réel, pas un
         DB_DATA_WRITE générique."""
         from ladini.infrastructure.mcp.security import (
-            MCPToolRegistry, MCPServerKind, PermissionScope,
+            MCPServerKind,
+            MCPToolRegistry,
+            PermissionScope,
         )
         reg = MCPToolRegistry()
         del reg._tools["get_user_profile"]  # simule un outil pas encore synchronisé
@@ -416,7 +421,10 @@ class TestMCPPermissionHostApp:
         ``_preflight_scan``/``_suggest_fix`` y sont utilisés) ; ces tests
         couvrent en plus le pass-through de ``.execute()`` vers un client
         arbitraire, pour n'importe quel appelant qui en fournirait un."""
-        from ladini.infrastructure.mcp.security import MCPPermissionHostApp, PermissionDenied
+        from ladini.infrastructure.mcp.security import (
+            MCPPermissionHostApp,
+            PermissionDenied,
+        )
 
         class _FakeClient:
             async def call_tool(self, name, arguments):
@@ -581,7 +589,11 @@ class TestDBInProcessBackend:
 
 class TestMCPManager:
     def _manager(self, monkeypatch, *, list_tools_result=None, call_tool_side_effect=None):
-        from ladini.infrastructure.mcp.security import MCPManager, MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import (
+            MCPManager,
+            MCPServerKind,
+            MCPToolRegistry,
+        )
 
         registry = MCPToolRegistry()
         manager = MCPManager(registry=registry)

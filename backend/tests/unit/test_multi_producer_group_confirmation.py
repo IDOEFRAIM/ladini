@@ -15,10 +15,9 @@ import uuid
 
 import pytest
 
-from tests.conftest import run
-
 from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.errors import BusinessRuleException
+from tests.conftest import run
 
 
 class _Rows(list):

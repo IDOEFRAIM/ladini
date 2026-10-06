@@ -15,7 +15,12 @@ from tests.integration.test_semantic_context_arbitration_e2e import (
     ScriptLLM,
 )
 from tests.schema import test_recurring_entrypoint_pg as entry
-from tests.schema.test_recurring_entrypoint_pg import Conv, _needs_of, _user, real_db  # noqa: F401
+from tests.schema.test_recurring_entrypoint_pg import (  # noqa: F401
+    Conv,
+    _needs_of,
+    _user,
+    real_db,
+)
 
 pytestmark = pytest.mark.integration
 

@@ -8,29 +8,28 @@ from __future__ import annotations
 
 import pytest
 
+from ladini.domain.quantity_unit import (
+    UNIT_SYNONYMS,
+    default_unit_for_product,
+    extract_unit_only_from_text,
+    is_livestock_product,
+    normalize_unit,
+    parse_compound_quantity,
+    parse_quantity_unit_from_text,
+    resolve_product_unit,
+    scan_number_candidates,
+)
 from ladini.graphs.agents.market_coach.core.slots import (
-    SLOT_REGISTRY,
     SLOT_FILLING_INPUTS,
-    resolve_canonical,
+    SLOT_REGISTRY,
+    build_alias_mirrors,
     build_canonical_field_aliases,
     build_remap_dict,
-    build_alias_mirrors,
     expected_input_for_field,
     get_slot,
     is_blocking_slot,
+    resolve_canonical,
 )
-from ladini.domain.quantity_unit import (
-    UNIT_SYNONYMS,
-    normalize_unit,
-    parse_quantity_unit_from_text,
-    parse_compound_quantity,
-    extract_unit_only_from_text,
-    scan_number_candidates,
-    is_livestock_product,
-    default_unit_for_product,
-    resolve_product_unit,
-)
-
 
 # =====================================================================
 # REGISTRE DE SLOTS — source unique alias -> canonique
@@ -100,7 +99,9 @@ class TestSlotRegistry:
     def test_tunnel_soft_inputs_include_all_slot_fields(self):
         """tunnel_manager doit dériver du registre, sinon un slot devient
         non-interruptible sans qu'on s'en aperçoive."""
-        from ladini.graphs.agents.market_coach.core.tunnel_manager import SOFT_EXPECTED_INPUTS
+        from ladini.graphs.agents.market_coach.core.tunnel_manager import (
+            SOFT_EXPECTED_INPUTS,
+        )
         assert SLOT_FILLING_INPUTS <= SOFT_EXPECTED_INPUTS
 
     def test_only_true_secrets_are_blocking(self):

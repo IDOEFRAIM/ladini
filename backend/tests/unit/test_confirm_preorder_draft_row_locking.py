@@ -29,9 +29,8 @@ import uuid
 
 import pytest
 
-from tests.conftest import run
-
 from ladini.services.database.buyer import BuyerMixin
+from tests.conftest import run
 
 
 def _fake_buyer_profile():

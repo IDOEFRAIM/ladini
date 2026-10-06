@@ -409,7 +409,8 @@ class BaseMixin:
             "role": user_obj.role or "USER",
             "zone": {  # Retourner un objet zone est plus pratique pour l'agent
                 "id": str(zone_obj.id) if zone_obj else None,
-                "name": zone_obj.name if zone_obj else "Zone inconnue",
+                # Pas de zone : `None` — « Zone inconnue » (repli technique) polluait le payload métier et l'affichage.
+                "name": zone_obj.name if zone_obj else None,
             },
             "longitude": user_obj.longitude,
             "latitude": user_obj.latitude,

@@ -37,10 +37,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from ladini.core.settings import settings as real_settings
 from ladini.graphs.agents.market_coach.llm_gateway.registry import load_registry
 from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
 from ladini.graphs.agents.market_coach.llm_router import get_profile_for_goal
-from ladini.core.settings import settings as real_settings
 
 
 class TestInterpreterProfileIsLoadedFromItsOwnDedicatedSettings:

@@ -19,7 +19,6 @@ from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ConfirmProcurementDraft,
     ProcurementDraft,
     ProcurementDraftStatus,
-    ProcurementExecutionResult,
     ProcurementOutcomeKind,
     UpdateProcurementDraft,
     adapt_mcp_result,

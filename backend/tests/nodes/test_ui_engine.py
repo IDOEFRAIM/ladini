@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
-
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,

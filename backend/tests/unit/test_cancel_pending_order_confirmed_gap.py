@@ -30,10 +30,9 @@ from decimal import Decimal
 
 import pytest
 
-from tests.conftest import run
-
 from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.errors import BusinessRuleException
+from tests.conftest import run
 
 
 async def _async_return(value):
