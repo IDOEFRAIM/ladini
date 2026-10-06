@@ -252,6 +252,24 @@ def _cart_ready_confirmation_alias(state: Dict[str, Any], text: str) -> Optional
     return None
 
 
+def _draft_context_hint(state: Dict[str, Any]) -> Optional[str]:
+    """But + valeurs d'un récapitulatif de brouillon affiché (attente CONFIRM_ACTION), pour que NEW_TASK sache qu'un message court est une CORRECTION."""
+    from ladini.graphs.agents.market_coach.core.pending_interaction import (
+        InteractionKind,
+        get_pending_interaction,
+    )
+
+    if get_pending_interaction(state).kind != InteractionKind.CONFIRM_ACTION:
+        return None
+    goal = str(state.get("current_goal") or (state.get("working_memory") or {}).get("active_goal") or "").upper()
+    if not goal or goal not in INTENT_CONFIG:
+        return None
+    payload = state.get("transaction_payload") or {}
+    shown = {k: payload.get(k) for k in ("product", "quantity", "unit", "price", "price_unit", "zone", "deadline") if payload.get(k) not in (None, "", [])}
+    values = ", ".join(f"{k}={v}" for k, v in shown.items())
+    return f"{goal} ({values})" if values else goal
+
+
 def _cart_pending_signal(state: Dict[str, Any]) -> bool:
     """Panier acheteur en attente de précommande — signal d'ÉTAT (phase CART
     + panier non vide), jamais un mot-clé du texte. Source unique pour les
@@ -1639,7 +1657,10 @@ def _interpret_fast_path(
     _closed = _CLOSED_INDEX.fullmatch(clean)
     if _closed:
         clean = _closed.group(1)
-    if clean.isdigit():
+    _awaiting_ceiling = bool((state.get("vendor_selection_context") or {}).get("awaiting")) if isinstance(
+        state.get("vendor_selection_context"), dict
+    ) else False
+    if clean.isdigit() and not _awaiting_ceiling:
         candidates = state.get("expected_candidates") or []
         has_active_mapping = bool(state.get("available_mapping")) or (
             str(
@@ -3074,6 +3095,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
 
             _cart_pending_nt = _cart_pending_signal(state)
             _nt_context = NewTaskPromptContext(
+                draft_context=_draft_context_hint(state),
                 reference_date=date.today().isoformat(),
                 cart_pending=_cart_pending_nt,
                 previous_goal=locked_goal if _deviation_reclass else None,

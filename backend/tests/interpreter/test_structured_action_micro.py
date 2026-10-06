@@ -152,7 +152,8 @@ class TestSelectProducer:
 
     def test_no_technical_id_leaves_the_microprompt(self):
         interp = make_input_interpreter("BUYER")
-        state = _producer_state()
+        # « le premier » étaye l'index 1 (un index que le texte n'étaye pas — « le deuxième » -> 1 — est refusé, voir `_selection_is_evidenced`).
+        state = _producer_state(normalized_text="le premier")
         llm = ScriptedLLM({"disposition": "ACTION", "action": "SELECT_PRODUCER", "selection_index": 1, "confidence": 0.9})
         result = run(interp(state, StubRuntime(llm=llm)))
         assert result["extracted_entities"]["action_producer_id"] == "P1"  # résolu par PYTHON
@@ -659,5 +660,5 @@ class TestStructuredActionPromptNeverLeaksTheFullCatalog:
         assert "T10" not in prompt
 
     def test_prompt_version_is_distinct_from_other_families(self):
-        assert STRUCTURED_ACTION_PROMPT_VERSION == "structured_action_v3"
+        assert STRUCTURED_ACTION_PROMPT_VERSION == "structured_action_v4"
         assert STRUCTURED_ACTION_PROMPT_VERSION not in ("selection_v1", "active_slot_v2", "interpreter_v1")

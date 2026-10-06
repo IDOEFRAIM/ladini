@@ -23,7 +23,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def _null_list_to_empty(model_cls: Any, value: Any) -> Any:
+    """Un modèle réel émet régulièrement `null` pour une liste vide (« weekly_days »: null) : ce n'est pas une réponse invalide, c'est
+    « aucune valeur ». Rejeter ce JSON (puis son repair) rendait la phrase entière UNKNOWN — la demande « Je veux du lait » n'était plus comprise."""
+    return [] if value is None else value
+
 
 
 class NewTaskDisposition(str, Enum):
@@ -204,6 +211,15 @@ class NewTaskEntities(BaseModel):
     # (cible exacte, propriété, ambiguïté arrêter/ignorer). `null` pour « change la quantité/la fréquence ».
     update_action: Optional[Literal["PAUSE", "RESUME", "CANCEL", "SKIP_OCCURRENCE", "OVERRIDE_OCCURRENCE"]] = None
 
+    @field_validator(
+        "additional_products", "pricing_tiers", "weekly_days", "excluded_weekdays", "additional_items", "ambiguous_groups",
+        "orphan_quantities", mode="before",
+    )
+    @classmethod
+    def _lists_accept_null(cls, value: Any) -> Any:
+        return _null_list_to_empty(cls, value)
+
+
 
 class NewTaskInterpretation(BaseModel):
     """Sortie brute (déjà JSON-décodée) du micro-prompt NEW_TASK.
@@ -229,6 +245,19 @@ class NewTaskInterpretation(BaseModel):
     def _default_entities(cls, data: Any) -> Any:
         if isinstance(data, dict) and data.get("entities") is None:
             data = {**data, "entities": {}}
+        if isinstance(data, dict) and "candidate_goals" in data and data.get("candidate_goals") is None:
+            data = {**data, "candidate_goals": []}
+        if isinstance(data, dict):
+            # Lecteur TOLÉRANT : le vrai modèle écrit parfois le NOM DE L'INTENTION comme disposition (`"disposition": "BUYER_VIEW_CART"`) au lieu de
+            # `NEW_TASK` + `intent`. L'intention est comprise : on la lit telle quelle (sinon repair, puis AMBIGUOUS/UNKNOWN — la phrase échouait).
+            disposition = str(data.get("disposition") or "").upper()
+            if disposition and disposition not in {d.value for d in NewTaskDisposition}:
+                from ladini.graphs.agents.market_coach.interpreter.intent import (
+                    INTENT_CONFIG,
+                )
+
+                if disposition in INTENT_CONFIG:
+                    data = {**data, "disposition": NewTaskDisposition.NEW_TASK.value, "intent": data.get("intent") or disposition}
         return data
 
     @model_validator(mode="after")
@@ -313,6 +342,9 @@ class NewTaskPromptContext:
     #: RELATION du message avec l'écran (corriger la cible affichée ou nouvelle tâche). Rempli uniquement quand l'attente
     #: d'un écran vivant a été écartée par la route SELECTION.
     screen_context: Optional[str] = None
+    #: Récapitulatif d'un brouillon ACTUELLEMENT affiché et en attente de confirmation (but + champs affichés) — signal d'ÉTAT. Sans lui, « à 300 francs »
+    #: ou « non 250 » après un récap ne sont rattachés à rien (UNKNOWN / refus global) : la correction est SILENCIEUSEMENT perdue.
+    draft_context: Optional[str] = None
 
 
 def adapt_new_task_to_canonical(

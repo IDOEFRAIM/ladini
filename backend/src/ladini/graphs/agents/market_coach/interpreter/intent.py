@@ -469,7 +469,8 @@ INTENT_CONFIG = {
             "Acheteur exprime une NOUVELLE envie d'acquérir un produit "
             "maintenant (recherche catalogue avant appel d'offres) — même si "
             "le message contient le mot \"commande(s)\" (ex: \"je veux "
-            "commander des poulets\")"
+            "commander des poulets\"), ou chercher/trouver un produit "
+            "(ex: \"cherche tomate\")"
         ),
         "label_map": {
             "product": "produit recherché",
@@ -513,7 +514,10 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "handled_by_flow": True,
-        "label": "Consultation du panier de précommande en cours",
+        "label": (
+            "Consultation du panier de précommande en cours, ou de son TOTAL (ex: \"c'est combien au total\", \"ça fait combien\") "
+            "quand un panier existe — pas le prix du marché"
+        ),
         "label_map": {},
     },
     "BUYER_CREATE_PREORDER": {

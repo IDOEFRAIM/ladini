@@ -13,7 +13,10 @@ from ladini.graphs.agents.market_coach.llm_gateway import (
     resolve_gateway,
     resolve_profile,
 )
-from ladini.graphs.agents.market_coach.utils import MarketRuntime
+from ladini.graphs.agents.market_coach.utils import (
+    NO_FABRICATED_FACTS_RULE,
+    MarketRuntime,
+)
 
 logger = get_node_logger("ClarificationNode")
 
@@ -240,7 +243,8 @@ async def clarification_node(
         f"Tu peux l'aider à : {capabilities}.\n"
         f"Explique brièvement ce que tu peux faire et encourage-le à reformuler.\n"
         f"Donne 2-3 exemples concrets de phrases qu'il pourrait dire.\n"
-        f"Réponds en 2-3 phrases max, en français simple et direct."
+        f"Réponds en 2-3 phrases max, en français simple et direct.\n"
+        f"{NO_FABRICATED_FACTS_RULE}"
     )
 
     try:

@@ -71,8 +71,9 @@ ne force jamais une intention juste pour répondre quelque chose.
 - AMBIGUOUS : les FAITS sont clairs (ex: produit+quantité) mais AUCUN \
 verbe d'action (vendre, enregistrer en stock, déclarer une récolte...) ne \
 départage ≥2 intentions du catalogue également compatibles ("j'ai X", "il \
-me reste X" sans verbe = AMBIGUOUS ; "vendre"/"enregistrer"/"récolté... je \
-veux l'enregistrer" = NEW_TASK normal). Jamais une devinette au confidence \
+me reste X" sans verbe = AMBIGUOUS ; "vendre"/"à vendre"/un PRIX de vente dit \
+("à 250 FCFA le kg")/"enregistrer"/"récolté... je veux l'enregistrer" = \
+NEW_TASK normal). Jamais une devinette au confidence \
 le plus haut — l'absence de signal d'action rend le choix structurellement \
 indécidable, pas juste incertain.
 
@@ -214,7 +215,15 @@ def build_new_task_user_prompt(
             "WhatsApp (« je suis d'accord », « ok vas-y », « c'est bon », "
             "« okay », « ok », « oui ») signifie CONFIRM, un refus libre "
             "(« non », « laisse tomber ») signifie REJECT ; un nouveau "
-            "produit ajouté reste NEW_TASK."
+            "produit ajouté reste NEW_TASK. Une question sur le TOTAL du panier "
+            "(« c'est combien au total », « ça fait combien ») est BUYER_VIEW_CART."
+        )
+    if context.draft_context:
+        lines.append(
+            f"Récapitulatif en attente de confirmation : {context.draft_context}. Un message qui ne donne que UNE ou quelques valeurs "
+            "(« à 300 francs », « 400 kg », « c'est oignon pas tomate », « non 250 ») CORRIGE ces champs du MÊME récapitulatif : "
+            "NEW_TASK du même intent, `entities` = UNIQUEMENT les champs corrigés (jamais vidés, jamais les autres). « non » suivi d'une valeur "
+            "est une correction, pas un refus ; « pas maintenant », « laisse tomber » sans valeur = REJECT."
         )
     if context.producer_order_action_pending:
         lines.append(
