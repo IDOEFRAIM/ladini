@@ -18,6 +18,13 @@ logger = logging.getLogger("Ladini.Market.Rendering")
 
 async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
     state = ctx.state
+    analysis = state.get("raw_analysis")
+    targeted = analysis.get("selection_clarification") if isinstance(analysis, dict) else None
+    if targeted:
+        # CONVERSATIONAL AUTONOMY : référence naturelle ambiguë / introuvable -> question CIBLÉE, jamais le menu complet rejoué
+        # (le menu et son snapshot restent actifs : la réponse suivante se résout contre les mêmes options).
+        logger.info("interaction_mode=CLARIFICATION | menu_redisplay=suppressed")
+        return {"final_response": str(targeted), "ag_ui_component": None}
     # Réutiliser un final_response pré-calculé (cart, negotiation, tracking...).
     if state.get("final_response"):
         return apply_corrections(

@@ -219,6 +219,95 @@ async def _take_available_stock(
     return result
 
 
+def _entities_for_menu(state: Dict[str, Any]) -> Dict[str, Any]:
+    entities = state.get("extracted_entities")
+    return entities if isinstance(entities, dict) else {}
+
+
+def _show_more_offers(state: Dict[str, Any], mc_runtime: Any, vendor_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """« montre les autres » : rend visibles (donc sélectionnables) les offres suivantes ; seules les NOUVELLES sont rédigées."""
+    from ladini.core.settings import settings
+    from ladini.graphs.agents.market_coach.services.domain.cart_service import (
+        CartDomainService,
+    )
+
+    visible = [v for v in (vendor_ctx.get("vendors") or []) if isinstance(v, dict)]
+    more = [v for v in (vendor_ctx.get("vendors_more") or []) if isinstance(v, dict)]
+    if not more:
+        return {
+            "status": "WAITING_INPUT",
+            "response_strategy": "SELECTION_MENU",
+            "final_response": "Je n'ai pas d'autres offres pour l'instant — choisis parmi celles affichées, ou précise ce que tu cherches.",
+            "ag_ui_component": None,
+        }
+    page = int(getattr(settings, "BUYER_SHORTLIST_SIZE", 0) or 0) or len(more)
+    logger.info("interaction_mode=NATURAL_REFERENCE | show_more | already=%s | revealing=%s", len(visible), min(page, len(more)))
+    patch, _menu = CartDomainService(mc_runtime).build_product_selection_menu(
+        str(vendor_ctx.get("product") or ""),
+        visible + more,
+        extra_context={
+            "requested_quantity": vendor_ctx.get("requested_quantity"),
+            "requested_unit": vendor_ctx.get("requested_unit"),
+        },
+        phone=str(state.get("user_phone") or "") or None,
+        menu_id=vendor_ctx.get("menu_id"),
+        already_stamped=True,
+        shown_so_far=len(visible),
+        shortlist_size=len(visible) + page,
+    )
+    return patch
+
+
+def _stay_on_menu(text: str) -> Dict[str, Any]:
+    """Réponse courte SANS toucher au menu ni au snapshot : la réponse suivante se résout contre les mêmes options."""
+    return {"status": "WAITING_INPUT", "response_strategy": "SELECTION_MENU", "final_response": text, "ag_ui_component": None}
+
+
+def _none_of_these(vendor_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    logger.info("interaction_mode=REFINEMENT | none_of_these")
+    return _stay_on_menu(
+        "D'accord. Dis-moi ce qui te conviendrait mieux (région, prix maximum, conditionnement, quantité) et je cherche à nouveau — "
+        "ou je peux lancer un appel d'offres pour ta demande."
+    )
+
+
+def _refine_offers(state: Dict[str, Any], mc_runtime: Any, vendor_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Contrainte ajoutée (« à Ouaga », « pas plus de 600 », « moins cher ») : on restreint/trie les offres COURANTES (visibles ET
+    gardées à part) et on réaffiche une shortlist — jamais une sélection invalide, jamais une nouvelle recherche."""
+    from ladini.graphs.agents.market_coach.domain.selection_reference import (
+        SelectionReference,
+        option_from_vendor,
+        refine_options,
+    )
+    from ladini.graphs.agents.market_coach.services.domain.cart_service import (
+        CartDomainService,
+    )
+
+    raw_ref = _entities_for_menu(state).get("refinement") or {}
+    try:
+        ref = SelectionReference.model_validate(raw_ref)
+    except Exception:  # noqa: BLE001 - contrat invalide : on ne devine pas
+        return _stay_on_menu("Je n'ai pas bien compris le critère — précise par exemple une région ou un prix maximum.")
+    current = [v for v in (vendor_ctx.get("vendors") or []) + (vendor_ctx.get("vendors_more") or []) if isinstance(v, dict)]
+    options = [option_from_vendor(v, i) for i, v in enumerate(current, start=1)]
+    kept = refine_options(ref, options)
+    if not kept:
+        logger.info("interaction_mode=REFINEMENT | refine_offers | kept=0")
+        return _stay_on_menu("Aucune offre ne correspond à ce critère parmi celles que j'ai trouvées. Je garde la liste actuelle — veux-tu un autre critère ?")
+    logger.info("interaction_mode=REFINEMENT | refine_offers | kept=%s of %s", len(kept), len(current))
+    narrowed = [current[o.index - 1] for o in kept]
+    patch, _menu = CartDomainService(mc_runtime).build_product_selection_menu(
+        str(vendor_ctx.get("product") or ""),
+        narrowed,
+        extra_context={
+            "requested_quantity": vendor_ctx.get("requested_quantity"),
+            "requested_unit": vendor_ctx.get("requested_unit"),
+        },
+        phone=str(state.get("user_phone") or "") or None,
+    )
+    return patch
+
+
 async def buyer_request_resolver(
     state: Dict[str, Any], mc_runtime: MarketRuntime
 ) -> Dict[str, Any]:
@@ -294,6 +383,14 @@ async def buyer_request_resolver(
             else False,
             raw_selection,
         )
+
+        _menu_action = str(_entities_for_menu(state).get("menu_action") or "").upper()
+        if _menu_action == "SHOW_MORE":
+            return _show_more_offers(state, mc_runtime, vendor_ctx)
+        if _menu_action == "REFINE":
+            return _refine_offers(state, mc_runtime, vendor_ctx)
+        if _menu_action == "NONE_OF_THESE":
+            return _none_of_these(vendor_ctx)
 
         # Sélection NATURELLE (« le quatrième m'intéresse ») : le micro-prompt a déjà résolu l'index humain vers le producteur
         # RÉEL (`agent_action=SELECT_PRODUCER`, `action_offer_id`/`action_producer_id`) — le panier sait lire cette action.

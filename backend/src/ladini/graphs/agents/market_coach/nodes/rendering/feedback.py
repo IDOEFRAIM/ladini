@@ -67,6 +67,11 @@ async def render_error(ctx: RenderContext) -> Dict[str, Any]:
 
 async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
     state, goal = ctx.state, ctx.goal
+    analysis = state.get("raw_analysis")
+    clarification = analysis.get("selection_clarification") if isinstance(analysis, dict) else None
+    if clarification:
+        # Référence naturelle ambiguë / introuvable : question CIBLÉE ; le menu et le contexte restent actifs (pas de réaffichage).
+        return {"final_response": str(clarification), "ag_ui_component": None}
     retry_count = int(state.get("retry_count") or 0)
     retry_next = min(retry_count + 1, _RECOVERY_MAX_RETRIES)
 

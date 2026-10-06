@@ -42,12 +42,15 @@ from ladini.graphs.agents.market_coach.domain.selection_actions import (
     SelectionContext,
 )
 from ladini.graphs.agents.market_coach.interpreter.structured_action_contract import (
+    ReferenceType,
+    Status,
     StructuredActionDecision,
     StructuredActionDisposition,
     StructuredActionPromptContext,
     adapt_structured_action_to_canonical,
     build_structured_action_prompt_context,
     resolve_and_validate,
+    resolve_reference_decision,
 )
 from ladini.graphs.agents.market_coach.interpreter.structured_action_prompts import (
     STRUCTURED_ACTION_PROMPT_VERSION,
@@ -107,6 +110,22 @@ def _unknown_result(path: str) -> Dict[str, Any]:
         "interpreter_confidence": 0.0,
         "extracted_entities": {},
         "raw_analysis": {"path": path},
+    }
+
+
+def _clarification_result(resolution: Any, path: str) -> Dict[str, Any]:
+    """Référence NON résolue (ambiguë / introuvable / non affichée) : message ciblé, aucune mutation, pas de menu complet."""
+    return {
+        "interpreted_event": "UNKNOWN",
+        "detected_intent": "UNKNOWN",
+        "interpreter_confidence": 0.0,
+        "extracted_entities": {},
+        "raw_analysis": {
+            "path": path,
+            "selection_clarification": resolution.message or "Je n'ai pas bien identifié l'option — peux-tu préciser ?",
+            "selection_resolution": resolution.status.value,
+            "interaction_mode": "CLARIFICATION",
+        },
     }
 
 
@@ -269,7 +288,53 @@ def _outcome_for_decision(
             "structured_action_micro_low_confidence"
         )
 
+    reference_mode = False
+    if decision.reference is not None and decision.reference.reference_type == ReferenceType.PAGINATION:
+        logger.info("interaction_mode=NATURAL_REFERENCE | pagination=SHOW_MORE")
+        return StructuredActionOutcome.RESULT, {
+            "interpreted_event": "SELECTION",
+            "detected_intent": "UNKNOWN",
+            "interpreter_confidence": 0.9,
+            "extracted_entities": {"menu_action": "SHOW_MORE"},
+            "raw_analysis": {"path": "structured_action_micro_pagination", "interaction_mode": "NATURAL_REFERENCE"},
+        }
+    if decision.reference is not None and decision.reference.reference_type in (
+        ReferenceType.REFINEMENT,
+        ReferenceType.NONE_OF_THESE,
+    ):
+        action_name = "REFINE" if decision.reference.reference_type == ReferenceType.REFINEMENT else "NONE_OF_THESE"
+        logger.info("interaction_mode=REFINEMENT | menu_action=%s", action_name)
+        return StructuredActionOutcome.RESULT, {
+            "interpreted_event": "SELECTION",
+            "detected_intent": "UNKNOWN",
+            "interpreter_confidence": 0.9,
+            "extracted_entities": {
+                "menu_action": action_name,
+                "refinement": decision.reference.model_dump(mode="json", exclude_none=True),
+            },
+            "raw_analysis": {"path": "structured_action_micro_refinement", "interaction_mode": "REFINEMENT"},
+        }
+    if decision.reference is not None:
+        resolution = resolve_reference_decision(decision, domain_context)
+        if resolution is not None and resolution.status != Status.EXACT:
+            logger.info(
+                "interaction_mode=CLARIFICATION | status=%s | reason=%s | candidates=%s",
+                resolution.status.value, resolution.reason, list(resolution.indices),
+            )
+            return StructuredActionOutcome.RESULT, _clarification_result(resolution, "structured_action_micro_reference")
+        if resolution is not None:
+            reference_mode = True
+            decision = decision.model_copy(update={"reference": None, "selection_index": resolution.index})
+            logger.info(
+                "interaction_mode=NATURAL_REFERENCE | type=%s | resolved_index=%s",
+                getattr(decision, "action", None), resolution.index,
+            )
     raw = resolve_and_validate(decision, prompt_context, domain_context)
+    if raw is not None and reference_mode and (decision.quantity is not None or decision.package_count is not None):
+        # « je prends Gilbert, 10 litres » : le nombre dit accompagne la désignation — seulement s'il est réellement dans le texte.
+        said = decision.quantity if decision.quantity is not None else decision.package_count
+        if text is not None and text_states_a_quantity(text, _proposed_number(said)):
+            raw = {**raw, "quantity": decision.quantity, "unit": decision.unit, "package_count": decision.package_count}
     if raw is None:
         logger.warning(
             "[Interpreter STRUCTURED_ACTION] décision ACTION irrésolvable "

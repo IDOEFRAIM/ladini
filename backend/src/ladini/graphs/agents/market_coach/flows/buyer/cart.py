@@ -323,6 +323,24 @@ async def _execute_selection_action(
                 vendor_ctx,
             )
 
+        # « je prends Gilbert, 10 litres » : la désignation ET la quantité dites dans la même phrase — on enchaîne sur l'ajout
+        # (le domaine, `cart_management`, valide unité/stock/minimum) au lieu de redemander ce que l'utilisateur vient de dire.
+        said_quantity = raw.get("quantity")
+        if isinstance(said_quantity, (int, float)) and said_quantity > 0:
+            payload["quantity"] = said_quantity
+            if raw.get("unit"):
+                payload["unit"] = raw.get("unit")
+            logger.info("interaction_mode=NATURAL_REFERENCE | multi_slot=producer+quantity | quantity=%s", said_quantity)
+            return await cart_management(
+                {
+                    **state,
+                    "current_goal": "BUYER_ADD_TO_CART",
+                    "vendor_selection_context": vendor_ctx,
+                    "transaction_payload": payload,
+                },
+                mc_runtime,
+            )
+
         vendor_label = chosen.get("vendor_name") or "ce producteur"
         unit_hint = chosen.get("unit") or "KG"
         price_hint = chosen.get("price")
@@ -410,6 +428,21 @@ async def _execute_selection_action(
         switch_ack = ""
         if context.active_tier_id and context.active_tier_id != action.pricing_tier_id:
             switch_ack = "🔁 Changement de conditionnement pris en compte : "
+        # « je prends le sachet de 500 ml, j'en veux 5 » : conditionnement ET nombre de paquets dits ensemble -> on ajoute
+        # directement (le domaine valide stock/minimum) au lieu de poser deux questions de plus.
+        said_count = raw.get("package_count")
+        if isinstance(said_count, (int, float)) and said_count > 0 and isinstance(chosen_vendor, dict):
+            logger.info("interaction_mode=NATURAL_REFERENCE | multi_slot=tier+package_count | count=%s", said_count)
+            return await cart_service.add_to_cart_with_ref(
+                phone,
+                str(product_name),
+                said_count,
+                chosen_vendor,
+                cart,
+                {**state, "tier_selection_context": tier_selection_context, "vendor_selection_context": vendor_ctx},
+                buyer_unit=None,
+                tier_id=action.pricing_tier_id,
+            )
         return {
             "status": "WAITING_INPUT",
             **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
