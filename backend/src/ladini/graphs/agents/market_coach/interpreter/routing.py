@@ -134,6 +134,9 @@ from ladini.graphs.agents.market_coach.utils import (
 
 logger = logging.getLogger("Ladini.Market.InterpreterRouting")
 
+#: Raccourci numérique FERMÉ : un nombre nu, éventuellement précédé d'un mot de menu (« option », « choix », « n° ») ou suivi d'un point.
+_CLOSED_INDEX = _re.compile(r"(?:(?:option|choix|num[ée]ro|n°|n)\s*)?(\d{1,2})\s*[.)]?")
+
 # =====================================================================
 # CONFIRMATION KEYWORDS — filet déterministe (voir _interpret_fast_path)
 # Vocabulaire fermé, EXACT MATCH uniquement sur texte normalisé — reprend
@@ -1630,7 +1633,12 @@ def _interpret_fast_path(
     # désormais `suspended_task` dans son contexte (interpreter/prompts.py) et
     # est instruit à reconnaître une intention de reprise en langage libre.
 
-    # Fast-path 1 : Choix d'un index numérique pur sur un composant Menu / Liste AG-UI
+    # Fast-path 1 : Choix d'un index numérique pur sur un composant Menu / Liste AG-UI.
+    # RACCOURCI FERMÉ (jamais un contrat) : « 4 », « 04 », « 4. », « option 4 », « choix 4 », « n°4 » — un nombre accompagné d'une
+    # unité/d'un mot de quantité (« 4 litres », « 500 francs ») n'entre JAMAIS ici (valeur métier, pas une option).
+    _closed = _CLOSED_INDEX.fullmatch(clean)
+    if _closed:
+        clean = _closed.group(1)
     if clean.isdigit():
         candidates = state.get("expected_candidates") or []
         has_active_mapping = bool(state.get("available_mapping")) or (
@@ -1651,7 +1659,7 @@ def _interpret_fast_path(
                 "detected_intent": "UNKNOWN",
                 "interpreter_confidence": 1.0,
                 "extracted_entities": {"selection_index": int(clean)},
-                "raw_analysis": {"path": "fast_path_selection_index"},
+                "raw_analysis": {"path": "fast_path_selection_index", "interaction_mode": "NUMERIC_FAST_PATH"},
             }
 
     # Ex-Fast-path 1bis (sélection de palier en texte libre, regex

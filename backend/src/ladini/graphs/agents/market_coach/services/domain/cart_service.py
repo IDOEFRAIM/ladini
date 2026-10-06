@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from ladini.core.settings import settings
 from ladini.domain.order_policy import (
     validate_minimum_order_quantity,
 )
@@ -224,6 +225,10 @@ class CartDomainService:
         extra_context: Optional[Dict[str, Any]] = None,
         post_hint: Optional[str] = None,
         phone: Optional[str] = None,
+        menu_id: Optional[str] = None,
+        already_stamped: bool = False,
+        shown_so_far: int = 0,
+        shortlist_size: Optional[int] = None,
     ) -> Tuple[Dict[str, Any], MenuRequest]:
         header = f"🔍 *Producteurs disponibles pour « {product_name} » :*"
         item_blocks: List[str] = []
@@ -236,10 +241,19 @@ class CartDomainService:
         # au moment de l'affichage. Toute réponse « 3 » / « photos 3 » se résout
         # contre CE snapshot — jamais contre une recherche refaite ni contre le
         # seul producteur (un producteur peut avoir plusieurs offres).
-        menu_id = uuid.uuid4().hex[:12]
-        vendors = stamp_offer_identity(vendors)
+        menu_id = menu_id or uuid.uuid4().hex[:12]
+        vendors = list(vendors) if already_stamped else stamp_offer_identity(vendors)
 
-        for i, v in enumerate(vendors, start=1):
+        # SHORTLIST : seules les offres AFFICHÉES sont sélectionnables ; les suivantes sont gardées à part (`vendors_more`)
+        # et ne le deviennent qu'une fois montrées — aucune référence (numéro ou naturelle) ne vise une option jamais vue.
+        shortlist = int(shortlist_size if shortlist_size is not None else (getattr(settings, "BUYER_SHORTLIST_SIZE", 0) or 0))
+        if shortlist > 0 and len(vendors) > shortlist:
+            vendors, more_vendors = vendors[:shortlist], vendors[shortlist:]
+        else:
+            more_vendors = []
+        # Mode « montre les autres » : seules les NOUVELLES offres sont rédigées (pas de re-diffusion de ce qui a été vu).
+        for v in vendors[shown_so_far:]:
+            i = int(v["display_index"])
             source_tag = ""
             if v.get("source_type") == "PROCUREMENT":
                 source_tag = " 📋 Appel d'offres"
@@ -272,6 +286,10 @@ class CartDomainService:
                 "images": v.get("images") or [],
             }
 
+        if more_vendors:
+            n_more = len(more_vendors)
+            plural = "s" if n_more > 1 else ""
+            footer_blocks.append(f"_J'ai aussi {n_more} autre{plural} offre{plural} — dis « montre les autres »._")
         footer_blocks.append(render_selection_prompt(noun="producteur"))
         # Même mécanisme que le catalogue de recherche brut
         # (nodes/rendering/success.py) — voir services/search_results_cache.py.
@@ -310,6 +328,7 @@ class CartDomainService:
         vendor_context = {
             "product": product_name,
             "vendors": vendors,
+            "vendors_more": more_vendors,
             "menu_id": menu_id,
             "available_mapping_kind": "product_vendor",
         }
