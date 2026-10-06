@@ -362,6 +362,10 @@ class Settings(BaseSettings):
     # (`domain/profile_requirements.py`). False = ancien parcours (formulaire d'abord).
     PROGRESSIVE_ONBOARDING_ENABLED: bool = True
 
+    # Nombre d'offres producteur AFFICHÉES d'un coup (shortlist WhatsApp). Les suivantes restent à part et ne deviennent
+    # sélectionnables qu'une fois montrées (« montre les autres »). 0 = tout afficher (ancien comportement).
+    BUYER_SHORTLIST_SIZE: int = 5
+
     # ContentSid du template WhatsApp APPROUVÉ pour les messages PROACTIFS (relances commerciales, confirmations de
     # commande, notifications Outbox) : un message libre n'est livré que dans les 24 h suivant le dernier message de
     # l'utilisateur, un template approuvé l'est TOUJOURS. Corps du template : « Bonjour: / {{1}} / Merci pour votre
