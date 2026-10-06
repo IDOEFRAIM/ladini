@@ -262,7 +262,7 @@ def test_skip_emits_occurrence_skipped_once_and_replay_emits_nothing(market):
     dsn, _g, user, profile = market
     result = _create(market)
     need_id = result["recurring_need_id"]
-    target = FIXED_TODAY + timedelta(days=2)
+    target = FIXED_TODAY + timedelta(days=5)  # les occurrences démarrent à aujourd'hui + 4 (délai minimal par défaut)
 
     async def skip(session):
         return await observed_update(

@@ -206,7 +206,7 @@ def test_select_five_opens_the_boeuf_detail_with_the_next_delivery_and_a_search_
         assert t.llm_calls == 0 and "get_orders" not in str(t.mcp_tools())
         assert r.startswith("📦 Boeufs") or "📦 Boeufs" in r
         assert "Besoin : 2 TETE · chaque semaine" in r and "Statut : 🟢 Actif" in r
-        assert f"Prochaine livraison : {fr(TODAY + timedelta(days=1))}" in r
+        assert f"Prochaine livraison : {fr(TODAY + timedelta(days=4))}" in r  # début = aujourd'hui + délai minimal (4)
         assert "Disponibilité : aucune offre disponible pour le moment" in r
         assert "1. Rechercher maintenant" in r and "2. Retour" in r and "Accepter" not in r
 

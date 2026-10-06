@@ -187,7 +187,7 @@ def test_materializing_the_same_window_twice_creates_no_duplicate(market):
 
     second_call_created, total = _run(market[0], fn)
     assert second_call_created == 0
-    assert total == 7
+    assert total == 4  # 19..22 : aujourd'hui (15) + délai minimal par défaut (4), fenêtre bornée à J+7
 
 
 # ── réapprovisionnement générique des occurrences (Phase 3, mandat MONTHLY §14) ──
@@ -278,7 +278,7 @@ def test_create_recurring_needs_materializes_occurrences_for_every_item(market):
         return occurrence_counts
 
     occurrence_counts = _run(market[0], fn)
-    assert occurrence_counts == [7, 7]
+    assert occurrence_counts == [4, 4]
 
 
 def test_create_recurring_needs_rolls_back_everything_if_one_item_fails(market):
@@ -326,7 +326,7 @@ def test_permanent_quantity_update_changes_future_open_occurrences(market):
         return upd, occs
 
     upd, occs = _run(market[0], fn)
-    assert upd["occurrences_updated"] == 7
+    assert upd["occurrences_updated"] == 4
     assert all(o.requested_quantity == 25 for o in occs)
 
 
@@ -534,4 +534,4 @@ def test_list_my_recurring_needs_uses_a_constant_number_of_queries(market):
 
     assert len(result_many["items"]) == 5
     assert len(sql_many) == len(sql_one), f"N+1 : {len(sql_one)} requêtes pour 1 besoin, {len(sql_many)} pour 5"
-    assert all(item["next_occurrence_date"] == "2026-09-16" for item in result_many["items"])
+    assert all(item["next_occurrence_date"] == "2026-09-19" for item in result_many["items"])

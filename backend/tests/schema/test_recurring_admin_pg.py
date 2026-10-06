@@ -33,6 +33,23 @@ def _api_today(monkeypatch):
     monkeypatch.setattr(api, "_today", lambda: FIXED_TODAY)
 
 
+@pytest.fixture(autouse=True)
+def _clean_platform_settings(pg_dsn):
+    """La base de test est PARTAGÉE par toute la session : un réglage écrit ici ne doit jamais fuiter vers un autre test
+    (ni vers les suites qui supposent le délai par défaut)."""
+
+    def wipe():
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            cur.execute("delete from governance.platform_settings")
+            cur.execute("delete from intelligence.audit_logs where action = 'PLATFORM_SETTING_CHANGED'")
+        conn.close()
+
+    wipe()
+    yield
+    wipe()
+
+
 @pytest.fixture
 def admin(pg_dsn):
     conn = psycopg2.connect(pg_dsn)
