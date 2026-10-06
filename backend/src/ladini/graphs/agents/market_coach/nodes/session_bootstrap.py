@@ -117,7 +117,9 @@ async def session_bootstrap(
     )
 
     if state.get("user_context_loaded") and phone:
-        updates.setdefault("is_onboarding", False)
+        # Collecte juste-à-temps en cours (`profile_gate`) : le profil EST chargé, mais on reste en « mode gate » pour
+        # recueillir la réponse — jamais remis à False ici.
+        updates.setdefault("is_onboarding", bool(state.get("profile_gate")))
         updates.setdefault("onboarding_step", "COMPLETED")
         updates.setdefault("onboarding_internal_step", "__NONE__")
         logger.info("[SessionBootstrap] Profil déjà chargé — onboarding désactivé")

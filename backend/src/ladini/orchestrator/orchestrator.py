@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from ladini.core.conversation_lock import conversation_turn_lock
 from ladini.core.idempotency import get_cached as _get_role_hint
 from ladini.core.idempotency import release as _release_role_hint
+from ladini.core.settings import settings
 from ladini.graphs.agents.market_coach.core import turn_trace
 from ladini.graphs.agents.market_coach.utils import build_runtime, ensure_dict
 from ladini.graphs.factory import GraphFactory
@@ -500,12 +501,19 @@ class Orchestrator:
                             "user_name": prof.get("name") or "N/A",
                             "zone_name": (prof.get("zone") or {}).get("name"),
                             "zone_id": (prof.get("zone") or {}).get("id"),
+                            # Faits de profil de l'onboarding PROGRESSIF (`domain/profile_requirements.py`).
+                            "declared_location": prof.get("declared_location"),
+                            "user_permissions": dict(prof.get("permissions") or {}) or None,
+                            "identity_verified": bool((prof.get("status") or {}).get("identity_verified")),
+                            "producer_status": (prof.get("status") or {}).get("producer"),
                         }
                     )
                     user_uuid = prof.get("id")
                     if user_uuid:
                         inputs["user_id"] = str(user_uuid)
-                elif profile_status == "NEW_USER":
+                elif profile_status == "NEW_USER" and not settings.PROGRESSIVE_ONBOARDING_ENABLED:
+                    # Ancien parcours (formulaire d'abord). En onboarding PROGRESSIF, `session_bootstrap` crée le CONTACT
+                    # et la conversation démarre sans inscription préalable.
                     inputs.update(
                         {
                             "user_context_loaded": False,

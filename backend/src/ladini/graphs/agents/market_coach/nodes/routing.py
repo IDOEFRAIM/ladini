@@ -168,6 +168,17 @@ def _route_after_cognitive_guard(state: MarketAgentState) -> str:
     return destination
 
 
+def _route_after_onboarding(state: MarketAgentState) -> str:
+    """Après `onboarding_node` : reprise de l'action (profil enfin complet), relâche (l'utilisateur change de sujet) ou
+    réponse normale (une question de plus, ou l'onboarding classique). Lecture d'UN champ, aucune reclassification."""
+    outcome = str(state.get("profile_gate_outcome") or "").upper()
+    if outcome == "RESUME":
+        return "to_resolver"
+    if outcome == "RELEASE":
+        return "to_interpreter"
+    return "to_strategy"
+
+
 def _route_after_resolver(state: MarketAgentState) -> str:
     """Redirige si l'état nécessite une interaction ou s'il est prêt pour confirmation."""
     # NB : le moteur formulaire DRY (form_node) a été retiré — plus aucun

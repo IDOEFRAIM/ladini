@@ -220,6 +220,15 @@ class DomainRouter:
         selon le DOMAINE DU GOAL COURANT (pas un rôle de session figé — voir
         `_goal_domain`), et encapsule le résultat dans un ``DomainResult``.
         """
+        # Onboarding PROGRESSIF : l'information de profil manquante pour CETTE action est demandée ICI, juste avant
+        # le flow (point unique pour acheteur et producteur) — jamais au premier contact.
+        from ladini.graphs.agents.market_coach.core.profile_gate import (
+            apply_profile_gate,
+        )
+
+        gate_patch = await apply_profile_gate(state, mc_runtime)
+        if gate_patch is not None and gate_patch.get("profile_gate"):
+            return _wrap_raw_result(gate_patch)
         if _goal_domain(state) == "BUYER":
             return await self._resolve_buyer(state, mc_runtime)
         return await self._resolve_producer(state, mc_runtime)

@@ -1245,6 +1245,8 @@ async def _llm_extract_onboarding_all(
         "confirm": raw_confirm,
         "is_question": bool(payload.get("is_question")),
         "reply": _norm(payload.get("reply")),
+        # Le LLM a RÉELLEMENT répondu (les appelants qui veulent un repli déterministe le distinguent d'un échec).
+        "_ok": True,
     }
 
 

@@ -34,6 +34,15 @@ def _pick(key: str, *sources: Dict[str, Any]) -> Any:
 async def onboarding_node(
     state: Dict[str, Any], mc_runtime: MarketRuntime
 ) -> Dict[str, Any]:
+    # Collecte JUSTE-À-TEMPS (onboarding progressif) : une action a besoin d'un champ manquant — voir
+    # `core/profile_gate.py`. L'intention et le payload de l'action ne sont JAMAIS touchés ici.
+    if state.get("profile_gate"):
+        from ladini.graphs.agents.market_coach.flows.common.profile_gate_turn import (
+            profile_gate_turn,
+        )
+
+        return await profile_gate_turn(state, mc_runtime)
+
     in_onboarding = bool(state.get("is_onboarding"))
     existing_strategy = str(state.get("response_strategy") or "").upper()
     if not in_onboarding and existing_strategy != "ONBOARDING":

@@ -59,6 +59,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "list_market_matches": PermissionScope.DB_READ_ONLY,
     "db_status": PermissionScope.DB_READ_ONLY,
     "identify_or_create_user": PermissionScope.DB_DATA_WRITE,
+    "complete_user_profile": PermissionScope.DB_DATA_WRITE,
     "create_product": PermissionScope.DB_DATA_WRITE,
     "add_product_photo": PermissionScope.DB_DATA_WRITE,
     "add_bid_photo": PermissionScope.DB_DATA_WRITE,
