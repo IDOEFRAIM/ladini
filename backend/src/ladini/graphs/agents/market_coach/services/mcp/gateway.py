@@ -70,6 +70,10 @@ class ProfileGateway(_BaseGateway):
     async def identify_or_create_user(self, phone: str) -> Dict[str, Any]:
         return await self._call("identify_or_create_user", phone=phone.strip())
 
+    async def complete_user_profile(self, phone: str, **fields: Any) -> Dict[str, Any]:
+        """Enrichit le profil (nom, région, capacité `SELL`/`BUY`) — voir `AuthMixin.complete_user_profile`."""
+        return await self._call("complete_user_profile", phone=phone.strip(), **fields)
+
 
 # ── Farm ───────────────────────────────────────────────────────────
 

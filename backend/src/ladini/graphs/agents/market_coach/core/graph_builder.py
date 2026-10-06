@@ -136,6 +136,7 @@ from ladini.graphs.agents.market_coach.nodes.routing import (
     _route_after_cognitive_guard,
     _route_after_confirmation,
     _route_after_mcp_executor,
+    _route_after_onboarding,
     _route_after_resolver,
     _route_after_security,
     _route_after_session_bootstrap,
@@ -580,7 +581,18 @@ def build_graph(
     workflow.add_edge("state_cleaner", "final_response")
     workflow.add_edge("final_response", "post_response_cleanup")
     workflow.add_edge("post_response_cleanup", END)
-    workflow.add_edge("onboarding_node", "response_strategy")
+    # Onboarding classique OU collecte juste-à-temps : `_route_after_onboarding` choisit entre répondre (une question de
+    # plus), REPRENDRE l'action en attente (profil complet -> `context_resolver`) ou RELÂCHER l'utilisateur vers
+    # l'interpréteur (il change de sujet). Aucun nouveau nœud : trois cibles déjà existantes.
+    workflow.add_conditional_edges(
+        "onboarding_node",
+        _route_after_onboarding,
+        {
+            "to_resolver": "context_resolver",
+            "to_interpreter": "input_interpreter",
+            "to_strategy": "response_strategy",
+        },
+    )
 
     logger.info("Market graph compiled successfully for role=%s", role_up)
     return workflow.compile(checkpointer=checkpointer)

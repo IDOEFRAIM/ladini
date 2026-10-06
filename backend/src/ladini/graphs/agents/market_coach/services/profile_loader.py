@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from ladini.core.settings import settings
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     FarmGateway,
     ProfileGateway,
@@ -63,6 +64,14 @@ async def load_user_profile(phone: str, mc_runtime: Any) -> Dict[str, Any]:
         )
         await asyncio.sleep(0.4)
 
+    # Onboarding PROGRESSIF : un NOUVEAU numéro devient un simple CONTACT (aucun nom/rôle/région inventés) et la
+    # conversation démarre tout de suite ; le profil se complète quand une ACTION l'exige (`core/profile_gate.py`).
+    if status == "NEW_USER" and settings.PROGRESSIVE_ONBOARDING_ENABLED:
+        created = await _create_contact(profile_gw, str(phone))
+        if created is not None:
+            res_dict, status, profile = created, "SUCCESS", created.get("data")
+            is_real_profile = isinstance(profile, dict) and bool(profile.get("id"))
+
     updates: Dict[str, Any] = {}
 
     if is_real_profile:
@@ -76,6 +85,12 @@ async def load_user_profile(phone: str, mc_runtime: Any) -> Dict[str, Any]:
         updates["onboarding_step"] = None
         updates["onboarding_internal_step"] = None
         updates["user_id"] = str(profile.get("id"))
+        # Faits de profil (progressive onboarding) — jamais déduits par le modèle.
+        updates["declared_location"] = profile.get("declared_location")
+        updates["user_permissions"] = dict(profile.get("permissions") or {}) or None
+        status_block = profile.get("status") or {}
+        updates["identity_verified"] = bool(status_block.get("identity_verified"))
+        updates["producer_status"] = status_block.get("producer")
 
     elif status == "NEW_USER":
         # Aucun compte : parcours d'inscription.
@@ -97,6 +112,22 @@ async def load_user_profile(phone: str, mc_runtime: Any) -> Dict[str, Any]:
         updates["_profile_unavailable"] = True
 
     return updates
+
+
+async def _create_contact(profile_gw: Any, phone: str) -> Optional[Dict[str, Any]]:
+    """Crée le CONTACT minimal (téléphone, rôle neutre « USER », aucun nom) puis relit le profil. `None` si échec :
+    l'appelant retombe alors sur l'ancien parcours plutôt que de perdre l'utilisateur."""
+    try:
+        await profile_gw.identify_or_create_user(phone)
+        raw = await profile_gw.get_user_by_phone(phone)
+    except Exception as exc:  # noqa: BLE001 - jamais bloquant : repli sur l'onboarding classique
+        logger.warning("[ProfileLoader] Création du contact impossible (%s) — repli onboarding classique.", exc)
+        return None
+    res = raw if isinstance(raw, dict) else {}
+    data = res.get("data")
+    if str(res.get("status", "")).upper() == "SUCCESS" and isinstance(data, dict) and data.get("id"):
+        return res
+    return None
 
 
 async def preload_farms(phone: str, mc_runtime: Any) -> List[Dict[str, Any]]:

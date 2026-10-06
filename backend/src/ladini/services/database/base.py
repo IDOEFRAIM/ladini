@@ -413,6 +413,8 @@ class BaseMixin:
             },
             "longitude": user_obj.longitude,
             "latitude": user_obj.latitude,
+            # Région déclarée (texte canonique) : compte comme « région connue » même sans ligne `governance.zones`.
+            "declared_location": getattr(user_obj, "declared_location", None),
             "profile_ids": {
                 "producer": str(producer_obj.id) if producer_obj else None,
                 "buyer": str(buyer_obj.id) if buyer_obj else None,

@@ -69,6 +69,7 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         # ── Identité / profil ────────────────────────────────────────────
         "identify_or_create_user",
         "create_user_profile",
+        "complete_user_profile",
         "get_user_by_phone",
         "get_account_status",
         "get_last_interactive_outbound",

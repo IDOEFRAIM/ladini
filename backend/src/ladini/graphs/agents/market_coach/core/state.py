@@ -161,6 +161,16 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     user_context_loaded: Annotated[bool, replace_value]
 
+    # Onboarding PROGRESSIF (V2) : faits de profil lus par `load_user_profile` (voir `domain/profile_requirements.py`).
+    declared_location: Annotated[Optional[str], replace_value]
+    user_permissions: Annotated[Optional[Dict[str, Any]], replace_value]
+    identity_verified: Annotated[bool, replace_value]
+    producer_status: Annotated[Optional[str], replace_value]
+    # Collecte juste-à-temps en cours : {goal, missing:[...], capability} — l'intention (goal + payload) reste intacte.
+    profile_gate: Annotated[Optional[Dict[str, Any]], replace_value]
+    # Issue du tour de collecte : RESUME (reprendre l'action) | RELEASE (l'utilisateur change de sujet) | None.
+    profile_gate_outcome: Annotated[Optional[str], replace_value]
+
     user_id: Annotated[Optional[str], replace_value]
 
     is_onboarding: Annotated[bool, replace_value]

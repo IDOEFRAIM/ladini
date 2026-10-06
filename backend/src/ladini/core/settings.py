@@ -357,6 +357,11 @@ class Settings(BaseSettings):
     # (voir audit UX interactive 2026-08-27, api/tasks.py::_send_via_twilio).
     TWILIO_LIST_PICKER_CONTENT_SID: str = ""
 
+    # Onboarding PROGRESSIF (V2) : un nouveau contact n'est plus forcé de remplir un profil avant de parler —
+    # son intention est comprise d'abord, et on ne demande nom/région que si l'ACTION l'exige
+    # (`domain/profile_requirements.py`). False = ancien parcours (formulaire d'abord).
+    PROGRESSIVE_ONBOARDING_ENABLED: bool = True
+
     # ContentSid du template WhatsApp APPROUVÉ pour les messages PROACTIFS (relances commerciales, confirmations de
     # commande, notifications Outbox) : un message libre n'est livré que dans les 24 h suivant le dernier message de
     # l'utilisateur, un template approuvé l'est TOUJOURS. Corps du template : « Bonjour: / {{1}} / Merci pour votre

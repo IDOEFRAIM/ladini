@@ -6,7 +6,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ladini.core.geofencing import OUT_OF_COUNTRY_MESSAGE, is_within_burkina_faso
-from ladini.domain.identity.models import Producer, User
+from ladini.domain.identity.models import BuyerProfile, Producer, User
 
 from .common import clean_text, normalize_phone
 
@@ -61,7 +61,8 @@ class AuthMixin:
             new_user = User(
                 id=user_uuid,
                 phone=clean_phone,
-                name=clean_text(name, "name") if name else "Utilisateur",
+                # Contact (onboarding progressif) : AUCUN nom inventé — « Utilisateur » n'est pas un nom dit.
+                name=clean_text(name, "name") if name else None,
                 role=initial_role.upper(),
                 zone_id=uuid.UUID(zone_id) if zone_id else None,
                 whatsapp_enabled=True,
@@ -262,6 +263,59 @@ class AuthMixin:
                 "status": "error",
                 "message": "Erreur de traitement des préférences de routage.",
             }
+
+    async def complete_user_profile(
+        self,
+        phone: str,
+        name: Optional[str] = None,
+        zone_id: Optional[str] = None,
+        declared_location: Optional[str] = None,
+        coverage: Optional[str] = None,
+        capability: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Enrichit PROGRESSIVEMENT le profil d'un utilisateur existant (jamais un second compte).
+
+        - `name` : nom d'affichage (personne OU établissement) ; `declared_location`/`zone_id`/`coverage_status` : région.
+        - `capability` : `"SELL"` ajoute (idempotent) la ligne `Producer` en statut `PENDING` — JAMAIS un statut
+          vérifié/approuvé : la vérification producteur reste l'affaire des admins ; `"BUY"` ajoute `BuyerProfile`.
+        Seuls les champs FOURNIS sont écrits ; les capacités existantes sont conservées (un acheteur peut devenir
+        producteur sans perdre son profil acheteur).
+        """
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Database session is missing on the current context.")
+        try:
+            clean_phone = normalize_phone(phone)
+        except ValueError:  # `normalize_phone` LÈVE sur un numéro invalide : réponse d'erreur propre, jamais un crash
+            clean_phone = ""
+        if not clean_phone:
+            return {"status": "error", "message": "Numéro de téléphone invalide."}
+
+        user = (await current_session.execute(select(User).where(User.phone == clean_phone))).scalar_one_or_none()
+        if user is None:
+            return {"status": "error", "message": "Utilisateur introuvable."}
+
+        if name is not None and str(name).strip():
+            user.name = clean_text(name, "name")
+        if zone_id:
+            user.zone_id = uuid.UUID(str(zone_id))
+        if declared_location is not None and str(declared_location).strip():
+            user.declared_location = str(declared_location).strip()
+        if coverage:
+            user.coverage_status = str(coverage)
+
+        cap = str(capability or "").strip().upper()
+        if cap == "SELL":
+            exists = (await current_session.execute(select(Producer.id).where(Producer.user_id == user.id))).first()
+            if exists is None:
+                current_session.add(Producer(id=uuid.uuid4(), user_id=user.id, status="PENDING", zone_id=user.zone_id))
+        elif cap == "BUY":
+            exists = (await current_session.execute(select(BuyerProfile.id).where(BuyerProfile.user_id == user.id))).first()
+            if exists is None:
+                current_session.add(BuyerProfile(user_id=user.id))
+
+        await current_session.flush()
+        return {"status": "success", "data": {"id": str(user.id), "phone": clean_phone, "capability": cap or None}}
 
     async def mark_onboarding_completed(self, user_id: str) -> Dict[str, str]:
         """Marque l'utilisateur comme ayant terminé l'onboarding initial."""
