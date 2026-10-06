@@ -37,7 +37,7 @@ from ladini.graphs.agents.market_coach.interpreter.structured_action_contract im
 # (SELECT_PRICING_TIER), jamais une déviation. v2 ajoute une clarification
 # explicite (achat identique ≠ nouvelle demande) + un exemple contrastif
 # dédié, sans transformer la règle en liste de synonymes.
-STRUCTURED_ACTION_PROMPT_VERSION = "structured_action_v3"
+STRUCTURED_ACTION_PROMPT_VERSION = "structured_action_v4"
 
 _SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -63,6 +63,9 @@ _DISPOSITION_RULES = (
     "clairement une nouvelle demande métier.\n"
     "- DEVIATION : le message exprime clairement une AUTRE demande métier, "
     "sans rapport avec ce tunnel d'achat.\n"
+    "- QUESTION : l'utilisateur POSE UNE QUESTION sur ce qui est affiché ou choisi (« il livre ? », « c'est combien au total ? », "
+    "« il reste combien ? », « lequel est moins cher ? », « c'est certifié ? ») — ce n'est PAS un choix : ne désigne rien. Tu "
+    "COMPRENDS la question, tu ne la RÉPONDS jamais (renseigne \"question\").\n"
     "- UNKNOWN : impossible de déterminer de façon fiable ce que veut faire "
     "l'utilisateur.\n"
     "\n"
@@ -99,12 +102,18 @@ _SELECTION_RULES = (
     '    {"reference_type": "PREFERENCE", "criterion": "CHEAPEST"|"HIGHEST_AVAILABILITY"|"SUBJECTIVE"} '
     "(« le moins cher », « celui qui a le plus de stock » ; « le plus intéressant » = SUBJECTIVE) — ne calcule JAMAIS toi-même "
     "quel est le moins cher : le système le fait ;\n"
-    '    {"reference_type": "REFINEMENT", "region": "<lieu>", "packaging": "<conditionnement>", "max_price": <nombre>, '
+    '    {"reference_type": "REFINEMENT", "objection": "PRICE|DISTANCE|PACKAGE|OTHER", "region": "<lieu>", "packaging": "<conditionnement>", "max_price": <nombre>, '
     '"criterion": "CHEAPEST"|"HIGHEST_AVAILABILITY"} si l\'utilisateur AJOUTE une contrainte au lieu de choisir '
     "(« je préfère quelqu'un à Ouaga », « pas plus de 600 », « moins cher », « en sachet ») — ne renseigne que ce qui est dit ;\n"
     '    {"reference_type": "NONE_OF_THESE"} si aucune offre ne lui convient (« aucun », « rien ne me convient ») ;\n'
+    '    ATTENTION : « pas Gilbert, Moussa » / « pas lui, prends Moussa » NOMME un remplaçant -> ATTRIBUTE {"producer_name": "Moussa"} '
+    '(jamais OTHER) ; OTHER seulement quand AUCUN remplaçant n\'est nommé ;\n'
+    '    {"reference_type": "OTHER", "producer_name": "<producteur écarté, s\'il est nommé>"} pour « pas celui-là, l\'autre » / « pas '
+    'Gilbert, l\'autre » (sans producteur nommé : laisse producer_name vide — le système demandera lequel) ;\n'
     '    {"reference_type": "PAGINATION"} si l\'utilisateur demande de VOIR LA SUITE de la liste (« montre les autres », « voir plus », '
     "« suite ») : ce n'est pas un choix.\n"
+    "Une OBJECTION (« c'est trop cher », « trop loin », « pas en bidon ») n'est PAS un abandon (REJECT) : c'est un REFINEMENT avec "
+    "\"objection\" (et max_price/region/packaging si dits). REJECT est réservé à « annule », « laisse tomber » sans autre demande.\n"
     '- "selected_value" (texte court) seulement si aucun des moyens ci-dessus ne convient.\n'
     "Un seul des trois par réponse ; n'invente aucun identifiant. Un NOMBRE accompagné d'une unité ou d'un mot de quantité "
     "(« 4 litres », « mets-en 4 », « 500 francs max ») n'est JAMAIS une option : ce n'est pas une désignation. "
@@ -137,6 +146,8 @@ _PACKAGE_COUNT_RULES = (
 
 _QUANTITY_RULES = (
     "Pour ACTION :\n"
+    "- « mets 10 », « jveux 10 litres », « 10 seulement », « j'en veux 10 » donnent la quantité 10 (un verbe d'ajout + un nombre est "
+    "la quantité, jamais une nouvelle demande) ;\n"
     '- utilise "quantity" (nombre) et "unit" si explicitement énoncée — un '
     "chiffre nu ici signifie TOUJOURS la quantité elle-même, jamais un "
     "index de menu ;\n"
@@ -147,10 +158,12 @@ _QUANTITY_RULES = (
 _JSON_CONTRACT = (
     "\n"
     "Réponds strictement avec cet objet JSON, sans aucun autre texte :\n"
-    '{{"disposition": "ACTION|REJECT|DEVIATION|UNKNOWN", "action": '
+    '{{"disposition": "ACTION|REJECT|DEVIATION|QUESTION|UNKNOWN", "action": '
     '"{action_type}|null", "selection_index": <entier ou null>, '
     '"selected_value": "<texte ou null>", "reference": <objet ou null>, "package_count": <nombre ou '
     'null>, "quantity": <nombre ou null>, "unit": "<texte ou null>", '
+    '"question": <null ou {{"topic": "PRICE|STOCK|DELIVERY|CERTIFICATION|LOCATION|TOTAL|DISTANCE|COMPARISON|OTHER", '
+    '"criterion": "CHEAPEST|HIGHEST_AVAILABILITY|null", "names": ["<producteurs nommés>"], "target": <référence ou null>}}>, '
     '"confidence": <0.0 à 1.0>}}'
 )
 
@@ -187,6 +200,16 @@ def build_structured_action_user_prompt(
     else:  # SET_QUANTITY
         type_rules = _QUANTITY_RULES
 
+    if prompt_context.awaiting == "PRICE_CEILING":
+        lines.append(
+            "Question posée juste avant à l'utilisateur : « Tu veux rester sous quel prix ? » — un NOMBRE (avec ou sans « FCFA ») est ce "
+            "plafond : REFINEMENT avec max_price (jamais une option du menu, jamais une quantité)."
+        )
+    if prompt_context.producer_options and action != ActionType.SELECT_PRODUCER:
+        lines.append(
+            "Producteurs (l'utilisateur peut en CHANGER s'il le dit, ex. « pas Gilbert, Moussa » : action SELECT_PRODUCER) :\n"
+            + "\n".join(f"{o.index}. {o.label}" for o in prompt_context.producer_options)
+        )
     lines.append(f'Message utilisateur : "{normalized_text}"')
     lines.append("")
     lines.append(_DISPOSITION_RULES)

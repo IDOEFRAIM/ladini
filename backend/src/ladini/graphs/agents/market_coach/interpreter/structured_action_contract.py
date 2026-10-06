@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, model_validator
 
+from ladini.graphs.agents.market_coach.domain.context_answers import ContextQuestion
 from ladini.graphs.agents.market_coach.domain.selection_actions import (
     ActionType,
     SelectionContext,
@@ -99,6 +100,9 @@ class StructuredActionDisposition(str, Enum):
     REJECT = "REJECT"
     #: Impossible à trancher de façon fiable.
     UNKNOWN = "UNKNOWN"
+    #: QUESTION de contexte (« il livre ? », « c'est combien au total ? », « lequel est moins cher ? ») : le modèle la COMPREND (sujet,
+    #: cible) mais ne la répond jamais — la réponse est calculée par le domaine (`domain/context_answers.py`), sans rien muter.
+    QUESTION = "QUESTION"
 
 
 class StructuredActionDecision(BaseModel):
@@ -118,14 +122,43 @@ class StructuredActionDecision(BaseModel):
     package_count: Optional[float] = None
     quantity: Optional[float] = None
     unit: Optional[str] = None
+    #: QUESTION uniquement.
+    question: Optional[ContextQuestion] = None
     confidence: float = 0.0
 
     model_config = {"frozen": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tolerant_reader(cls, data: Any) -> Any:
+        """Lecteur TOLÉRANT : un vrai modèle remplit souvent `action`/`selection_index` par réflexe alors que la disposition n'est pas ACTION
+        (« DEVIATION » avec l'action attendue). Ce n'est pas une réponse invalide, c'est du bruit : on l'ignore (sinon repair puis UNKNOWN —
+        la phrase n'était plus comprise). Les champs d'action ne sont conservés QUE pour ACTION ; `question` que pour QUESTION."""
+        if not isinstance(data, dict):
+            return data
+        disposition = str(data.get("disposition") or "").upper()
+        cleaned = dict(data)
+        if disposition != "ACTION":
+            for key in ("action", "selection_index", "selected_value", "reference", "package_count", "quantity", "unit"):
+                cleaned[key] = None
+        if disposition != "QUESTION":
+            cleaned["question"] = None
+        # `reference` ET `selection_index`/`selected_value` ensemble (vu avec le vrai modèle : « le quatrième » -> ORDINAL 4 + index 4) :
+        # la référence STRUCTURÉE fait foi (résolue par Python contre le menu), l'index redondant du modèle est ignoré.
+        if disposition == "ACTION" and cleaned.get("reference") is not None:
+            cleaned["selection_index"] = None
+            cleaned["selected_value"] = None
+        return cleaned
 
     @model_validator(mode="after")
     def _check_one_semantic_action(self) -> "StructuredActionDecision":
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError("confidence doit être comprise entre 0.0 et 1.0")
+
+        if self.disposition == StructuredActionDisposition.QUESTION:
+            if self.question is None:
+                raise ValueError("QUESTION requiert question")
+            return self
 
         if self.disposition != StructuredActionDisposition.ACTION:
             if any(
@@ -209,6 +242,10 @@ class StructuredActionPromptContext:
     expected_action: ActionType
     options: List[StructuredActionOption] = field(default_factory=list)
     active_tier_label: Optional[str] = None
+    #: Producteurs que l'utilisateur peut encore choisir (changement d'avis) quand l'étape courante n'est pas le choix du producteur.
+    producer_options: List[StructuredActionOption] = field(default_factory=list)
+    #: Réponse attendue à une question qu'on vient de poser (`PRICE_CEILING`).
+    awaiting: Optional[str] = None
 
 
 def build_structured_action_prompt_context(
@@ -219,6 +256,18 @@ def build_structured_action_prompt_context(
     if context.expected_action is None:
         return None
 
+    prompt = _build_prompt_context(context)
+    if prompt is not None and context.expected_action != ActionType.SELECT_PRODUCER and context.producer_options:
+        prompt = StructuredActionPromptContext(
+            expected_action=prompt.expected_action,
+            options=prompt.options,
+            active_tier_label=prompt.active_tier_label,
+            producer_options=[StructuredActionOption(index=p.display_index, label=p.label) for p in context.producer_options],
+        )
+    return prompt
+
+
+def _build_prompt_context(context: SelectionContext) -> Optional[StructuredActionPromptContext]:
     if context.expected_action == ActionType.SELECT_PRODUCER:
         # `index` == index AFFICHÉ dans le menu (`display_index`), pas la
         # position dans une liste filtrée.
@@ -227,7 +276,7 @@ def build_structured_action_prompt_context(
             for p in context.producer_options
         ]
         return StructuredActionPromptContext(
-            expected_action=context.expected_action, options=options
+            expected_action=context.expected_action, options=options, awaiting=context.awaiting
         )
 
     if context.expected_action == ActionType.SELECT_PRICING_TIER:
@@ -331,7 +380,7 @@ def resolve_decision_to_raw_action(
         return None
 
     if action == ActionType.SELECT_PRODUCER:
-        idx = _resolve_selection(decision, prompt_context.options)
+        idx = _resolve_selection(decision, prompt_context.producer_options or prompt_context.options)
         if idx is None:
             return None
         option = next(

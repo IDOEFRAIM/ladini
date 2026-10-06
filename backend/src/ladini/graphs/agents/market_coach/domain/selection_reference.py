@@ -41,6 +41,9 @@ class ReferenceType(str, Enum):
     ORDINAL = "ORDINAL"
     ATTRIBUTE = "ATTRIBUTE"
     PREFERENCE = "PREFERENCE"
+    #: « pas celui-là, l'autre » / « pas Gilbert, l'autre » : toutes les options SAUF celle(s) rejetée(s) (`producer_name`). Sans option rejetée connue
+    #: ou avec plus de deux candidats restants : clarification — jamais « l'autre » deviné.
+    OTHER = "OTHER"
     #: « montre les autres », « voir plus », « suite » : demande d'AFFICHER la suite de la liste (jamais une sélection).
     PAGINATION = "PAGINATION"
     #: « je préfère quelqu'un à Ouaga », « pas plus de 600 », « moins cher », « en sachet » : une CONTRAINTE de plus sur la
@@ -68,12 +71,25 @@ class SelectionReference(BaseModel):
     #: ATTRIBUTE — jour désigné, en décalage de jours par rapport à AUJOURD'HUI (« hier » = -1, « demain » = 1, « aujourd'hui » = 0) ;
     #: le DOMAINE calcule la date (le modèle ne produit jamais de date) et la compare aux dates AFFICHÉES.
     date_offset_days: Optional[int] = None
+    #: REFINEMENT — l'objection dite (« c'est trop cher » -> PRICE, « trop loin » -> DISTANCE) quand aucun critère précis n'est donné.
+    objection: Optional[Literal["PRICE", "DISTANCE", "PACKAGE", "OTHER"]] = None
     #: REFINEMENT — prix maximum dit (« pas plus de 600 »).
     max_price: Optional[float] = None
     #: PREFERENCE / REFINEMENT (tri : « moins cher », « plus de stock »)
     criterion: Optional[Criterion] = None
 
     model_config = {"frozen": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tolerant_reader(cls, data: Any) -> Any:
+        """Un vrai modèle écrit parfois le CRITÈRE comme type de référence (`{"reference_type": "SUBJECTIVE"}`) : c'est une PREFERENCE.
+        Lecture tolérante plutôt que repair puis UNKNOWN (la phrase n'était plus comprise)."""
+        if isinstance(data, dict):
+            rtype = str(data.get("reference_type") or "").upper()
+            if rtype in {c.value for c in Criterion}:
+                return {**data, "reference_type": "PREFERENCE", "criterion": data.get("criterion") or rtype}
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "SelectionReference":
@@ -83,10 +99,10 @@ class SelectionReference(BaseModel):
         elif self.reference_type == ReferenceType.PREFERENCE:
             if self.criterion is None:
                 raise ValueError("PREFERENCE requiert criterion")
-        elif self.reference_type in (ReferenceType.PAGINATION, ReferenceType.NONE_OF_THESE):
+        elif self.reference_type in (ReferenceType.PAGINATION, ReferenceType.NONE_OF_THESE, ReferenceType.OTHER):
             return self
         elif self.reference_type == ReferenceType.REFINEMENT:
-            if all(v is None for v in (self.region, self.packaging, self.volume, self.max_price, self.criterion, self.producer_name)):
+            if all(v is None for v in (self.region, self.packaging, self.volume, self.max_price, self.criterion, self.producer_name, self.objection)):
                 raise ValueError("REFINEMENT requiert au moins une contrainte")
         else:
             if all(
@@ -264,6 +280,40 @@ def _ordinal(ref: SelectionReference, shown: Sequence[VisibleOption], total: int
     return Resolution(Status.NOT_FOUND, reason="ordinal_out_of_range", message=f"Il n'y a pas d'option {n} dans cette liste.")
 
 
+_ORDINAL_MORPHEME = re.compile(r"^(?:\d+(?:er|e|eme|ème|ieme|ième|nd|nde)|\w*i[eè]me|premi[eè]re?|second[e]?|dernier|derni[eè]re|penultieme|avant)$")
+
+
+def ordinal_is_evidenced(ref: SelectionReference, text: str) -> bool:
+    """Un ORDINAL (« le quatrième », « le dernier ») doit être DIT : un mot ordinal (morphologie française : -ième, premier, dernier…) ou le numéro
+    cité. Le modèle qui renvoie `{ORDINAL, LAST}` pour « celui-là » n'a rien lu de tel — sa référence n'est pas exécutée (aucune cible arbitraire)."""
+    if ref.reference_type != ReferenceType.ORDINAL:
+        return True
+    tokens = _norm(text).split()
+    if any(_ORDINAL_MORPHEME.match(t) for t in tokens):
+        return True
+    if ref.ordinal is not None and any(t == str(ref.ordinal) for t in tokens):
+        return True
+    return False
+
+
+def _other(ref: SelectionReference, shown: Sequence[VisibleOption], today: Optional[date]) -> Resolution:
+    """« l'autre » : exact seulement quand l'option rejetée est NOMMÉE et qu'il ne reste qu'un candidat."""
+    if not ref.producer_name:
+        return Resolution(
+            Status.AMBIGUOUS, tuple(o.index for o in shown), "other_without_rejected_option",
+            message="Quel producteur écartes-tu ? Dis-moi le nom (ou le numéro) de celui que tu ne veux pas, ou celui que tu préfères.",
+        )
+    rejected = [o for o in shown if _name_matches(ref.producer_name, o.name)]
+    remaining = [o for o in shown if o not in rejected]
+    if not rejected:
+        return Resolution(Status.NOT_FOUND, reason="rejected_option_not_found", message="Je ne vois pas ce producteur parmi ceux affichés.")
+    if len(remaining) == 1:
+        return Resolution(Status.EXACT, (remaining[0].index,))
+    if not remaining:
+        return Resolution(Status.NOT_FOUND, reason="no_other_option", message="Il n'y a pas d'autre offre dans cette liste.")
+    return Resolution(Status.AMBIGUOUS, tuple(o.index for o in remaining), "several_others", message=clarification(shown, [o.index for o in remaining]))
+
+
 def _preference(ref: SelectionReference, shown: Sequence[VisibleOption]) -> Resolution:
     crit = ref.criterion
     if crit == Criterion.SUBJECTIVE:
@@ -314,6 +364,8 @@ def resolve_reference(
         return _ordinal(ref, shown, len(ordered) + max(0, hidden_count))
     if ref.reference_type == ReferenceType.PREFERENCE:
         return _preference(ref, shown)
+    if ref.reference_type == ReferenceType.OTHER:
+        return _other(ref, shown, today)
 
     hits = [o for o in shown if _matches(ref, o, today)]
     if len(hits) == 1:
@@ -397,6 +449,7 @@ def options_from_tiers(tiers: Sequence[Mapping[str, Any]]) -> List[VisibleOption
 
 
 __all__ = [
+    "ordinal_is_evidenced",
     "Criterion",
     "ReferenceType",
     "Resolution",
