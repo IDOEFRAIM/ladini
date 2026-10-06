@@ -284,7 +284,10 @@ class AuthMixin:
         current_session = self.session
         if current_session is None:
             raise RuntimeError("Database session is missing on the current context.")
-        clean_phone = normalize_phone(phone)
+        try:
+            clean_phone = normalize_phone(phone)
+        except ValueError:  # `normalize_phone` LÈVE sur un numéro invalide : réponse d'erreur propre, jamais un crash
+            clean_phone = ""
         if not clean_phone:
             return {"status": "error", "message": "Numéro de téléphone invalide."}
 
