@@ -198,7 +198,8 @@ def test_monthly_replenishment_materializes_successive_month_end_occurrences_wit
     Ancre fixe (jamais dérivée de l'occurrence précédente) : 31 janvier -> 28 février -> 31 mars.
     Un second passage à la MÊME date ne doit créer aucun doublon (contrainte unique
     (recurring_need_id, occurrence_date))."""
-    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 1, 31))
+    # Création le 27 janvier : le 31 janvier est exactement `aujourd'hui + délai minimal par défaut (4)` — date valide.
+    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 1, 27))
     result = _run(market[0], lambda session: _create(session, market, recurrence_type="MONTHLY", starts_at="2026-01-31"))
     need_id = uuid.UUID(result["recurring_need_id"])
 
@@ -213,7 +214,7 @@ def test_monthly_replenishment_materializes_successive_month_end_occurrences_wit
     async def replenish(session):
         return await _svc(session, market).replenish_occurrence_windows()
 
-    # Création : fenêtre J->J+7 depuis le 31 janvier -> seule l'occurrence du 31 janvier lui-même.
+    # Création : fenêtre J->J+7 depuis le 27 janvier -> seule l'occurrence du 31 janvier (ancre) y figure.
     assert _run(market[0], occurrence_dates) == [date(2026, 1, 31)]
 
     # 22 février (2026 n'est pas bissextile) : le 28 février entre dans la fenêtre J->J+7.
