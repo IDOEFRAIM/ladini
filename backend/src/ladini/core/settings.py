@@ -357,6 +357,13 @@ class Settings(BaseSettings):
     # (voir audit UX interactive 2026-08-27, api/tasks.py::_send_via_twilio).
     TWILIO_LIST_PICKER_CONTENT_SID: str = ""
 
+    # ContentSid du template WhatsApp APPROUVÉ pour les messages PROACTIFS (relances commerciales, confirmations de
+    # commande, notifications Outbox) : un message libre n'est livré que dans les 24 h suivant le dernier message de
+    # l'utilisateur, un template approuvé l'est TOUJOURS. Corps du template : « Bonjour: / {{1}} / Merci pour votre
+    # confiance. » — `{{1}}` porte le texte du message (aplati : pas de retour à la ligne dans une variable).
+    # Vide = envoi libre (comportement historique). Twilio uniquement (`MESSAGING_PROVIDER=twilio`).
+    TWILIO_PROACTIVE_TEMPLATE_CONTENT_SID: str = ""
+
     # --- WhatsApp Cloud API (Meta directe — provider par défaut) ---
     # Récupérés dans Meta for Developers → votre app → WhatsApp → API Setup.
     WHATSAPP_CLOUD_API_TOKEN: str = ""  # Access token permanent (System User)
