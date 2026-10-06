@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, Optional
 
 from ladini.core.logger import get_logger
+from ladini.domain.profile_requirements import display_name_or_none
 from ladini.graphs.agents.market_coach.core.base import (
     _AUTO_FARM_NOTICE,
     FARM_CRITICAL_GOALS,
@@ -221,8 +222,8 @@ async def ensure_farm_node(
         zone_name = state.get("zone_name") or payload.get("zone_name")
         zone_id = state.get("zone_id") or payload.get("zone_id")
         default_name = payload.get("farm_name") or (
-            f"Ferme de {state['user_name']}"
-            if state.get("user_name")
+            f"Ferme de {display_name_or_none(state.get('user_name'))}"
+            if display_name_or_none(state.get("user_name"))
             else "Ferme principale"
         )
 

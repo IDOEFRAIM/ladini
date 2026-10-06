@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ladini.core.settings import settings
+from ladini.domain.profile_requirements import display_name_or_none
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     FarmGateway,
     ProfileGateway,
@@ -75,11 +76,13 @@ async def load_user_profile(phone: str, mc_runtime: Any) -> Dict[str, Any]:
     updates: Dict[str, Any] = {}
 
     if is_real_profile:
-        updates["user_name"] = profile.get("name") or "Client"
+        updates["user_name"] = display_name_or_none(profile.get("name"))
         zone = profile.get("zone") or {}
         updates["zone_name"] = zone.get("name") if isinstance(zone, dict) else None
         updates["zone_id"] = zone.get("id") if isinstance(zone, dict) else None
-        updates["user_role"] = profile.get("role") or "PRODUCER"
+        # Jamais PRODUCER par défaut : un profil sans rôle est un CONTACT (`USER`), pas un producteur (audit V2.1 — un numéro
+        # neuf apparaissait « producteur » alors qu'aucune ligne Producer n'existe).
+        updates["user_role"] = profile.get("role") or "USER"
         updates["user_context_loaded"] = True
         updates["is_onboarding"] = False
         updates["onboarding_step"] = None

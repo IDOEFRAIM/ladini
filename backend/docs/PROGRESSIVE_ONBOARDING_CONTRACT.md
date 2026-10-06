@@ -82,7 +82,7 @@ profil ancien sans région sera interrogé UNE fois, seulement s'il engage/vend.
 - Un anonyme ne publie pas : SELL exige nom + région **et** la capacité ; il n'obtient aucun droit producteur avant.
 - L'interpréteur (LLM) comprend ; **les faits de profil viennent de la base** (`load_user_profile`/orchestrateur) ; le LLM ne
   décide jamais qu'un utilisateur est vérifié.
-- Journaux structurés sans PII : `profile_gate_triggered` (goal, action, `missing_requirement`, `capability_requested`),
+- Journaux structurés sans PII : `profile_gate_paused` (goal, action, `missing_requirement`, `capability_requested`),
   `profile_gate_completed`, `profile_gate_released`, `region_learned_from_request`, `capability_requested`.
 
 ## 8. Limites assumées
@@ -94,3 +94,49 @@ profil ancien sans région sera interrogé UNE fois, seulement s'il engage/vend.
   créée (le nom d'établissement tient dans `name`).
 - La correction de profil (« non je suis dans le Guiriko ») utilise les mécanismes existants ; non refondue ici.
 - Les KPI « première valeur avant identité complète » restent à brancher sur les journaux ci-dessus.
+
+## 9. Profile Gate Pause/Resume Contract (V2.1)
+
+Le gate est une **barrière PAUSE/REPRISE**. Il n'est jamais un reset, une reconstruction ni un nouvel onboarding.
+
+```
+BUSINESS_ACTIVE ─(profil manquant)─► PAUSED_FOR_PROFILE ─(champ fourni)─► encore un champ ? ─oui─► question suivante
+                                                                                   │ non
+                                                                                   ▼
+                                                                  BUSINESS_RESUMED  (MÊME commande, MÊME tour)
+```
+
+1. **Pause** (`core/profile_gate.py::build_gate`) : photographie de la commande — `current_goal`, `detected_intent`,
+   `interpreted_event`, `interpreter_confidence`, `transaction_payload`, `extracted_entities`, `status` — dans `profile_gate["command"]`
+   (copie profonde, durable). Le panier / `preorder_draft` / `vendor_selection_context` ne sont pas touchés (champs distincts).
+2. **Lecture du slot** (`flows/common/profile_slot.py::read_profile_slot`) : le message suivant est lu comme réponse au slot demandé
+   (contexte du slot + extraction structurée + validation). Le modèle ne renvoie que des **faits** `{kind, value, confidence}` ;
+   `kind ∈ ANSWER | INTERRUPTION | REFUSAL | QUESTION | UNCLEAR`. Jamais une réplique conversationnelle (l'ancien extracteur
+   d'inscription et son discours « créer un compte » ne sont plus appelés). Région : résolveur déterministe des 17 régions d'abord.
+   - `ANSWER` → enregistrement (`complete_user_profile`) puis question suivante ou reprise ;
+   - `INTERRUPTION` (« montre-moi d'abord le prix ») → le gate se relâche, le message repart vers l'interpréteur (B27 inchangé) ;
+   - `REFUSAL`/`QUESTION` → explication courte, la demande reste en attente ; `UNCLEAR` ×3 → relâche (jamais prisonnier).
+3. **Reprise** (`profile_gate_turn.build_resume_patch`) : la commande capturée est restaurée **à l'identique** (objectif verrouillé via
+   `lock_goal`, intention, événement, payload, entités) ; seule la région canonique remplace un repli de zone (« Zone inconnue »).
+   Le message de profil (« Mon nom c'est Zouba ») n'est **jamais** utilisé pour reconstruire la commande.
+4. **Fail-closed** : sans objectif exploitable → message sûr (`SAFE_RESUME_FAILURE`), panier conservé, log `business_resume_failed`.
+   Le gabarit générique de précommande n'annonce plus « pour 0 pour votre demande » (produit/quantité absents → message sûr).
+5. **Idempotence** : un message rejoué après reprise ne recrée pas de précommande (le gate est consommé, `message_sid` unique).
+
+**Noms d'affichage** : primitive unique `domain/profile_requirements.py::is_placeholder_display_name` / `display_name_or_none`
+(`User_2876`, `Utilisateur`, `Guest`, `Contact_123`, `Client`, `Zone inconnue`…) — utilisée par la salutation, le chargeur de profil,
+l'orchestrateur et la sérialisation. Un contact sans nom n'a **pas** de nom affiché (pas de repli technique).
+
+**Sélection naturelle** : « le quatrième m'intéresse » (menu producteurs actif) → micro-prompt STRUCTURED_ACTION → `SELECT_PRODUCER`
+résolu en Python vers l'offre réelle, relayé par `buyer_request_resolver` au panier. « je veux 4 litres » reste une quantité (jamais
+l'option 4) ; « celui de 0.5 l » reste un choix de palier.
+
+**Rôle d'un contact** : `USER` (aucune capacité) — jamais « producteur » par défaut (`profile_loader`) ; `USER` n'est pas un rôle
+métier pour la détection `role_change` de `memory_update` (elle effaçait le payload et le menu à chaque tour).
+
+**Journaux** (sans PII) : `profile_gate_paused`, `profile_gate_requirement`, `profile_gate_field_extracted`,
+`profile_gate_completed`, `profile_gate_released`, `business_resume_started`, `business_resume_failed`, `neutral_greeting_guard`.
+Métrique cible : `business_resume_failed` = 0.
+
+**Accueil** : neutre (`NEUTRAL_WELCOME` : acheter / vendre / approvisionnement régulier) ; une réponse générée qui demande nom/région/
+rôle/compte hors collecte de profil est remplacée par ce texte déterministe (`neutral_greeting_guard`).

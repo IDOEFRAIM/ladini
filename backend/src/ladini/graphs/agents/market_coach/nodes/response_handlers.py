@@ -21,6 +21,7 @@ import logging
 from typing import Any, Awaitable, Callable, Dict
 
 from ladini.core.telemetry import record_state_transition
+from ladini.domain.profile_requirements import display_name_or_none
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
 )
@@ -99,7 +100,8 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
     """
     strategy = str(state.get("response_strategy") or "CLARIFICATION").upper().strip()
     status = str(state.get("status") or "").upper().strip()
-    user_name = state.get("user_name") or ""
+    # Jamais un identifiant technique (`User_2876`) dans une réponse : `display_name_or_none` est la source unique.
+    user_name = display_name_or_none(state.get("user_name")) or ""
 
     # (2026-09-02, mandat §15-17/§35) : `ResponsePlan` matérialise la
     # décision AVANT le rendu — `previous_interaction` capturé ici, avant

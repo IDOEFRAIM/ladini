@@ -295,6 +295,16 @@ async def buyer_request_resolver(
             raw_selection,
         )
 
+        # Sélection NATURELLE (« le quatrième m'intéresse ») : le micro-prompt a déjà résolu l'index humain vers le producteur
+        # RÉEL (`agent_action=SELECT_PRODUCER`, `action_offer_id`/`action_producer_id`) — le panier sait lire cette action.
+        # Sans ce relais, seul un chiffre nu (« 4 ») avançait : la phrase ré-affichait le même menu.
+        _entities = state.get("extracted_entities") or {}
+        if raw_selection is None and str(_entities.get("agent_action") or "").upper().endswith("SELECT_PRODUCER"):
+            next_state = dict(state)
+            next_state["current_goal"] = "BUYER_ADD_TO_CART"
+            logger.info("buyer_request_resolver: structured SELECT_PRODUCER relayed to cart_management")
+            return await cart_management(next_state, mc_runtime)
+
         if raw_selection is not None:
             next_payload = dict(payload)
             next_payload["selection_index"] = raw_selection

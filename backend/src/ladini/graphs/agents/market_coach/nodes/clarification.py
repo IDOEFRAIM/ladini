@@ -1,5 +1,6 @@
 from typing import Any, Dict
 
+from ladini.domain.profile_requirements import display_name_or_none
 from ladini.graphs.agents.market_coach.core.base import get_node_logger
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
@@ -146,7 +147,7 @@ async def clarification_node(
     # (2026-09-08, mandat §10) : plus de défaut PRODUCER — voir
     # graphs/roles.py::normalize_role, même correctif.
     user_role = str(state.get("user_role") or "").upper()
-    user_name = state.get("user_name", "")
+    user_name = display_name_or_none(state.get("user_name")) or ""
     text = state.get("normalized_text") or state.get("user_query") or ""
 
     # --- LOCATION OUTCOME (précédence — 2026-09-02, "un seul propriétaire

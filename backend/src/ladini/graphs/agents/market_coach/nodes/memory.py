@@ -602,9 +602,14 @@ async def memory_update(
     incoming_role = _clean_upper(extracted.get("role"))
     if not incoming_role and not onboarding_active:
         incoming_role = _clean_upper(state.get("user_role"))
-    if incoming_role == "UNKNOWN":
+    # « USER » = CONTACT sans capacité (onboarding progressif) : ce n'est PAS un rôle métier. Un contact qui passe d'un
+    # rôle déclaré à « USER » (ou l'inverse) n'a pas « changé de rôle » : y voir un changement effaçait le payload et le
+    # menu producteur à chaque tour (état métier perdu pendant la collecte de profil).
+    if incoming_role in {"UNKNOWN", "USER"}:
         incoming_role = None
     previous_role = _clean_upper(payload.get("role"))
+    if previous_role == "USER":
+        previous_role = None
     if (
         previous_role
         and incoming_role

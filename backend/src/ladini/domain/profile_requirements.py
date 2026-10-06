@@ -22,6 +22,7 @@ n'est pas un profil vérifié.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Optional, Tuple
@@ -51,15 +52,35 @@ REQUIREMENTS: Mapping[ProfileAction, Tuple[ProfileField, ...]] = {
 }
 
 #: Noms de repli posés par le système (jamais dits par l'utilisateur) : ils ne comptent PAS comme un nom connu.
-PLACEHOLDER_NAMES = frozenset({"", "utilisateur", "client", "n/a", "na", "none", "null", "user", "inconnu", "unknown"})
+PLACEHOLDER_NAMES = frozenset(
+    {"", "utilisateur", "client", "n/a", "na", "none", "null", "user", "inconnu", "unknown", "guest", "zone inconnue"}
+)
+
+
+#: Repli système posé par le BACKEND (jamais dit par l'utilisateur) : `User_2876`, `Contact_12`, `Utilisateur_9`, `Guest`, « Zone
+#: inconnue »… Un identifiant technique ne doit JAMAIS apparaître dans une réponse WhatsApp.
+_PLACEHOLDER_PATTERN = re.compile(r"^(?:user|utilisateur|contact|client|guest|invite|invité)[\s_-]*\d*$", re.IGNORECASE)
+
+
+def is_placeholder_display_name(value: Any) -> bool:
+    """SOURCE UNIQUE : `True` si `value` n'est pas un vrai nom (vide, repli système, identifiant technique).
+
+    Utilisée par la couche de rendu ET par les exigences métier : un placeholder compte comme « nom manquant » et ne
+    s'affiche jamais."""
+    text = str(value or "").strip()
+    if not text or text.lower() in PLACEHOLDER_NAMES:
+        return True
+    return bool(_PLACEHOLDER_PATTERN.match(text))
+
+
+def display_name_or_none(value: Any) -> Optional[str]:
+    """Le nom à AFFICHER, ou `None` (jamais un placeholder)."""
+    return None if is_placeholder_display_name(value) else str(value).strip()
 
 
 def is_real_name(value: Any) -> bool:
     """`True` si `value` est un nom dit par l'utilisateur (pas un repli système comme « Utilisateur » ou « User_1234 »)."""
-    text = str(value or "").strip()
-    if text.lower() in PLACEHOLDER_NAMES:
-        return False
-    return not text.lower().startswith("user_")
+    return not is_placeholder_display_name(value)
 
 
 class CapabilityState(str, Enum):
@@ -169,7 +190,9 @@ __all__ = [
     "SELL_GOALS",
     "action_for_goal",
     "capability_state",
+    "display_name_or_none",
     "get_missing_requirements",
     "has_field",
+    "is_placeholder_display_name",
     "is_real_name",
 ]

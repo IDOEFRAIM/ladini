@@ -23,6 +23,7 @@ from ladini.core.conversation_lock import conversation_turn_lock
 from ladini.core.idempotency import get_cached as _get_role_hint
 from ladini.core.idempotency import release as _release_role_hint
 from ladini.core.settings import settings
+from ladini.domain.profile_requirements import display_name_or_none
 from ladini.graphs.agents.market_coach.core import turn_trace
 from ladini.graphs.agents.market_coach.utils import build_runtime, ensure_dict
 from ladini.graphs.factory import GraphFactory
@@ -498,7 +499,8 @@ class Orchestrator:
                         {
                             "user_context_loaded": True,
                             "is_onboarding": False,
-                            "user_name": prof.get("name") or "N/A",
+                            # Un nom de repli technique (`User_2876`) n'est PAS un nom : `None`, jamais affiché.
+                            "user_name": display_name_or_none(prof.get("name")),
                             "zone_name": (prof.get("zone") or {}).get("name"),
                             "zone_id": (prof.get("zone") or {}).get("id"),
                             # Faits de profil de l'onboarding PROGRESSIF (`domain/profile_requirements.py`).

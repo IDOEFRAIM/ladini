@@ -1,152 +1,60 @@
 """Un tour de collecte JUSTE-À-TEMPS du profil (« mode gate » de `onboarding_node`).
 
-Ce n'est PAS un nouveau moteur d'onboarding : il réutilise l'extracteur existant (`_llm_extract_onboarding_all`), le
-résolveur des 17 régions (`agents/onboarding.py::_resolve_zone`) et l'outil MCP `complete_user_profile`. Il s'exécute
-quand `core/profile_gate.py` a posé `profile_gate` (une ACTION a besoin d'un champ manquant) ; l'intention et le payload
-de l'action restent dans l'état, INTACTS.
+Le gate est une BARRIÈRE PAUSE/REPRISE, jamais un RESET ni une reconstruction :
 
-Issues d'un tour :
-  - champ(s) reçu(s) mais il en manque encore  -> on pose la question suivante (une à la fois) ;
-  - tout est là                               -> REPRISE : l'action reprend dans le MÊME tour (`context_resolver`), sans
-                                                 que l'utilisateur répète son besoin ;
-  - le message n'est pas une réponse          -> RELÂCHE : l'utilisateur change de sujet, il n'est jamais prisonnier du
-                                                 mini-parcours (le message repart vers l'interpréteur).
+    BUSINESS_ACTIVE ─(profil manquant)─► PAUSED_FOR_PROFILE ─(champ fourni)─► il manque encore ? ─oui─► question suivante
+                                                                                      │ non
+                                                                                      ▼
+                                                                         BUSINESS_RESUMED (même commande)
+
+La commande en pause (`profile_gate["command"]`, capturée par `core/profile_gate.py`) est restaurée À L'IDENTIQUE à la reprise :
+objectif, intention, événement, payload, entités. Le message de profil (« Mon nom c'est Zouba ») est un FAIT de profil — il ne
+sert JAMAIS à reconstruire la commande. Si le contexte de reprise est invalide, on échoue FERMÉ (message sûr, panier conservé).
+
+Aucun nouveau moteur : lecture du slot (`profile_slot.py`), résolveur des 17 régions (`agents/onboarding.py::_resolve_zone`),
+outil MCP `complete_user_profile`, reprise par `context_resolver`.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
-import re
 from typing import Any, Dict, Optional
 
 from ladini.agents.onboarding import _resolve_zone
-from ladini.domain.burkina_regions import resolve_region
 from ladini.domain.profile_requirements import (
     ProfileAction,
     ProfileFacts,
     ProfileField,
     get_missing_requirements,
-    is_real_name,
 )
-from ladini.graphs.agents.market_coach.core.profile_gate import question_for
+from ladini.graphs.agents.market_coach.core.profile_gate import (
+    PLACEHOLDER_ZONE_VALUES,
+    command_is_resumable,
+    question_for,
+    why_we_ask,
+)
+from ladini.graphs.agents.market_coach.core.state import lock_goal
+from ladini.graphs.agents.market_coach.flows.common.profile_slot import (
+    ANSWER,
+    INTERRUPTION,
+    QUESTION,
+    REFUSAL,
+    read_profile_slot,
+)
 from ladini.graphs.agents.market_coach.services.mcp.gateway import ProfileGateway
-from ladini.graphs.agents.market_coach.utils import _llm_extract_onboarding_all
 
 logger = logging.getLogger("Ladini.Market.ProfileGateTurn")
 
-_NAME_PREFIX = re.compile(
-    r"^(?:bonjour|salut|bonsoir)?[\s,;:!.-]*(?:moi\s+c['’ ]?est|je\s+m['’ ]?appelle|mon\s+nom\s+est|c['’ ]?est|je\s+suis)\s+",
-    re.IGNORECASE,
+_RESTORED_KEYS = ("detected_intent", "interpreted_event", "interpreter_confidence", "transaction_payload", "extracted_entities")
+_PLACE_KEYS = ("zone", "region", "localite", "location", "zone_name", "target_zone")
+#: Au-delà, un message qui n'est jamais une réponse libère l'utilisateur (jamais prisonnier du mini-parcours).
+_MAX_UNCLEAR = 2
+
+SAFE_RESUME_FAILURE = (
+    "Je n'ai pas pu reprendre correctement ta demande. Ton panier est toujours conservé — redis-moi simplement "
+    "ce que tu veux faire pour continuer."
 )
-
-
-def _plain_name(text: str) -> Optional[str]:
-    """Repli SANS LLM : une réponse courte, sans chiffre ni point d'interrogation, à « comment t'appelles-tu ? »."""
-    cleaned = _NAME_PREFIX.sub("", (text or "").strip()).strip(" .!,;:")
-    tokens = cleaned.split()
-    # Au plus 3 mots, uniquement des lettres (traits d'union/apostrophes admis DANS un mot) : « Moussa », « Chez Ali »,
-    # « Restaurant Wend Konta » — jamais une phrase (« montre-moi d'abord les prix »).
-    if not cleaned or len(tokens) > 3 or not all(re.fullmatch(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*", t) for t in tokens):
-        return None
-    return cleaned
-
-
-def _facts_after(state: Dict[str, Any], updates: Dict[str, Any]) -> ProfileFacts:
-    merged = {**state, **updates}
-    return ProfileFacts.from_state(merged)
-
-
-async def profile_gate_turn(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
-    gate: Dict[str, Any] = dict(state.get("profile_gate") or {})
-    action = ProfileAction(gate.get("action") or ProfileAction.DISCOVERY.value)
-    missing = [ProfileField(m) for m in gate.get("missing") or []]
-    text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
-    phone = str(state.get("user_phone") or "").strip()
-
-    extracted: Dict[str, Any] = {}
-    if text:
-        try:
-            extracted = await _llm_extract_onboarding_all(
-                mc_runtime, text, context_hint=f"Information demandée : {', '.join(f.value for f in missing)}."
-            )
-        except Exception:  # noqa: BLE001 - l'extraction déterministe ci-dessous suffit à avancer
-            extracted = {}
-
-    fields: Dict[str, Any] = {}
-    state_updates: Dict[str, Any] = {}
-    region_question: Optional[str] = None
-
-    # Région : déterministe d'abord (17 régions, chefs-lieux, surnoms) — aucun appel LLM nécessaire.
-    if ProfileField.REGION in missing:
-        zone_text = str(extracted.get("zone") or "").strip() or text
-        hit = resolve_region(zone_text)
-        if hit.status == "RESOLVED":
-            resolution = await _resolve_zone(zone_text, mc_runtime, allow_clarify=False)
-            fields.update(
-                zone_id=resolution.zone_id,
-                declared_location=resolution.declared or (hit.region.name if hit.region else zone_text),
-                coverage=resolution.status,
-            )
-            state_updates.update(
-                zone_id=resolution.zone_id,
-                zone_name=resolution.zone_name or (hit.region.name if hit.region else None),
-                declared_location=fields["declared_location"],
-            )
-        elif missing[0] is ProfileField.REGION and not gate.get("region_clarified") and (extracted.get("zone") or hit.status == "AMBIGUOUS"):
-            region_question = "Dans quelle région es-tu ? (par exemple Kadiogo, Guiriko, Kuilsé…)"
-            gate["region_clarified"] = True
-
-    # Nom d'affichage (personne OU établissement).
-    if ProfileField.NAME in missing:
-        candidate = str(extracted.get("name") or "").strip()
-        # Repli déterministe UNIQUEMENT si le LLM n'a pas répondu : quand il a répondu « pas de nom », on le croit.
-        if not candidate and missing[0] is ProfileField.NAME and not extracted.get("_ok"):
-            candidate = _plain_name(text) or ""
-        if candidate and is_real_name(candidate):
-            fields["name"] = candidate
-            state_updates["user_name"] = candidate
-
-    if not fields and region_question is None:
-        if extracted.get("is_question") and extracted.get("reply"):
-            return _ask(gate, f"{extracted['reply']}\n\n{question_for(action, missing[0], intro=False)}")
-        logger.info("profile_gate_released | goal=%s | reason=not_an_answer", gate.get("goal"))
-        return {"profile_gate": None, "is_onboarding": False, "profile_gate_outcome": "RELEASE"}
-
-    if region_question is not None and not fields:
-        return _ask(gate, region_question)
-
-    still = get_missing_requirements(action, _facts_after(state, state_updates))
-    if phone:
-        try:
-            await ProfileGateway(mc_runtime).complete_user_profile(
-                phone, **fields, **({"capability": gate.get("capability")} if not still and gate.get("capability") else {})
-            )
-        except Exception as exc:  # noqa: BLE001 - le profil sera redemandé : jamais silencieusement perdu
-            logger.warning("complete_user_profile a échoué : %s", exc)
-            return _ask(gate, "Un incident technique m'empêche d'enregistrer cette information. Peux-tu me la redire dans un instant ?")
-
-    if still:
-        gate["missing"] = [f.value for f in still]
-        ack = f"Merci {state_updates['user_name']} ✅\n\n" if "user_name" in state_updates else ""
-        return {**state_updates, **_ask(gate, f"{ack}{question_for(action, still[0], intro=False)}")}
-
-    logger.info("profile_gate_completed | goal=%s | action=%s", gate.get("goal"), action.value)
-    perms = dict(state.get("user_permissions") or {})
-    if gate.get("capability") == "SELL":
-        perms["can_sell"] = True
-    else:
-        perms["can_buy"] = True
-    return {
-        **state_updates,
-        "user_permissions": perms,
-        "profile_gate": None,
-        "is_onboarding": False,
-        "profile_gate_outcome": "RESUME",
-        # L'événement/l'intention/le statut ORIGINAUX de l'action reprennent : le flow redémarre comme au premier passage.
-        "interpreted_event": gate.get("event"),
-        "detected_intent": gate.get("intent"),
-        "status": gate.get("status") or "PLANNING",
-    }
 
 
 def _ask(gate: Dict[str, Any], text: str) -> Dict[str, Any]:
@@ -155,10 +63,125 @@ def _ask(gate: Dict[str, Any], text: str) -> Dict[str, Any]:
         "is_onboarding": True,
         "status": "WAITING_INPUT",
         "response_strategy": "ONBOARDING",
+        # `render_onboarding` (stratégie ONBOARDING) lit `onboarding_prompt`.
         "onboarding_prompt": text,
         "final_response": text,
         "ag_ui_component": None,
     }
 
 
-__all__ = ["profile_gate_turn"]
+def _release(reason: str, gate: Dict[str, Any]) -> Dict[str, Any]:
+    logger.info("profile_gate_released | goal=%s | reason=%s", gate.get("goal"), reason)
+    return {"profile_gate": None, "is_onboarding": False, "profile_gate_outcome": "RELEASE"}
+
+
+def _restore_place(payload: Dict[str, Any], region: Optional[str]) -> Dict[str, Any]:
+    """Le payload porte la région du profil (jamais le repli « Zone inconnue ») sans toucher au reste du payload métier."""
+    if not region:
+        return payload
+    out = dict(payload)
+    for key in _PLACE_KEYS:
+        if key in out and str(out.get(key) or "").strip().lower() in PLACEHOLDER_ZONE_VALUES:
+            out[key] = region
+    return out
+
+
+def build_resume_patch(state: Dict[str, Any], gate: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Restaure la commande capturée À L'IDENTIQUE (hors nom/région/capacités, enrichis volontairement)."""
+    command = dict(gate.get("command") or {})
+    goal = command.get("current_goal") or command.get("goal") or gate.get("goal")
+    region = updates.get("declared_location") or state.get("declared_location")
+    patch: Dict[str, Any] = {
+        **updates,
+        "profile_gate": None,
+        "is_onboarding": False,
+        "profile_gate_outcome": "RESUME",
+        "current_goal": goal,
+        "status": command.get("status") or "PLANNING",
+        "working_memory": lock_goal(dict(state.get("working_memory") or {}), goal),
+    }
+    for key in _RESTORED_KEYS:
+        if key in command:
+            patch[key] = copy.deepcopy(command[key])
+    if isinstance(patch.get("transaction_payload"), dict):
+        patch["transaction_payload"] = _restore_place(patch["transaction_payload"], region)
+    return patch
+
+
+async def profile_gate_turn(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
+    gate: Dict[str, Any] = dict(state.get("profile_gate") or {})
+    action = ProfileAction(gate.get("action") or ProfileAction.DISCOVERY.value)
+    missing = [ProfileField(m) for m in gate.get("missing") or []]
+    if not missing:  # état incohérent : ne bloque jamais l'utilisateur
+        return _release("empty_requirements", gate)
+    asking = missing[0]
+    question = question_for(action, asking, intro=False)
+    text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    phone = str(state.get("user_phone") or "").strip()
+
+    reading = await read_profile_slot(mc_runtime, text, asking, question=question)
+
+    if reading.kind == INTERRUPTION:
+        return _release("interruption", gate)
+    if reading.kind == REFUSAL:
+        return _ask(gate, f"Pas de souci. J'ai besoin de cette information pour continuer, ta demande reste en attente.\n\n{question}")
+    if reading.kind == QUESTION:
+        return _ask(gate, f"{why_we_ask(action, asking)}\n\n{question}")
+    if reading.kind != ANSWER or not reading.value:
+        if reading.source == "fallback":  # lecture SANS modèle : dans le doute on libère l'utilisateur, jamais on le retient
+            return _release("unreadable_without_llm", gate)
+        gate["unclear"] = int(gate.get("unclear") or 0) + 1
+        if gate["unclear"] > _MAX_UNCLEAR:
+            return _release("not_an_answer", gate)
+        return _ask(gate, f"Je n'ai pas bien compris. {question}")
+
+    fields: Dict[str, Any] = {}
+    updates: Dict[str, Any] = {}
+    if asking is ProfileField.NAME:
+        fields["name"] = reading.value
+        updates["user_name"] = reading.value
+    else:
+        resolution = await _resolve_zone(reading.value, mc_runtime, allow_clarify=not gate.get("region_clarified"))
+        if resolution.status == "NEEDS_REGION":
+            gate["region_clarified"] = True
+            return _ask(gate, resolution.question or question)
+        declared = resolution.declared or reading.value
+        fields.update(zone_id=resolution.zone_id, declared_location=declared, coverage=resolution.status)
+        updates.update(zone_id=resolution.zone_id, zone_name=resolution.zone_name or declared, declared_location=declared)
+
+    logger.info("profile_gate_requirement | field=%s | goal=%s | action=%s | satisfied=true", asking.value, gate.get("goal"), action.value)
+    still = get_missing_requirements(action, ProfileFacts.from_state({**state, **updates}))
+    if phone:
+        try:
+            capability = gate.get("capability") if not still else None
+            await ProfileGateway(mc_runtime).complete_user_profile(phone, **fields, **({"capability": capability} if capability else {}))
+        except Exception as exc:  # noqa: BLE001 - le profil sera redemandé : jamais silencieusement perdu
+            logger.warning("complete_user_profile a échoué : %s", exc)
+            return _ask(gate, "Un incident technique m'empêche d'enregistrer cette information. Peux-tu me la redire dans un instant ?")
+
+    if still:
+        gate["missing"] = [f.value for f in still]
+        gate["unclear"] = 0
+        ack = f"Merci {updates['user_name']} ✅\n\n" if "user_name" in updates else ""
+        return {**updates, **_ask(gate, f"{ack}{question_for(action, still[0], intro=False)}")}
+
+    perms = dict(state.get("user_permissions") or {})
+    perms["can_sell" if gate.get("capability") == "SELL" else "can_buy"] = True
+    updates["user_permissions"] = perms
+    logger.info("profile_gate_completed | goal=%s | action=%s", gate.get("goal"), action.value)
+
+    # Fail-closed : la commande en pause DOIT être exploitable, sinon aucune reprise inventée.
+    command = dict(gate.get("command") or {})
+    if not command:  # gate sans commande capturée : repli historique (objectif d'origine uniquement)
+        command = {"goal": gate.get("goal"), "current_goal": gate.get("goal"), "detected_intent": gate.get("intent"),
+                   "interpreted_event": gate.get("event"), "status": gate.get("status")}
+        gate["command"] = command
+    if not command_is_resumable(command, state):
+        logger.error("business_resume_failed | goal=%s | action=%s | reason=invalid_resume_context", gate.get("goal"), action.value)
+        return {**updates, "profile_gate": None, "is_onboarding": False, "status": "COMPLETED", "response_strategy": "SUCCESS",
+                "final_response": SAFE_RESUME_FAILURE, "ag_ui_component": None}
+    logger.info("business_resume_started | goal=%s | action=%s", gate.get("goal"), action.value)
+    return build_resume_patch(state, gate, updates)
+
+
+__all__ = ["SAFE_RESUME_FAILURE", "build_resume_patch", "profile_gate_turn"]

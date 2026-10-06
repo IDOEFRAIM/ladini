@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from ladini.domain.profile_requirements import display_name_or_none
 from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from ladini.graphs.agents.market_coach.llm_gateway import (
     LLMGatewayExhausted,
@@ -82,7 +83,7 @@ async def generate_llm_question(
             progress_ctx = (
                 f" Étape {progress.get('filled', 0) + 1}/{progress.get('total', '?')}."
             )
-        user_name = state.get("user_name")
+        user_name = display_name_or_none(state.get("user_name"))
         if user_name:
             progress_ctx += f" Prénom utilisateur : {user_name}."
 
