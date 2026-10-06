@@ -84,6 +84,21 @@
 			}
 		}
 	}
+	# Recurring OPERATIONS (2026-10-06) : liste/fiche des besoins + réglage du délai avant première livraison,
+	# appelés par l'adaptateur Next.js admin (`requireAdmin`). Même posture que `/internal/commercial/*` : Caddy
+	# n'ouvre que le chemin réseau ; FastAPI reste fail-closed (`Depends(require_internal_token)` sur le routeur,
+	# et l'écriture du réglage re-vérifie en base que l'acteur est ADMIN).
+	@recurring_admin_internal path /internal/recurring-admin/*
+	handle @recurring_admin_internal {
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
 	# /metrics, /admin/*, /api/market/*, le reste de /internal/* : JAMAIS
 	# exposés publiquement (scrape Prometheus et exploitation passent par le
 	# réseau interne / tunnel SSH).
