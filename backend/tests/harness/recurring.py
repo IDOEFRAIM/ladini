@@ -17,6 +17,7 @@ import copy
 import itertools
 import json
 import time
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
@@ -147,12 +148,36 @@ class RecurringSupplyServerDouble:
             need_id = f"need-{next(self._ids)}"
             self.created.append({"recurring_need_id": need_id, **item, **shared})
             created.append({"recurring_need_id": need_id, "sub_category": item.get("product_query")})
-        result = {"items": created} if batch else created[0]
+        decision = self._decision(shared.get("starts_at"))
+        start_info = {"starts_at": decision.effective_start.isoformat(), "start_adjusted": decision.adjusted}
+        result = {"items": created, **start_info} if batch else {**created[0], **start_info}
         self._commit(ledger, result)
         if self.lose_response_after_commit > 0:
             self.lose_response_after_commit -= 1
             raise TimeoutError("réponse MCP perdue après COMMIT")
         return {"status": "success", **result}
+
+    # -- délai minimal avant première livraison (miroir de `RecurringSupplyMixin._start_decision`) ----
+    #: réglage admin simulé et date « aujourd'hui » du double — modifiables par le test.
+    lead_days: int = 4
+    today: date = date(2026, 10, 5)
+
+    def _decision(self, starts_at: Any):
+        from ladini.domain.recurring_supply.start_policy import resolve_start_date
+
+        requested = date.fromisoformat(str(starts_at)[:10]) if starts_at else None
+        return resolve_start_date(requested=requested, today=self.today, lead_days=self.lead_days)
+
+    def get_recurring_start_policy(self, starts_at: Any = None) -> Dict[str, Any]:
+        d = self._decision(starts_at)
+        return {
+            "status": "success",
+            "minimum_start_date": d.minimum.isoformat(),
+            "effective_start": d.effective_start.isoformat(),
+            "requested_start": d.requested.isoformat() if d.requested else None,
+            "adjusted": d.adjusted,
+            "lead_days": d.lead_days,
+        }
 
     def create_recurring_need(self, **kw: Any) -> Dict[str, Any]:
         item = {k: kw.get(k) for k in ("product_query", "quantity", "unit")}

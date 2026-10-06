@@ -521,6 +521,7 @@ class ConversationHarness:
         self.server = RecurringSupplyServerDouble(self.drafts)
         self.runtime.responses["create_recurring_need"] = self.server.create_recurring_need
         self.runtime.responses["create_recurring_needs"] = self.server.create_recurring_needs
+        self.runtime.responses["get_recurring_start_policy"] = self.server.get_recurring_start_policy
         self.turns: List[TurnResult] = []
         self._node_log: List[Tuple[str, Dict[str, Any]]] = []
         self._task_log: List[int] = []

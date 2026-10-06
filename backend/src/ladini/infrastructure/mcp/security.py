@@ -78,6 +78,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "ensure_next_recurring_occurrence": PermissionScope.DB_DATA_WRITE,
     "refresh_recurring_need_matching": PermissionScope.DB_DATA_WRITE,
     "get_recurring_need_detail": PermissionScope.DB_READ_ONLY,
+    "get_recurring_start_policy": PermissionScope.DB_READ_ONLY,
     "place_bid": PermissionScope.DB_DATA_WRITE,
     "update_stock_with_movement": PermissionScope.DB_DATA_WRITE,
     "prepare_transaction_staging": PermissionScope.DB_DATA_WRITE,

@@ -16,6 +16,7 @@ Mandat §18 : aucune réponse utilisateur ne mentionne occurrence/CAS/recurring_
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from decimal import Decimal
@@ -626,6 +627,7 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         return await _confirm(draft, action, state, mc_runtime, conversation_id)
 
     outcome = apply_domain_action(draft, action)
+    outcome, start_notice = await _apply_start_policy(outcome, mc_runtime)
     await _persist(draft, outcome.draft, conversation_id)
     if isinstance(action, UpdateRecurringNeedDraft):
         ambiguous_response = _ambiguous_quantity_clarification(payload, outcome.draft)
@@ -634,7 +636,48 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         orphan_response = _orphan_quantity_clarification(payload, outcome.draft)
         if orphan_response is not None:
             return orphan_response
-    return _apply_response_plan(build_response_plan(outcome))
+    patch = _apply_response_plan(build_response_plan(outcome))
+    if start_notice:
+        # La confirmation affichée est rendue par `nodes/rendering/confirm.py`, qui place cette note AVANT le récapitulatif.
+        patch["confirmation_deviation_note"] = start_notice
+        if patch.get("final_response"):
+            patch["final_response"] = f"{start_notice}\n\n{patch['final_response']}"
+    return patch
+
+
+async def _apply_start_policy(
+    outcome: RecurringNeedOutcome, mc_runtime: MarketRuntime
+) -> tuple[RecurringNeedOutcome, str]:
+    """Aligne `starts_at` d'un brouillon COMPLET sur le délai minimal admin AVANT de l'afficher.
+
+    Le domaine (`get_recurring_start_policy`) décide : la date annoncée dans le récapitulatif est la vraie date de
+    première livraison, jamais « demain ». Une date demandée trop proche est repoussée et l'utilisateur en est
+    informé ; sinon aucune explication superflue. Si la lecture échoue, le brouillon reste inchangé : le service de
+    création applique de toute façon la même règle à l'écriture (autorité unique)."""
+    draft = outcome.draft
+    if draft is None or draft.status != RecurringNeedDraftStatus.DRAFT or not draft.is_complete():
+        return outcome, ""
+    try:
+        raw = await RecurringSupplyGateway(mc_runtime).get_recurring_start_policy(starts_at=draft.starts_at)
+    except Exception as exc:  # noqa: BLE001 - jamais bloquant : le service reste l'autorité à la création
+        logger.warning("recurring_need.start_policy_unavailable | %s", exc)
+        return outcome, ""
+    data = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
+    if not isinstance(data, dict) or _is_business_failure(data) or not data.get("effective_start"):
+        return outcome, ""
+    effective = str(data["effective_start"])[:10]
+    notice = ""
+    if data.get("adjusted") and data.get("requested_start"):
+        notice = (
+            "Pour laisser le temps d'organiser l'approvisionnement, la première livraison peut commencer "
+            f"au plus tôt le {_fmt_date_fr(effective) or effective}. Je la programme à cette date."
+        )
+    if draft.starts_at and str(draft.starts_at)[:10] == effective:
+        return outcome, notice
+    updated = apply_domain_action(draft, UpdateRecurringNeedDraft(fields={"starts_at": effective}))
+    if updated.draft is None:
+        return outcome, notice
+    return RecurringNeedOutcome(kind=outcome.kind, draft=updated.draft, detail=outcome.detail), notice
 
 
 def _same_slot(a: Any, b: Any) -> bool:
@@ -821,10 +864,17 @@ async def _execute(
         return await _settle(
             executing, RecurringNeedExecutionResult(success=False, error=str((mcp_result or {}).get("message") or ""))
         )
-    return await _settle(executing, RecurringNeedExecutionResult(success=True, external_id=_created_ids(mcp_result)))
+    real_start = str(mcp_result.get("starts_at") or "")[:10]
+    return await _settle(
+        executing,
+        RecurringNeedExecutionResult(success=True, external_id=_created_ids(mcp_result)),
+        real_start=real_start or None,
+    )
 
 
-async def _settle(executing: RecurringNeedDraft, result: RecurringNeedExecutionResult) -> Dict[str, Any]:
+async def _settle(
+    executing: RecurringNeedDraft, result: RecurringNeedExecutionResult, *, real_start: Optional[str] = None
+) -> Dict[str, Any]:
     """Enregistre l'issue d'une exécution. La base peut déjà la connaître (la garde du
     service passe le draft à EXECUTED dans la transaction des besoins) : en cas de course
     perdue, la version relue fait foi."""
@@ -838,6 +888,10 @@ async def _settle(executing: RecurringNeedDraft, result: RecurringNeedExecutionR
         original=executing,
         finalized=finalized,
     )
+    if real_start and final.status == RecurringNeedDraftStatus.EXECUTED and str(final.starts_at or "")[:10] != real_start:
+        # Le réglage admin a changé entre le récapitulatif et la confirmation : le service a retenu la date COURANTE ;
+        # le message final affiche la vraie date (projection d'affichage — le besoin créé fait foi en base).
+        final = dataclasses.replace(final, starts_at=real_start)
     kind = {
         RecurringNeedDraftStatus.EXECUTED: RecurringNeedOutcomeKind.RECURRING_NEED_CREATED,
         RecurringNeedDraftStatus.FAILED: RecurringNeedOutcomeKind.RECURRING_NEED_FAILED,

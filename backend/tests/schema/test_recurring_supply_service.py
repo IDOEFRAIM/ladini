@@ -133,19 +133,20 @@ def test_create_recurring_need_materializes_the_j_to_j_plus_7_window(market):
 
     result, occs = _run(market[0], fn)
     assert result["status"] == "success"
-    # starts_at par defaut = demain (16) ; fenetre bornee a J+7 depuis aujourd'hui (22) -> 16..22 inclus = 7 jours
-    assert len(occs) == 7
+    # starts_at par defaut = aujourd'hui (15) + delai minimal admin par defaut (4) = 19 ; fenetre bornee a J+7
+    # depuis aujourd'hui (22) -> 19..22 inclus = 4 jours
+    assert len(occs) == 4
     assert all(o.requested_quantity == 40 and o.unit == "KG" and o.status == "OPEN" for o in occs)
 
 
-def test_create_recurring_need_defaults_starts_at_to_tomorrow(market):
+def test_create_recurring_need_defaults_starts_at_to_today_plus_the_default_lead_time(market):
     async def fn(session):
         result = await _create(session, market)
         need = await session.get(RecurringNeed, uuid.UUID(result["recurring_need_id"]))
         return need
 
     need = _run(market[0], fn)
-    assert need.starts_at.date() == date(2026, 9, 16)
+    assert need.starts_at.date() == date(2026, 9, 19)  # 15 + 4 jours (réglage par défaut), plus « demain »
 
 
 def test_create_recurring_need_daily_except_sunday_excludes_sunday_occurrences(market):
@@ -186,7 +187,7 @@ def test_materializing_the_same_window_twice_creates_no_duplicate(market):
 
     second_call_created, total = _run(market[0], fn)
     assert second_call_created == 0
-    assert total == 7
+    assert total == 4  # 19..22 : aujourd'hui (15) + délai minimal par défaut (4), fenêtre bornée à J+7
 
 
 # ── réapprovisionnement générique des occurrences (Phase 3, mandat MONTHLY §14) ──
@@ -197,7 +198,8 @@ def test_monthly_replenishment_materializes_successive_month_end_occurrences_wit
     Ancre fixe (jamais dérivée de l'occurrence précédente) : 31 janvier -> 28 février -> 31 mars.
     Un second passage à la MÊME date ne doit créer aucun doublon (contrainte unique
     (recurring_need_id, occurrence_date))."""
-    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 1, 31))
+    # Création le 27 janvier : le 31 janvier est exactement `aujourd'hui + délai minimal par défaut (4)` — date valide.
+    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 1, 27))
     result = _run(market[0], lambda session: _create(session, market, recurrence_type="MONTHLY", starts_at="2026-01-31"))
     need_id = uuid.UUID(result["recurring_need_id"])
 
@@ -212,7 +214,7 @@ def test_monthly_replenishment_materializes_successive_month_end_occurrences_wit
     async def replenish(session):
         return await _svc(session, market).replenish_occurrence_windows()
 
-    # Création : fenêtre J->J+7 depuis le 31 janvier -> seule l'occurrence du 31 janvier lui-même.
+    # Création : fenêtre J->J+7 depuis le 27 janvier -> seule l'occurrence du 31 janvier (ancre) y figure.
     assert _run(market[0], occurrence_dates) == [date(2026, 1, 31)]
 
     # 22 février (2026 n'est pas bissextile) : le 28 février entre dans la fenêtre J->J+7.
@@ -277,7 +279,7 @@ def test_create_recurring_needs_materializes_occurrences_for_every_item(market):
         return occurrence_counts
 
     occurrence_counts = _run(market[0], fn)
-    assert occurrence_counts == [7, 7]
+    assert occurrence_counts == [4, 4]
 
 
 def test_create_recurring_needs_rolls_back_everything_if_one_item_fails(market):
@@ -325,7 +327,7 @@ def test_permanent_quantity_update_changes_future_open_occurrences(market):
         return upd, occs
 
     upd, occs = _run(market[0], fn)
-    assert upd["occurrences_updated"] == 7
+    assert upd["occurrences_updated"] == 4
     assert all(o.requested_quantity == 25 for o in occs)
 
 
@@ -533,4 +535,4 @@ def test_list_my_recurring_needs_uses_a_constant_number_of_queries(market):
 
     assert len(result_many["items"]) == 5
     assert len(sql_many) == len(sql_one), f"N+1 : {len(sql_one)} requêtes pour 1 besoin, {len(sql_many)} pour 5"
-    assert all(item["next_occurrence_date"] == "2026-09-16" for item in result_many["items"])
+    assert all(item["next_occurrence_date"] == "2026-09-19" for item in result_many["items"])

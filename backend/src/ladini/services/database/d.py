@@ -100,6 +100,7 @@ class AgriDatabaseService(
         # Approvisionnement récurrent (Phase 2/4)
         "list_my_recurring_needs",
         "get_recurring_need_detail",
+        "get_recurring_start_policy",
         "list_my_deliverable_orders",
     }
 

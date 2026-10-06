@@ -176,6 +176,9 @@ class NewTaskEntities(BaseModel):
     weekly_days: List[int] = []
     excluded_weekdays: List[int] = []
     max_price_per_unit: Optional[float] = None
+    # Date de début EXPLICITE (« à partir du 20 octobre », « commence lundi ») — `YYYY-MM-DD`, `None` si absente ou si
+    # l'utilisateur dit « dès que possible » : le DOMAINE (`start_policy`) décide, jamais le modèle.
+    starts_at: Optional[str] = None
     # Chantier multi-produits CREATE_RECURRING_NEED (2026-09-23, suite du correctif
     # state-leak ci-dessus) : UN item structuré {product, quantity, unit} par
     # produit additionnel, PARTAGEANT la même récurrence/dates/prix max que le

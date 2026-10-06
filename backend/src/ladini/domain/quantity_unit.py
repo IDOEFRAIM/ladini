@@ -329,6 +329,17 @@ _CURRENCY_WORDS = frozenset({"fcfa", "cfa", "franc", "francs", "f"})
 _RANGE_CONNECTOR_WORDS = frozenset({"a"})
 
 
+#: Mois (formes normalisées, sans accent) : « 20 octobre » est une DATE, jamais une quantité — sans cela,
+#: « 3 chèvres chaque semaine à partir du 20 octobre » faisait de « 20 » une quantité orpheline.
+_MONTH_WORDS = frozenset(
+    {
+        "janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout",
+        "septembre", "octobre", "novembre", "decembre",
+        "janv", "fevr", "avr", "juil", "sept", "oct", "nov", "dec",
+    }
+)
+
+
 def find_bare_number_candidates(
     text: str, *, exclude_values: "Iterable[float]" = ()
 ) -> "list[float]":
@@ -345,6 +356,7 @@ def find_bare_number_candidates(
       `find_convertible_quantity_pairs`/le parseur d'unité — jamais compté deux fois ici) ;
     - un nombre suivi d'un mot de DURÉE — couvre aussi la CADENCE ("chaque N semaines") ;
     - un nombre suivi OU précédé d'un mot de PRIX/devise ;
+    - un nombre suivi d'un nom de MOIS (« 20 octobre » : une date) ;
     - un nombre faisant partie d'une PLAGE ("N1 à N2") — les deux bornes sont exclues ;
     - les valeurs de `exclude_values` (typiquement la quantité déjà attribuée au produit
       principal), à `1e-9` près.
@@ -381,6 +393,8 @@ def find_bare_number_candidates(
             excluded_positions.add(i)
         if next_word in _CURRENCY_WORDS or prev_word in _CURRENCY_WORDS:
             excluded_positions.add(i)
+        if next_word in _MONTH_WORDS:
+            excluded_positions.add(i)  # « 20 octobre » : une date
         if next_word in _RANGE_CONNECTOR_WORDS and i + 2 < len(tokens) and _as_number(tokens[i + 2]) is not None:
             excluded_positions.add(i)
             excluded_positions.add(i + 2)

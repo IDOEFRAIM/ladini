@@ -129,6 +129,7 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         "ensure_next_recurring_occurrence",
         "refresh_recurring_need_matching",
         "get_recurring_need_detail",
+        "get_recurring_start_policy",
         "accept_match_proposal",
         "mark_order_delivery_status",
         "record_order_reception",
