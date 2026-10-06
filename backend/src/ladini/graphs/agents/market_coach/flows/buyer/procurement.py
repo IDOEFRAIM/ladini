@@ -289,6 +289,17 @@ def _refine_offers(state: Dict[str, Any], mc_runtime: Any, vendor_ctx: Dict[str,
     except Exception:  # noqa: BLE001 - contrat invalide : on ne devine pas
         return _stay_on_menu("Je n'ai pas bien compris le critère — précise par exemple une région ou un prix maximum.")
     current = [v for v in (vendor_ctx.get("vendors") or []) + (vendor_ctx.get("vendors_more") or []) if isinstance(v, dict)]
+    if ref.objection == "PRICE" and ref.max_price is None and ref.criterion is None:
+        # « c'est trop cher » SANS plafond : on ne devine pas un prix — on demande, le menu et le contexte restent intacts ; la prochaine
+        # réponse (« 500 ») est lue comme ce plafond (`awaiting`).
+        logger.info("interaction_mode=REFINEMENT | refinement_type=price_ceiling_requested")
+        patch = _stay_on_menu("Tu veux rester sous quel prix ?")
+        patch["vendor_selection_context"] = {**vendor_ctx, "awaiting": "PRICE_CEILING"}
+        return patch
+    if ref.objection == "DISTANCE" and ref.region is None:
+        return _stay_on_menu(
+            "Je ne connais que la région de chaque producteur, pas la distance. Dis-moi la région que tu préfères (Ouaga, Bobo…)."
+        )
     options = [option_from_vendor(v, i) for i, v in enumerate(current, start=1)]
     kept = refine_options(ref, options)
     if not kept:
@@ -305,6 +316,7 @@ def _refine_offers(state: Dict[str, Any], mc_runtime: Any, vendor_ctx: Dict[str,
         },
         phone=str(state.get("user_phone") or "") or None,
     )
+    patch["vendor_selection_context"] = {**patch.get("vendor_selection_context", {}), "awaiting": None}
     return patch
 
 

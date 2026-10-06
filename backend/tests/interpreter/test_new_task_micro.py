@@ -385,7 +385,8 @@ class TestPromptSizeGuard:
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
         # Flow compression (2026-10) : +~45 tokens (max_price_per_unit/conditionnement VOULU d'un BUYER_REQUEST) — loin des 5000.
-        assert estimated_tokens < 2750, (
+        # Field robustness (2026-10) : +~20 tokens (chercher/trouver, total du panier) — loin des 5000.
+        assert estimated_tokens < 2800, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )

@@ -1275,6 +1275,16 @@ async def _llm_extract_onboarding_all(
 DEVIATION_REPLY_PROMPT_VERSION = "deviation_reply_v1"
 
 
+#: Règle ANTI-INVENTION partagée par les réponses LIBRES du LLM (déviation, clarification) : le modèle de rédaction ne connaît AUCUN fait
+#: métier. Observé avec le vrai modèle : « il livre ? » -> « Oui, nous effectuons bien la livraison », « c'est certifié ? » -> « Oui, nos produits
+#: sont certifiés » — des faits INVENTÉS. Les faits viennent du domaine (`domain/context_answers.py`), jamais de la rédaction libre.
+NO_FABRICATED_FACTS_RULE = (
+    "RÈGLE ABSOLUE : tu ne connais AUCUN fait sur les produits, producteurs, prix, stocks, livraison, certification ou délais. "
+    "Si le message pose une question sur l'un d'eux, ne réponds JAMAIS oui/non ni un chiffre : dis simplement que tu n'as pas cette "
+    "information et invite à continuer."
+)
+
+
 async def llm_deviation_reply(
     mc_runtime: "MarketRuntime",
     user_text: str,
@@ -1308,7 +1318,7 @@ async def llm_deviation_reply(
         "reconnais ce qu'il a dit (question, correction, hésitation, remarque "
         "hostile — reste calme et professionnel même si le message est hostile) "
         "SANS jamais répéter mot pour mot ce qui est attendu (ce sera rappelé "
-        f"juste après ta réponse). {extra_instructions}"
+        f"juste après ta réponse). {NO_FABRICATED_FACTS_RULE} {extra_instructions}"
     ).strip()
     try:
         # LLM Gateway (2026-09-02) : budget/repli/disjoncteur portés par le

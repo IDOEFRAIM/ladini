@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
@@ -111,6 +112,87 @@ def _unknown_result(path: str) -> Dict[str, Any]:
         "extracted_entities": {},
         "raw_analysis": {"path": path},
     }
+
+
+_MENU_DIGIT = re.compile(r"(?:\ble|\bla|n°|\bnum[ée]ro|\boption|\bchoix)\s*(\d{1,2})\b", re.IGNORECASE)
+
+
+def _selection_is_evidenced(raw: Dict[str, Any], context: SelectionContext, text: str) -> bool:
+    """Le message ÉTAYE-t-il l'option choisie ? Ordinal, mot distinctif du libellé (B27 `selection_is_evidenced`), ou « le 4 / option 4 »."""
+    from ladini.graphs.agents.market_coach.interpreter.context_arbitration import (
+        selection_is_evidenced,
+    )
+
+    option = next((p for p in context.producer_options if p.offer_id == raw.get("offer_id")), None)
+    if option is None:
+        return True  # contrôle de cohérence déjà fait par `validate_action`
+    if len(context.producer_options) <= 1:
+        return True
+    keys = [str(p.display_index) for p in context.producer_options]
+    view = {"actions": keys, "labels": [p.label for p in context.producer_options]}
+    if selection_is_evidenced(view, option.display_index, text):
+        return True
+    return any(int(m) == option.display_index for m in _MENU_DIGIT.findall(text))
+
+
+def relation_type_of(decision: StructuredActionDecision) -> str:
+    """Relation du message avec le contexte, dans la taxonomie du mandat (ANSWER / SELECTION / CORRECTION / REFINEMENT / QUESTION / REJECTION / INTERRUPTION /
+    AMBIGUOUS) — pour l'OBSERVABILITÉ (journal `relation_type=`), jamais pour décider : la décision reste celle de la disposition + du résolveur."""
+    d = decision.disposition
+    if d == StructuredActionDisposition.QUESTION:
+        return "QUESTION"
+    if d == StructuredActionDisposition.REJECT:
+        return "REJECTION"
+    if d == StructuredActionDisposition.DEVIATION:
+        return "INTERRUPTION"
+    if d == StructuredActionDisposition.UNKNOWN:
+        return "AMBIGUOUS"
+    if decision.reference is not None and decision.reference.reference_type in (ReferenceType.REFINEMENT, ReferenceType.NONE_OF_THESE):
+        return "REFINEMENT"
+    if decision.action in (ActionType.SET_QUANTITY, ActionType.SET_PACKAGE_COUNT):
+        return "ANSWER"
+    return "SELECTION"
+
+
+def _answer_result(text: str) -> Dict[str, Any]:
+    """Réponse à une QUESTION de contexte : texte du DOMAINE, aucune mutation, ni menu rejoué ni retry (même canal que la clarification ciblée)."""
+    return {
+        "interpreted_event": "UNKNOWN",
+        "detected_intent": "UNKNOWN",
+        "interpreter_confidence": 0.0,
+        "extracted_entities": {},
+        "raw_analysis": {
+            "path": "structured_action_micro_question",
+            "selection_clarification": text,
+            "context_question": True,
+            "interaction_mode": "CONTEXT_QUESTION",
+        },
+    }
+
+
+def _answer_context_question(decision: StructuredActionDecision, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    import time
+
+    from ladini.graphs.agents.market_coach.domain.context_answers import answer_question
+    from ladini.graphs.agents.market_coach.domain.selection_reference import (
+        options_from_vendors,
+    )
+
+    vctx = (state or {}).get("vendor_selection_context")
+    vctx = vctx if isinstance(vctx, dict) and not vctx.get("__reset__") else {}
+    vendors = [v for v in (vctx.get("vendors") or []) if isinstance(v, dict)]
+    chosen = vctx.get("chosen_vendor") if isinstance(vctx.get("chosen_vendor"), dict) else None
+    cart = (state or {}).get("active_cart") or []
+    text = answer_question(
+        decision.question,  # type: ignore[arg-type]
+        options_from_vendors(vendors),
+        chosen_id=str(chosen.get("offer_id") or chosen.get("product_id")) if chosen else None,
+        cart=cart,
+        created_at=vctx.get("created_at") if isinstance(vctx.get("created_at"), (int, float)) else None,
+        now=time.time(),
+    )
+    logger.info("interaction_mode=CONTEXT_QUESTION | topic=%s | context_question=true", decision.question.topic.value if decision.question else None)
+    return _answer_result(text)
 
 
 def _clarification_result(resolution: Any, path: str) -> Dict[str, Any]:
@@ -258,10 +340,15 @@ def _outcome_for_decision(
     domain_context: SelectionContext,
     locked_goal: Optional[str],
     text: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[StructuredActionOutcome, Optional[Dict[str, Any]]]:
     from ladini.graphs.agents.market_coach.core.tunnel_manager import (
         INTERRUPTION_CONFIDENCE_THRESHOLD,
     )
+
+    logger.info("relation_type=%s | disposition=%s | action=%s", relation_type_of(decision), decision.disposition.value, decision.action)
+    if decision.disposition == StructuredActionDisposition.QUESTION:
+        return StructuredActionOutcome.RESULT, _answer_context_question(decision, state)
 
     if decision.disposition == StructuredActionDisposition.UNKNOWN:
         return StructuredActionOutcome.RESULT, _unknown_result("structured_action_micro")
@@ -316,6 +403,22 @@ def _outcome_for_decision(
             },
             "raw_analysis": {"path": "structured_action_micro_refinement", "interaction_mode": "REFINEMENT"},
         }
+    if decision.reference is not None and text is not None:
+        from ladini.graphs.agents.market_coach.domain.selection_reference import (
+            ordinal_is_evidenced,
+        )
+
+        if not ordinal_is_evidenced(decision.reference, text):
+            logger.info("interaction_mode=CLARIFICATION | clarification_reason=ordinal_not_said")
+            names = ", ".join(p.label.split(" — ")[0] for p in domain_context.producer_options[:6])
+            from ladini.graphs.agents.market_coach.domain.selection_reference import (
+                Resolution as _Res,
+            )
+
+            return StructuredActionOutcome.RESULT, _clarification_result(
+                _Res(Status.AMBIGUOUS, (), "ordinal_not_said", message=f"Tu parles de quel producteur ? ({names})" if names else "Tu parles de quelle option ?"),
+                "structured_action_micro_ordinal_unevidenced",
+            )
     if decision.reference is not None:
         resolution = resolve_reference_decision(decision, domain_context)
         if resolution is not None and resolution.status != Status.EXACT:
@@ -337,6 +440,25 @@ def _outcome_for_decision(
         said = decision.quantity if decision.quantity is not None else decision.package_count
         if text is not None and text_states_a_quantity(text, _proposed_number(said)):
             raw = {**raw, "quantity": decision.quantity, "unit": decision.unit, "package_count": decision.package_count}
+    if (
+        raw is not None
+        and not reference_mode
+        and raw["action"] == ActionType.SELECT_PRODUCER
+        and text is not None
+        and not _selection_is_evidenced(raw, domain_context, text)
+    ):
+        # « celui-là », « lui » SANS repère : le modèle a deviné une option. Un index que le texte n'étaye PAS (ordinal, nom distinctif, numéro
+        # désigné « le 4 ») n'est jamais exécuté : on demande LEQUEL, on ne devine pas (invariant : aucune cible arbitraire).
+        names = ", ".join(p.label.split(" — ")[0] for p in domain_context.producer_options[:6])
+        logger.info("interaction_mode=CLARIFICATION | clarification_reason=selection_not_evidenced")
+        from ladini.graphs.agents.market_coach.domain.selection_reference import (
+            Resolution,
+        )
+
+        return StructuredActionOutcome.RESULT, _clarification_result(
+            Resolution(Status.AMBIGUOUS, (), "selection_not_evidenced", message=f"Tu parles de quel producteur ? ({names})"),
+            "structured_action_micro_unevidenced",
+        )
     if raw is None:
         logger.warning(
             "[Interpreter STRUCTURED_ACTION] décision ACTION irrésolvable "
@@ -450,7 +572,7 @@ async def run_structured_action_microprompt(
             except Exception:
                 pass
             return _outcome_for_decision(
-                decision, prompt_context, domain_context, locked_goal, text
+                decision, prompt_context, domain_context, locked_goal, text, state
             )
 
     call_count_key = f"llm_call_count:{message_sid}" if message_sid else None
@@ -509,7 +631,7 @@ async def run_structured_action_microprompt(
         set_cached(cache_key, decision.model_dump_json(), ttl_seconds=_CACHE_TTL_SECONDS)
 
     outcome, result = _outcome_for_decision(
-        decision, prompt_context, domain_context, locked_goal, text
+        decision, prompt_context, domain_context, locked_goal, text, state
     )
     # (2026-09-13, Incrément G, spec §9/§33) : STRUCTURED_ACTION est le
     # profil de risque le plus élevé (exécute directement une action sur un

@@ -130,6 +130,8 @@ class SelectionContext(BaseModel):
     hidden_count: int = 0
     #: Horodatage d'affichage du menu producteur (péremption d'une référence naturelle) ; `None` = menu historique sans horodatage.
     created_at: Optional[float] = None
+    #: Question que le système vient de poser et dont la réponse est attendue (`PRICE_CEILING` : « Tu veux rester sous quel prix ? »).
+    awaiting: Optional[str] = None
 
     model_config = {"frozen": True}
 
@@ -194,6 +196,33 @@ def stamp_offer_identity(vendors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return stamped
 
 
+def _producer_options(vendor_ctx: Optional[Dict[str, Any]]) -> List[ProducerOption]:
+    """Options producteur (avec faits visibles) du menu vivant ; vide s'il y a moins de 2 offres."""
+    if not vendor_ctx or not isinstance(vendor_ctx.get("vendors"), list):
+        return []
+    options: List[ProducerOption] = []
+    for position, v in enumerate(vendor_ctx["vendors"], start=1):
+        if not isinstance(v, dict):
+            continue
+        price_label = v.get("pricing_label") or f"{v.get('price')} FCFA/{v.get('unit')}"
+        extras = " · ".join(
+            str(x) for x in (v.get("zone"), f"{v['available_qty']} dispo" if v.get("available_qty") else None) if x
+        )
+        label = f"{v.get('vendor_name') or 'producteur'} — {price_label}" + (f" ({extras})" if extras else "")
+        options.append(
+            ProducerOption(
+                producer_id=str(v.get("producer_id") or ""),
+                display_index=position,
+                offer_id=vendor_offer_id(v, position),
+                label=label,
+                facts={k: v.get(k) for k in (
+                    "vendor_name", "zone", "price", "unit", "available_qty", "pricing_label", "price_basis", "pricing_tiers",
+                )},
+            )
+        )
+    return options if len(options) > 1 else []
+
+
 def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
     """Reconstruit le contexte candidat ACTUEL depuis l'état — jamais depuis
     un canal générique susceptible d'être périmé.
@@ -251,22 +280,28 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
         label += f" — {t.get('price')} FCFA"
         tier_options.append(TierOption(tier_id=str(t["tier_id"]), label=label, facts=dict(t)))
 
+    # Producteurs du menu VIVANT : une fois l'un d'eux choisi, l'utilisateur peut encore en CHANGER (« pas Gilbert, Moussa ») — un changement
+    # d'avis explicite, pas une déviation (même règle que la re-sélection d'un palier).
+    switchable = _producer_options(vendor_ctx) if (vendor_ctx and chosen_vendor is not None) else []
+
     if active_tier_id and any(t.tier_id == active_tier_id for t in tier_options):
         return SelectionContext(
             expected_action=ActionType.SET_PACKAGE_COUNT,
             tier_options=tier_options,
             active_tier_id=active_tier_id,
+            producer_options=switchable,
         )
 
     if tier_options:
         return SelectionContext(
             expected_action=ActionType.SELECT_PRICING_TIER,
             tier_options=tier_options,
+            producer_options=switchable,
         )
 
     if chosen_vendor is not None:
         # Vendeur résolu, produit SANS palier → flow historique quantité.
-        return SelectionContext(expected_action=ActionType.SET_QUANTITY)
+        return SelectionContext(expected_action=ActionType.SET_QUANTITY, producer_options=switchable)
 
     # --- Aucun vendeur choisi encore : liste producteurs, si active ---
     if vendor_ctx and isinstance(vendor_ctx.get("vendors"), list):
@@ -303,6 +338,7 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
                 producer_options=producer_options,
                 hidden_count=len([m for m in (vendor_ctx.get("vendors_more") or []) if isinstance(m, dict)]),
                 created_at=vendor_ctx.get("created_at") if isinstance(vendor_ctx.get("created_at"), (int, float)) else None,
+                awaiting=str(vendor_ctx.get("awaiting")) if vendor_ctx.get("awaiting") else None,
             )
 
     return SelectionContext()
@@ -353,7 +389,9 @@ def validate_action(
         return None
 
     if action == ActionType.SELECT_PRODUCER:
-        if context.expected_action != ActionType.SELECT_PRODUCER:
+        # Choix initial OU changement d'avis explicite après le choix (étapes palier / paquets / quantité) : seulement si le menu producteur
+        # vivant est connu (`producer_options`) — jamais un id hors de ce menu.
+        if context.expected_action != ActionType.SELECT_PRODUCER and not context.producer_options:
             return None
         oid = raw.get("offer_id")
         if oid:

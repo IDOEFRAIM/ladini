@@ -67,6 +67,20 @@ async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
         recovered: Dict[str, Any] = apply_corrections(state, await render_recovery(ctx))
         return recovered
 
+    _vctx = state.get("vendor_selection_context")
+    _vendors = [v for v in ((_vctx or {}).get("vendors") or []) if isinstance(v, dict)] if isinstance(_vctx, dict) else []
+    _unreadable = str(state.get("interpreted_event") or "").upper() in {"UNKNOWN", "OUT_OF_SCOPE"} and bool(
+        str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    )
+    if _unreadable and len(_vendors) > 1 and not preformatted:
+        # PAS de réaffichage aveugle : question COURTE (« lequel ? ») avec les noms, sur une ligne — le menu complet reste disponible sur demande.
+        names = ", ".join(str(v.get("vendor_name") or "?") for v in _vendors[:6])
+        logger.info("interaction_mode=CLARIFICATION | clarification_reason=unreadable_reply | menu_redisplay=suppressed")
+        return {
+            "final_response": f"Tu parles de quel producteur ? ({names}) Tu peux me dire un nom, un numéro, un prix.",
+            "ag_ui_component": None,
+        }
+
     if preformatted:
         text_output = str(preformatted)
     else:
