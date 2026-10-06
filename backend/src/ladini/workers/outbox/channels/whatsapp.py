@@ -7,7 +7,9 @@ même flag que ``api/tasks.py`` pour le chemin conversationnel principal.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from ladini.core.settings import settings
@@ -33,6 +35,39 @@ def _chunk(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str]:
             split_idx = limit
         chunks.append(remaining[:split_idx].rstrip())
         remaining = remaining[split_idx:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks[:4]
+
+
+#: Corps d'un template WhatsApp : 1024 caractères au total, dont ~45 d'enrobage (« Bonjour: … Merci pour votre
+#: confiance. ») — la variable `{{1}}` reste donc sous 900.
+_TEMPLATE_VAR_LIMIT = 900
+
+
+def flatten_for_template(text: str) -> str:
+    """Rend `text` acceptable comme VARIABLE de template WhatsApp : ni retour à la ligne, ni tabulation, ni plus de 4
+    espaces consécutifs (rejetés par Meta). Les sauts de ligne deviennent « | »."""
+    flat = re.sub(r"\s*[\r\n]+\s*", " | ", (text or "").strip())
+    flat = flat.replace("\t", " ")
+    flat = re.sub(r" {2,}", " ", flat)
+    flat = re.sub(r"(?:\| ){2,}", "| ", flat)
+    return flat.strip(" |")
+
+
+def template_chunks(body: str, limit: int = _TEMPLATE_VAR_LIMIT) -> List[str]:
+    """Texte aplati, coupé sur une frontière d'espace en morceaux <= `limit` (4 messages au plus, comme `_chunk`)."""
+    flat = flatten_for_template(body)
+    if not flat:
+        return [""]
+    chunks: List[str] = []
+    remaining = flat
+    while len(remaining) > limit:
+        cut = remaining.rfind(" ", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
     if remaining:
         chunks.append(remaining)
     return chunks[:4]
@@ -112,6 +147,29 @@ class WhatsAppChannel:
         )
         from_number = str(settings.TWILIO_WHATSAPP_NUMBER).strip()
         last_sid: Optional[str] = None
+
+        # Message PROACTIF (relance, confirmation de commande, notification) : par template approuvé quand il est
+        # configuré — un message libre hors fenêtre de 24 h est refusé par WhatsApp et le message « meurt ». Si le
+        # template est refusé (non approuvé, SID invalide), on retombe sur l'envoi libre plutôt que de tout perdre.
+        content_sid = str(getattr(settings, "TWILIO_PROACTIVE_TEMPLATE_CONTENT_SID", "") or "").strip()
+        if content_sid:
+            try:
+                for piece in template_chunks(body):
+                    msg = client.messages.create(
+                        from_=from_number,
+                        to=f"whatsapp:{phone}",
+                        content_sid=content_sid,
+                        content_variables=json.dumps({"1": piece}, ensure_ascii=False),
+                    )
+                    last_sid = msg.sid
+                return SendResult.success(provider_ref=last_sid)
+            except Exception as exc:  # noqa: BLE001 - jamais perdre le message : repli libre ci-dessous
+                if last_sid is not None:
+                    # Un morceau est déjà parti : renvoyer en libre dupliquerait le début du message.
+                    logger.warning("TEMPLATE_PARTIAL_SEND | to=%s | %s", phone[-4:], exc)
+                    return SendResult.failure(str(exc))
+                logger.warning("TEMPLATE_SEND_FAILED_FALLBACK_FREEFORM | to=%s | %s", phone[-4:], exc)
+
         for chunk in _chunk(body):
             msg = client.messages.create(
                 from_=from_number,
