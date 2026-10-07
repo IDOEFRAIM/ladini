@@ -66,6 +66,46 @@ class SearchConstraints:
         return ", ".join(parts)
 
 
+REMOVABLE = ("max_price", "packaging")
+
+
+def constraints_from_dict(data: Optional[Mapping[str, Any]]) -> SearchConstraints:
+    """Relit les contraintes SAUVEGARDÉES dans le snapshot du menu (`SearchConstraints.to_dict()`)."""
+    d = dict(data or {})
+    return SearchConstraints(
+        max_price_per_unit=_num(d.get("max_price_per_unit")),
+        price_unit=str(d["price_unit"]) if d.get("price_unit") else None,
+        package_type=str(d["package_type"]) if d.get("package_type") else None,
+        package_size=_num(d.get("package_size")),
+        package_unit=str(d["package_unit"]) if d.get("package_unit") else None,
+    )
+
+
+def merge_constraints(
+    current: SearchConstraints,
+    *,
+    max_price: Optional[float] = None,
+    package_type: Optional[str] = None,
+    package_size: Optional[float] = None,
+    remove: Sequence[str] = (),
+) -> SearchConstraints:
+    """Contraintes après une édition : valeurs POSÉES / REMPLACÉES, puis les contraintes nommées dans `remove` SUPPRIMÉES.
+
+    « le prix n'importe plus » retire réellement `max_price_per_unit` (`None`), jamais un plafond factice énorme. Une contrainte non mentionnée est conservée."""
+    max_p = _num(max_price) if max_price is not None else current.max_price_per_unit
+    ptype = (_norm(package_type) or None) if package_type else current.package_type
+    psize = _num(package_size) if package_size is not None else current.package_size
+    punit = current.package_unit if package_size is None else (current.price_unit or current.package_unit)
+    removed = {str(r).lower() for r in remove}
+    if "max_price" in removed:
+        max_p = None
+    if "packaging" in removed:
+        ptype, psize, punit = None, None, None
+    return SearchConstraints(
+        max_price_per_unit=max_p, price_unit=current.price_unit, package_type=ptype, package_size=psize, package_unit=punit,
+    )
+
+
 def constraints_from_payload(payload: Mapping[str, Any]) -> SearchConstraints:
     """Lit les contraintes déjà extraites (jamais devinées) ; valeurs non comparables ignorées."""
     price_unit = normalize_unit(str(payload.get("max_price_unit") or payload.get("price_unit") or payload.get("unit") or "")) or None
@@ -181,6 +221,9 @@ def no_result_message(c: SearchConstraints, product: str, excluded_count: int) -
 
 
 __all__ = [
+    "REMOVABLE",
+    "constraints_from_dict",
+    "merge_constraints",
     "FilterReport",
     "SearchConstraints",
     "apply_constraints",

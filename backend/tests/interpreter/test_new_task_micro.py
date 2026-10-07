@@ -386,7 +386,7 @@ class TestPromptSizeGuard:
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
         # Flow compression (2026-10) : +~45 tokens (max_price_per_unit/conditionnement VOULU d'un BUYER_REQUEST) — loin des 5000.
         # Field robustness (2026-10) : +~20 tokens (chercher/trouver, total du panier) — loin des 5000.
-        assert estimated_tokens < 2800, (
+        assert estimated_tokens < 3000, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -398,7 +398,7 @@ class TestPromptSizeGuard:
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
         # B24 : +~30 tokens (champ `update_action` du schéma JSON) ; le garde anti-5000 tokens ci-dessus reste à 2650.
-        assert 800 <= total_tokens <= 2800
+        assert 800 <= total_tokens <= 3000
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

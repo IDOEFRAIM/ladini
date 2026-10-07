@@ -252,6 +252,21 @@ def _cart_ready_confirmation_alias(state: Dict[str, Any], text: str) -> Optional
     return None
 
 
+def _active_preorder_goal_of(state: Dict[str, Any]) -> Optional[str]:
+    """Le but de précommande ACTIF quand un brouillon de précommande est en attente de confirmation, sinon `None`."""
+    from ladini.graphs.agents.market_coach.core.pending_interaction import (
+        InteractionKind,
+        get_pending_interaction,
+    )
+
+    goal = str(state.get("current_goal") or (state.get("working_memory") or {}).get("active_goal") or "").upper()
+    if goal in {"BUYER_PREORDER_INIT", "BUYER_PREORDER_CONFIRM", "BUYER_CREATE_PREORDER"} and state.get("preorder_draft") and (
+        get_pending_interaction(state).kind == InteractionKind.CONFIRM_ACTION
+    ):
+        return goal
+    return None
+
+
 def _draft_context_hint(state: Dict[str, Any]) -> Optional[str]:
     """But + valeurs d'un récapitulatif de brouillon affiché (attente CONFIRM_ACTION), pour que NEW_TASK sache qu'un message court est une CORRECTION."""
     from ladini.graphs.agents.market_coach.core.pending_interaction import (
@@ -3142,6 +3157,13 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 (_nt_result or {}).get("detected_intent"),
             )
             if _nt_outcome == NewTaskOutcome.RESULT:
+                if str((_nt_result or {}).get("detected_intent") or "").upper() == "BUYER_EDIT_CART":
+                    _active_preorder_goal = _active_preorder_goal_of(state)
+                    if _active_preorder_goal:
+                        # Corriger le panier PENDANT le récapitulatif = poursuivre le MÊME parcours : le brouillon (version, ordre) n'est ni purgé ni
+                        # confirmé ; `create_preorder` recompose le brouillon depuis le panier édité et exige une confirmation FRAÎCHE.
+                        logger.info("business_edit_resolved | continuation_of=%s", _active_preorder_goal)
+                        _nt_result = {**(_nt_result or {}), "detected_intent": _active_preorder_goal, "interpreted_event": "UPDATE"}
                 # (2026-09-13, incident WhatsApp #5) : garde de COHÉRENCE
                 # inter-appels — PAS un mot-clé déduit du texte, une
                 # contradiction interne entre DEUX jugements LLM successifs

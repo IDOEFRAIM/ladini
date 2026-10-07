@@ -162,6 +162,7 @@ BUYER_REQUEST_SPECIALIZATIONS: FrozenSet[str] = frozenset(
     {
         "BUYER_ADD_TO_CART",
         "BUYER_VIEW_CART",
+        "BUYER_EDIT_CART",
         "BUYER_PREORDER_INIT",
         "BUYER_PREORDER_CONFIRM",
         "BUYER_NEGOTIATE_PRICE",

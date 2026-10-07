@@ -73,6 +73,8 @@ class SelectionReference(BaseModel):
     date_offset_days: Optional[int] = None
     #: REFINEMENT — l'objection dite (« c'est trop cher » -> PRICE, « trop loin » -> DISTANCE) quand aucun critère précis n'est donné.
     objection: Optional[Literal["PRICE", "DISTANCE", "PACKAGE", "OTHER"]] = None
+    #: REFINEMENT — contraintes de recherche à RETIRER (« le prix n'importe plus » -> ["max_price"], « finalement pas de sachet » -> ["packaging"]).
+    remove: List[Literal["max_price", "packaging"]] = []
     #: REFINEMENT — prix maximum dit (« pas plus de 600 »).
     max_price: Optional[float] = None
     #: PREFERENCE / REFINEMENT (tri : « moins cher », « plus de stock »)
@@ -85,6 +87,8 @@ class SelectionReference(BaseModel):
     def _tolerant_reader(cls, data: Any) -> Any:
         """Un vrai modèle écrit parfois le CRITÈRE comme type de référence (`{"reference_type": "SUBJECTIVE"}`) : c'est une PREFERENCE.
         Lecture tolérante plutôt que repair puis UNKNOWN (la phrase n'était plus comprise)."""
+        if isinstance(data, dict) and data.get("remove") is None and "remove" in data:
+            data = {**data, "remove": []}
         if isinstance(data, dict):
             rtype = str(data.get("reference_type") or "").upper()
             if rtype in {c.value for c in Criterion}:
@@ -102,7 +106,9 @@ class SelectionReference(BaseModel):
         elif self.reference_type in (ReferenceType.PAGINATION, ReferenceType.NONE_OF_THESE, ReferenceType.OTHER):
             return self
         elif self.reference_type == ReferenceType.REFINEMENT:
-            if all(v is None for v in (self.region, self.packaging, self.volume, self.max_price, self.criterion, self.producer_name, self.objection)):
+            if not self.remove and all(
+                v is None for v in (self.region, self.packaging, self.volume, self.max_price, self.criterion, self.producer_name, self.objection)
+            ):
                 raise ValueError("REFINEMENT requiert au moins une contrainte")
         else:
             if all(
@@ -167,6 +173,11 @@ def _fmt_price(value: Optional[float]) -> str:
 
 def _tokens(value: str) -> List[str]:
     return [t for t in _norm(value).split() if t]
+
+
+def name_matches(query: str, name: str) -> bool:
+    """Tous les mots dits correspondent au nom (accents/traits d'union ignorés) — primitive partagée (options de menu, lignes de panier)."""
+    return _name_matches(query, name)
 
 
 def _name_matches(query: str, name: str) -> bool:
@@ -449,6 +460,7 @@ def options_from_tiers(tiers: Sequence[Mapping[str, Any]]) -> List[VisibleOption
 
 
 __all__ = [
+    "name_matches",
     "ordinal_is_evidenced",
     "Criterion",
     "ReferenceType",

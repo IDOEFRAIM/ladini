@@ -406,7 +406,10 @@ async def _finalize(
     # celle du produit principal.
     _adjacent = (
         {}
-        if raw_entities.get("additional_items") or raw_entities.get("orphan_quantities")
+        if raw_entities.get("additional_items")
+        or raw_entities.get("orphan_quantities")
+        # CORRECTION d'un PRIX (« ah non c 350 le prix ») : le nombre du texte est ce prix, jamais une 2e quantité à inventer.
+        or (raw_entities.get("is_correction") and raw_entities.get("price") is not None)
         else (_fallback_quantity_unit_from_text(text) or {})
     )
     if entities.get("quantity") is None and _adjacent.get("quantity") is not None:

@@ -136,6 +136,26 @@ async def update_preorder_phase(
 # =====================================================================
 
 
+def cart_to_items_payload(cart: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Articles de la précommande dérivés du panier (réutilisé par l'édition de ligne).
+
+    `tier_id` DOIT être transmis (audit CART→CHECKOUT 2026-09-04) : sans lui `create_preorder_draft` ne peut pas savoir que `quantity` est un NOMBRE DE
+    PAQUETS (palier) plutôt qu'une quantité en unité de base ; le serveur re-résout le palier lui-même à partir de ce seul identifiant."""
+    return [
+        {
+            "product_id": item.get("product_id"),
+            "name": item.get("name"),
+            "quantity": item.get("quantity"),
+            "unit": item.get("unit"),
+            "price": item.get("price"),
+            "producer_id": item.get("producer_id"),
+            "tier_id": item.get("tier_id"),
+        }
+        for item in cart
+        if item.get("status") != "DRAFT"
+    ]
+
+
 async def create_preorder(
     state: Dict[str, Any], mc_runtime: MarketRuntime
 ) -> Dict[str, Any]:
@@ -199,6 +219,12 @@ async def create_preorder(
             "ag_ui_component": None,
         }
 
+    # --- Édition d'une ligne pendant le récapitulatif : commande de DOMAINE, brouillon recomposé, confirmation FRAÎCHE exigée ---
+    if cached_draft_dict and (payload.get("cart_edit") or (state.get("extracted_entities") or {}).get("cart_edit")):
+        from ladini.graphs.agents.market_coach.flows.buyer.cart import _edit_cart_line
+
+        return await _edit_cart_line(state, mc_runtime, payload, cart, CartDomainService(mc_runtime), str(state.get("user_phone") or ""))
+
     # --- Draft déjà actif : délègue entièrement (mandat §3/§12) ---
     if cached_draft_dict:
         confirm_state = dict(state)
@@ -221,28 +247,7 @@ async def create_preorder(
             "ag_ui_component": None,
         }
 
-    items_payload = [
-        {
-            "product_id": item.get("product_id"),
-            "name": item.get("name"),
-            "quantity": item.get("quantity"),
-            "unit": item.get("unit"),
-            "price": item.get("price"),
-            "producer_id": item.get("producer_id"),
-            # (2026-09-04, audit CART→CHECKOUT) : `tier_id` DOIT être transmis
-            # — sans lui, `create_preorder_draft` ne peut pas savoir que
-            # `quantity` ci-dessus est un NOMBRE DE PAQUETS (palier) plutôt
-            # qu'une quantité en unité de base, et traiterait TOUT article
-            # comme un produit à tarif unique (voir
-            # `services/database/buyer.py::create_preorder_draft`, section
-            # palier). Le serveur re-résout le palier lui-même à partir de ce
-            # seul id — jamais confiance au `price`/`unit` du panier
-            # au-delà de cet identifiant.
-            "tier_id": item.get("tier_id"),
-        }
-        for item in cart
-        if item.get("status") != "DRAFT"
-    ]
+    items_payload = cart_to_items_payload(cart)
     meta = CartDomainService.recompute_cart_meta(cart)
     bootstrap_patch = await bootstrap_preorder_draft(
         state, mc_runtime, items_payload=items_payload, meta=meta

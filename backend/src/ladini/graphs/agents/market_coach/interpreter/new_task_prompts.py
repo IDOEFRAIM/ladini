@@ -26,7 +26,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
 # v12 (B27) : écran affiché — accord/refus libre = CONFIRM/REJECT, accord + valeur nouvelle = UPDATE (jamais un accord), demande
 # de chercher un autre fournisseur = REFRESH_RECURRING_MATCHING, besoin NOMMÉ = GET_MY_NEEDS(product) ; aucune liste de phrases.
-NEW_TASK_PROMPT_VERSION = "new_task_v13"
+NEW_TASK_PROMPT_VERSION = "new_task_v14"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -127,6 +127,14 @@ excluded_weekdays=[7]. `max_price_per_unit` = prix PAR UNITÉ, jamais un budget 
 si l'unité n'est pas précisée ; aussi pour BUYER_REQUEST (« pas plus de 600 FCFA le litre »), avec \
 `package_type`/`package_content_amount`/`package_content_unit` = conditionnement VOULU dit (« sachets de 500 ml » → \
 "sachet", 500, "ml"), `null` sinon. `starts_at` : date de début dite (`YYYY-MM-DD`) ; `null` sinon ou si "dès que possible".
+- `cart_edit` (BUYER_EDIT_CART, ligne DÉJÀ au panier) : {"field": \
+"QUANTITY"|"PACKAGE_COUNT"|"REMOVE", "value": nombre|null, "unit": mot \
+d'unité dit|null, "product": produit nommé|null, "producer": producteur \
+nommé|null, "ordinal": n° de ligne|null}. "je voulais dire 20 pas 10", \
+"non mets-en 5", "mets 10 litres" = QUANTITY ; "mets 10 sachets" (un \
+conditionnement nommé) = PACKAGE_COUNT ; "retire le lait", "enlève ça du panier", "supprime ce produit" = REMOVE (jamais REJECT/CONFIRM). \
+`product`/`producer` SEULEMENT s'ils sont dits ; jamais d'identifiant. `null` \
+sinon.
 - `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
 quantité+unité, en objets {"product","quantity","unit"} — jamais \
 `additional_products`.
@@ -178,6 +186,7 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "<DAILY|WEEKLY_DAYS|WEEKLY|MONTHLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
 "excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>, \
 "package_type": "<str|null>", "package_content_amount": <float|null>, "package_content_unit": "<str|null>", \
+"cart_edit": <null|objet>, "is_correction": <true|null>, \
 "starts_at": "<YYYY-MM-DD|null>", \
 "additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \
@@ -210,20 +219,24 @@ def build_new_task_user_prompt(
     lines = [f"Date de référence : {context.reference_date}"]
     if context.cart_pending:
         lines.append(
-            "Panier acheteur en attente de validation : OUI — un accord "
+            "Panier acheteur en attente de validation : OUI — ATTENTION : un message qui DEMANDE UN CHANGEMENT (une nouvelle valeur, « mets », « enlève », "
+            "« retire », « change », « plutôt », « finalement », « c'est pas X, c'est Y ») n'est JAMAIS CONFIRM ni REJECT : c'est BUYER_EDIT_CART. Un accord "
             "libre, même très court ou en anglais/pidgin courant sur "
             "WhatsApp (« je suis d'accord », « ok vas-y », « c'est bon », "
             "« okay », « ok », « oui ») signifie CONFIRM, un refus libre "
             "(« non », « laisse tomber ») signifie REJECT ; un nouveau "
             "produit ajouté reste NEW_TASK. Une question sur le TOTAL du panier "
-            "(« c'est combien au total », « ça fait combien ») est BUYER_VIEW_CART."
+            "(« c'est combien au total », « ça fait combien ») est BUYER_VIEW_CART. "
+            "Un accord qui CORRIGE une valeur (« oui mais mets 10 », « ok mais 5 », « non mets-en 5 ») n'est PAS CONFIRM : "
+            "c'est BUYER_EDIT_CART avec `cart_edit`. « non 5 » / « non 20 » (non + nombre seul) CORRIGE la quantité : QUANTITY, jamais REJECT ; "
+            "« enlève ça », « retire-le », « supprime ce produit du panier » = BUYER_EDIT_CART field REMOVE, jamais REJECT."
         )
     if context.draft_context:
         lines.append(
             f"Récapitulatif en attente de confirmation : {context.draft_context}. Un message qui ne donne que UNE ou quelques valeurs "
             "(« à 300 francs », « 400 kg », « c'est oignon pas tomate », « non 250 ») CORRIGE ces champs du MÊME récapitulatif : "
-            "NEW_TASK du même intent, `entities` = UNIQUEMENT les champs corrigés (jamais vidés, jamais les autres). « non » suivi d'une valeur "
-            "est une correction, pas un refus ; « pas maintenant », « laisse tomber » sans valeur = REJECT."
+            "NEW_TASK du même intent avec `is_correction`: true, `entities` = UNIQUEMENT les champs corrigés (jamais vidés, jamais les autres). « non » suivi d'une valeur "
+            "est une correction, pas un refus ; « c'est pas X, c'est Y » / « j'ai dit Y pas X » remplace le champ du récapitulatif qui VAUT X (300 est la quantité, 250 le prix : lis le récapitulatif) ; « pas maintenant », « laisse tomber » sans valeur = REJECT."
         )
     if context.producer_order_action_pending:
         lines.append(

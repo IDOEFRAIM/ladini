@@ -147,3 +147,44 @@ class TestNoAutomaticRelaxation:
         assert "Producteurs disponibles" not in text, "aucune offre n'est présentée comme si le critère avait été relâché"
         assert st["working_memory"]["last_search_constraints"]["max_price_per_unit"] == 100
         assert not st.get("active_cart")
+
+
+# ── ÉDITION des contraintes : poser / remplacer / RETIRER, puis rafraîchir (jamais un faux plafond, jamais une relaxation silencieuse) ──
+from tests.integration import test_conversational_autonomy_e2e as _auto  # noqa: E402
+
+_auto.UNDERSTANDING.update({
+    "max 800 finalement": {"reference": {"reference_type": "REFINEMENT", "max_price": 800}},
+    "le prix n'importe plus": {"reference": {"reference_type": "REFINEMENT", "remove": ["max_price"]}},
+    "plutôt max 100": {"reference": {"reference_type": "REFINEMENT", "max_price": 100}},
+})
+_MAX300 = "Je veux 20 litres de lait à moins de 300 FCFA le litre"
+
+
+class TestConstraintEdits:
+    def _at_300(self) -> Conv:
+        c = Conv(_entities(max_price_per_unit=300))
+        st = c.say(_MAX300)
+        assert sorted(_shown(st)) == ["Gilbert-prod", "TEST Producteur"]
+        return c
+
+    def test_a_ceiling_can_be_replaced_and_the_list_refreshed_from_the_original_pool(self):
+        c = self._at_300()
+        st = c.say("max 800 finalement")
+        assert sorted(_shown(st)) == sorted(["Gilbert-prod", "Laiterie Nana", "TEST Producteur", "Ferme Sawadogo"])
+        assert st["vendor_selection_context"]["search_constraints"]["max_price_per_unit"] == 800
+        assert "GARIKO Leila" not in _shown(st), "1200/L reste au-dessus du nouveau plafond"
+
+    def test_removing_the_price_ceiling_really_removes_it_not_a_fake_huge_number(self):
+        c = self._at_300()
+        st = c.say("le prix n'importe plus")
+        assert len(_shown(st)) == 5 and "GARIKO Leila" in _shown(st)
+        constraints = st["vendor_selection_context"]["search_constraints"]
+        assert "max_price_per_unit" not in constraints, constraints
+        assert "Plafond de prix retiré" in _reply(st)
+
+    def test_an_edit_with_no_result_keeps_the_current_list_and_the_current_constraints(self):
+        c = self._at_300()
+        st = c.say("plutôt max 100")
+        assert sorted(_shown(st)) == ["Gilbert-prod", "TEST Producteur"], "la liste actuelle est conservée"
+        assert "Je n'ai rien trouvé" in _reply(st)
+        assert st["vendor_selection_context"]["search_constraints"]["max_price_per_unit"] == 300

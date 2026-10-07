@@ -660,5 +660,5 @@ class TestStructuredActionPromptNeverLeaksTheFullCatalog:
         assert "T10" not in prompt
 
     def test_prompt_version_is_distinct_from_other_families(self):
-        assert STRUCTURED_ACTION_PROMPT_VERSION == "structured_action_v4"
+        assert STRUCTURED_ACTION_PROMPT_VERSION == "structured_action_v5"
         assert STRUCTURED_ACTION_PROMPT_VERSION not in ("selection_v1", "active_slot_v2", "interpreter_v1")
