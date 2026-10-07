@@ -26,6 +26,16 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.domain.cart_edit import (
+    CartEditSpec,
+    EditOutcome,
+    EditStatus,
+    cart_meta,
+    commit_edit,
+    line_identity,
+    plan_edit,
+    with_line_ids,
+)
 from ladini.graphs.agents.market_coach.domain.selection_actions import (
     stamp_offer_identity,
 )
@@ -360,6 +370,63 @@ class CartDomainService:
             "pending_menu": menu,
         }
         return state_patch, menu
+
+    async def edit_cart_line(
+        self,
+        phone: str,
+        spec: CartEditSpec,
+        cart: List[Dict[str, Any]],
+        state: Dict[str, Any],
+        *,
+        expected_version: Optional[int] = None,
+    ) -> EditOutcome:
+        """COMMANDE de modification d'une ligne : le domaine décide (cible, validité, minimum, stock, version) ; la conversation n'a fait qu'interpréter.
+
+        Ordre : planifier (pur) -> re-vérifier minimum + stock (fail closed) -> `commit_edit` (CAS de version). Le panier n'est jamais reconstruit."""
+        current_version = int((state.get("cart_meta") or {}).get("version") or 0)
+        plan = plan_edit(spec, cart)
+        if plan.status == EditStatus.APPLIED and plan.field != "REMOVE" and plan.new_line is not None:
+            line = plan.new_line
+            ref_unit = normalize_unit(str(line.get("unit") or "")) or str(line.get("unit") or "KG").upper()
+            base_quantity = float(plan.base_quantity or 0.0)
+            minimum = validate_minimum_order_quantity(
+                minimum_order_quantity=line.get("minimum_order_quantity"),
+                minimum_order_unit=line.get("minimum_order_unit"),
+                total_quantity=base_quantity,
+                total_unit=ref_unit,
+            )
+            if not minimum.passed:
+                min_qty = minimum.minimum_in_total_unit
+                text = (
+                    f"La quantité minimale pour *{line.get('name')}* est de *{min_qty:g} {ref_unit}* — je garde ta quantité actuelle."
+                    if min_qty is not None
+                    else "Cette quantité est en dessous du minimum de commande — je garde ta quantité actuelle."
+                )
+                return EditOutcome(EditStatus.REJECTED, cart=with_line_ids(cart), meta=cart_meta(cart, version=current_version), line_id=plan.line_id, message=text)
+            check = _unwrap_tool_envelope(
+                await StockGateway(self.mc_runtime).validate_stock_availability(
+                    product_id=line.get("product_id"),
+                    quantity=base_quantity,
+                    unit=ref_unit,
+                    buyer_phone=phone,
+                    tier_id=line.get("tier_id"),
+                    package_count=int(line["quantity"]) if line.get("tier_id") else None,
+                )
+            )
+            if not is_success_response(check):
+                available = check.get("available_quantity")
+                text = (
+                    f"Stock insuffisant pour *{line.get('name')}* : seulement {_fmt_num(available)} {ref_unit.lower()} disponible(s). Je garde ta quantité actuelle."
+                    if available is not None
+                    else "Je n'ai pas pu vérifier le stock pour cette quantité — je garde ta quantité actuelle."
+                )
+                return EditOutcome(EditStatus.REJECTED, cart=with_line_ids(cart), meta=cart_meta(cart, version=current_version), line_id=plan.line_id, message=text)
+        outcome = commit_edit(cart, plan, current_version=current_version, expected_version=expected_version)
+        logger.info(
+            "business_edit_%s | entity=cart_line | line_id=%s | field=%s | old=%s | new=%s | version=%s",
+            outcome.status.value.lower(), outcome.line_id, outcome.field, outcome.old_value, outcome.new_value, outcome.meta.get("version"),
+        )
+        return outcome
 
     @staticmethod
     def recompute_cart_meta(cart: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -969,6 +1036,9 @@ class CartDomainService:
                 "status": "VALIDATED",
                 "notification_id": None,
                 "notification_status": None,
+                # Politique plateforme figée avec la ligne : une ÉDITION ultérieure re-valide le même minimum (jamais de contournement par correction).
+                "minimum_order_quantity": ref.get("minimum_order_quantity"),
+                "minimum_order_unit": ref.get("minimum_order_unit"),
             }
         else:
             price = float(check.get("unit_price") or ref.get("price") or 0.0)
@@ -986,7 +1056,10 @@ class CartDomainService:
                 "status": "VALIDATED",
                 "notification_id": None,
                 "notification_status": None,
+                "minimum_order_quantity": ref.get("minimum_order_quantity"),
+                "minimum_order_unit": ref.get("minimum_order_unit"),
             }
+        line["line_id"] = line_identity(line)
 
         # La notification producteur doit décrire la demande dans l'unité de
         # BASE du produit (celle de son stock) — `qty` est un nombre de paquets
@@ -1021,6 +1094,7 @@ class CartDomainService:
         ]
         cart.append(line)
         meta = self.recompute_cart_meta(cart)
+        meta["version"] = int((state.get("cart_meta") or {}).get("version") or 0) + 1
         render = self.render_cart_menu(cart, meta)
 
         response = {

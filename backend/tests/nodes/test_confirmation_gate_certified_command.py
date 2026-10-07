@@ -137,8 +137,8 @@ _EXPECTED_GENERIC_GOALS = frozenset(
 
 
 class TestA1ExactInventory:
-    def test_the_28_write_intents_split_exactly_into_draft_own_flow_and_generic(self):
-        assert len(_ALL_WRITE_GOALS) == 28, (
+    def test_the_29_write_intents_split_exactly_into_draft_own_flow_and_generic(self):
+        assert len(_ALL_WRITE_GOALS) == 29, (
             f"le nombre d'intents WRITE a changé ({len(_ALL_WRITE_GOALS)}) — "
             f"un nouvel intent doit être classé (draft/own-flow/générique) "
             f"avant que ce test ne soit simplement élargi"

@@ -9,6 +9,11 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.domain.cart_edit import (
+    CartEditSpec,
+    EditOutcome,
+    EditStatus,
+)
 from ladini.graphs.agents.market_coach.domain.search_constraints import (
     apply_constraints,
     constraints_from_payload,
@@ -509,6 +514,88 @@ async def _execute_selection_action(
     return None
 
 
+def _change_text(outcome: EditOutcome) -> str:
+    if outcome.field == "REMOVE":
+        return "✅ Ligne retirée du panier."
+    label = "Nombre de paquets" if outcome.field == "PACKAGE_COUNT" else "Quantité"
+    return f"✅ {label} mise à jour : {outcome.old_value:g} → {outcome.new_value:g}."
+
+
+async def _edit_cart_line(
+    state: Dict[str, Any],
+    mc_runtime: Any,
+    payload: Dict[str, Any],
+    cart: List[Dict[str, Any]],
+    cart_service: CartDomainService,
+    phone: str,
+) -> Dict[str, Any]:
+    """BUYER_EDIT_CART : modifie UNE ligne du panier par une commande de domaine (`CartDomainService.edit_cart_line`).
+
+    Précommande déjà préparée (brouillon `DRAFT`) : le brouillon est RECOMPOSÉ depuis le panier édité (nouvelle version, ancien ordre SUPERSEDED) — l'ancienne
+    confirmation devient périmée (`STALE_TARGET`), le récapitulatif est RÉAFFICHÉ et une confirmation FRAÎCHE est exigée : un « oui » donné pour l'ancienne quantité
+    ne confirme jamais la nouvelle. Brouillon engagé (EXECUTING/EXECUTED…) : aucune modification silencieuse."""
+    raw = payload.get("cart_edit") or (state.get("extracted_entities") or {}).get("cart_edit")
+    logger.info("business_edit_requested | entity=cart_line | has_spec=%s", bool(raw))
+    try:
+        spec = CartEditSpec.model_validate(raw)
+    except Exception:  # noqa: BLE001 - édition illisible : on demande, on ne devine pas
+        return {
+            "status": "WAITING_INPUT",
+            "response_strategy": "SUCCESS",
+            "final_response": "Qu'est-ce que tu veux modifier : la quantité d'un article, ou le retirer du panier ?",
+            "ag_ui_component": None,
+        }
+
+    draft_dict = state.get("preorder_draft")
+    if isinstance(draft_dict, dict) and draft_dict:
+        draft_status = str(draft_dict.get("status") or "DRAFT").upper()
+        if draft_status != "DRAFT":
+            logger.info("business_edit_rejected | entity=cart_line | reason=preorder_not_editable | status=%s", draft_status)
+            return {
+                "status": "WAITING_INPUT",
+                "response_strategy": "SUCCESS",
+                "final_response": "Ta précommande est déjà engagée : je ne peux plus la modifier ici. Dis « annuler » si tu veux la reprendre.",
+                "ag_ui_component": None,
+            }
+
+    _viewed = (state.get("working_memory") or {}).get("cart_viewed_version")
+    outcome = await cart_service.edit_cart_line(phone, spec, cart, state, expected_version=int(_viewed) if isinstance(_viewed, (int, float)) else None)
+    meta = outcome.meta
+    base: Dict[str, Any] = {"status": "COMPLETED", "preorder_workflow": {"phase": "CART"}, "ag_ui_component": None}
+
+    if outcome.status in (EditStatus.NOT_FOUND, EditStatus.AMBIGUOUS, EditStatus.REJECTED, EditStatus.CONFLICT):
+        logger.info("business_edit_%s | entity=cart_line | status=%s", "conflict" if outcome.status == EditStatus.CONFLICT else "rejected", outcome.status.value)
+        render = cart_service.render_cart_menu(outcome.cart, meta) if outcome.status == EditStatus.CONFLICT else {}
+        text = outcome.message or "Je n'ai pas pu appliquer cette modification."
+        if render.get("final_response"):
+            text = f"{text}\n\n{render['final_response']}"
+        return {**base, "response_strategy": "SUCCESS", "status": "WAITING_INPUT", "final_response": text, "active_cart": outcome.cart, "cart_meta": meta}
+
+    patch: Dict[str, Any] = {**base, "active_cart": outcome.cart, "cart_meta": meta, "response_strategy": "SELECTION_MENU" if outcome.cart else "SUCCESS"}
+
+    if outcome.status == EditStatus.APPLIED and isinstance(draft_dict, dict) and draft_dict and outcome.cart:
+        from ladini.graphs.agents.market_coach.flows.buyer.preorder import (
+            cart_to_items_payload,
+        )
+        from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
+            bootstrap_preorder_draft,
+        )
+
+        edited_state = {**state, "active_cart": outcome.cart, "cart_meta": meta}
+        recap = await bootstrap_preorder_draft(edited_state, mc_runtime, items_payload=cart_to_items_payload(outcome.cart), meta=meta)
+        logger.info("confirmation_invalidated | entity=preorder_draft | reason=cart_line_edited")
+        recap["active_cart"] = outcome.cart
+        recap["cart_meta"] = meta
+        recap["working_memory"] = {**(state.get("working_memory") or {}), **(recap.get("working_memory") or {}), "cart_viewed_version": meta["version"]}
+        recap["final_response"] = f"{_change_text(outcome)}\n\n{recap.get('final_response') or ''}".strip()
+        return recap
+
+    render = cart_service.render_cart_menu(outcome.cart, meta)
+    head = "Rien à changer : c'est déjà cette valeur." if outcome.status == EditStatus.UNCHANGED else _change_text(outcome)
+    patch["final_response"] = f"{head}\n\n{render.get('final_response') or ''}".strip()
+    return patch
+
+
 async def cart_management(
     state: Dict[str, Any], mc_runtime: MarketRuntime
 ) -> Dict[str, Any]:
@@ -552,8 +639,29 @@ async def cart_management(
             wm_patch = dict(base.get("working_memory") or {})
             wm_patch["last_active_cart"] = snapshot
             base["working_memory"] = wm_patch
+        _meta_out = base.get("cart_meta")
+        if isinstance(_meta_out, dict) and _meta_out.get("version") is not None:
+            # Version du panier que l'utilisateur VOIT : une édition ultérieure est refusée (CONFLICT) si le panier a changé depuis.
+            wm_view = dict(base.get("working_memory") or state.get("working_memory") or {})
+            wm_view["cart_viewed_version"] = _meta_out["version"]
+            base["working_memory"] = wm_view
 
         return base
+
+    # --- ACTIONS DE MENU (affiner / montrer les autres / aucun ne convient) : mêmes handlers que la recherche, quel que soit le parcours qui a affiché le menu
+    #     (demande complète avec quantité = `cart_management`, demande simple = `buyer_request_resolver`) ---
+    _menu_action = str(((state.get("extracted_entities") or {}).get("menu_action")) or "").upper()
+    _vctx_live = state.get("vendor_selection_context")
+    if _menu_action in {"SHOW_MORE", "REFINE", "NONE_OF_THESE"} and isinstance(_vctx_live, dict) and _vctx_live.get("vendors") and not _vctx_live.get("chosen_vendor"):
+        from ladini.graphs.agents.market_coach.flows.buyer import (
+            procurement as _procurement,
+        )
+
+        if _menu_action == "SHOW_MORE":
+            return _with_base(_procurement._show_more_offers(state, mc_runtime, _vctx_live))
+        if _menu_action == "REFINE":
+            return _with_base(_procurement._refine_offers(state, mc_runtime, _vctx_live))
+        return _with_base(_procurement._none_of_these(_vctx_live))
 
     # --- Free-text preorder trigger ---
     cart_action = detect_cart_action(state)
@@ -601,9 +709,14 @@ async def cart_management(
                 quantity = _requested_qty
                 payload["quantity"] = _requested_qty
 
+    # --- EDIT CART LINE : la conversation a interprété l'édition, le DOMAINE l'exécute ---
+    if goal == "BUYER_EDIT_CART":
+        return _with_base(await _edit_cart_line(state, mc_runtime, payload, cart, cart_service, phone))
+
     # --- VIEW CART ---
     if goal == "BUYER_VIEW_CART":
         meta = CartDomainService.recompute_cart_meta(cart)
+        meta["version"] = int((state.get("cart_meta") or {}).get("version") or 0)  # la consultation ne change pas la version
         pending_draft = state.get("draft_payload")
         if not pending_draft or pending_draft.get("__reset__"):
             pending_draft = state.get("suspended_payload")
@@ -1276,7 +1389,9 @@ async def cart_management(
     # recherche — rien n'est relâché en silence ; sans résultat, on le dit et on propose d'élargir.
     _constraints = constraints_from_payload(payload)
     _search_constraints = _constraints.to_dict()
+    _search_pool: List[Dict[str, Any]] = []
     if vendors and not _constraints.is_empty:
+        _search_pool = [dict(v) for v in vendors]  # résultats AVANT contraintes : retirer/remplacer une contrainte repart de ce pool (jamais une relaxation silencieuse)
         _report = apply_constraints(vendors, _constraints)
         logger.info(
             "flow_compression | constraints=%s | found=%s | kept=%s | excluded=%s",
@@ -1325,6 +1440,7 @@ async def cart_management(
             "requested_quantity": quantity,
             "requested_unit": payload.get("unit"),
             "search_constraints": _search_constraints,
+            "search_pool": _search_pool,
         }
         state_patch, _menu = cart_service.build_product_selection_menu(
             str(product_name),

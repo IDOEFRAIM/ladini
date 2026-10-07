@@ -183,6 +183,12 @@ class NewTaskEntities(BaseModel):
     weekly_days: List[int] = []
     excluded_weekdays: List[int] = []
     max_price_per_unit: Optional[float] = None
+    #: BUYER_EDIT_CART : correction STRUCTURÉE d'une ligne du panier (champ + valeur + ligne visée). Le modèle comprend ce qui change ; le DOMAINE l'exécute
+    #: (`domain/cart_edit.py`) — le modèle ne produit jamais d'identifiant de ligne.
+    cart_edit: Optional[Dict[str, Any]] = None
+    #: Le message CORRIGE une valeur du récapitulatif affiché (« en fait c'est oignon pas tomate », « non 250 ») — jamais une NOUVELLE demande. Sans ce signal, un produit
+    #: différent déclenche la question « annuler et commencer la vente de … ? » (garde anti-fusion d'une nouvelle vente dans l'ancien brouillon).
+    is_correction: Optional[bool] = None
     # Date de début EXPLICITE (« à partir du 20 octobre », « commence lundi ») — `YYYY-MM-DD`, `None` si absente ou si
     # l'utilisateur dit « dès que possible » : le DOMAINE (`start_policy`) décide, jamais le modèle.
     starts_at: Optional[str] = None

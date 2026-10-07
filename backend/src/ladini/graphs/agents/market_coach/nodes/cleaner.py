@@ -209,6 +209,7 @@ async def state_cleaner_node(
             {
                 "BUYER_ADD_TO_CART",
                 "BUYER_VIEW_CART",
+                "BUYER_EDIT_CART",
                 "BUYER_PREORDER_INIT",
                 "BUYER_PREORDER_CONFIRM",
             }

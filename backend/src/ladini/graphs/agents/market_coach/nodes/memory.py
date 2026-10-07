@@ -193,6 +193,9 @@ _AUCTION_MAPPING_KINDS = frozenset({"auction", "buyer_auction_list", "auction_bi
 # d'un côté est réhydratée de l'autre (et inversement). Elles étaient
 # auparavant déclarées deux fois à l'identique.
 _EPHEMERAL_WORKING_KEYS = frozenset(_EPHEMERAL_WORKING_KEYS_TUPLE)
+#: Champs qui survivent à une CORRECTION de produit (valeurs physiques de ce que l'utilisateur possède).
+_CORRECTION_KEPT_FIELDS = ("quantity", "unit", "quantity_display", "original_quantity", "unit_conversion")
+
 _PRODUCT_CASCADE_FIELDS = (
     "quantity",
     "unit",
@@ -538,11 +541,16 @@ async def memory_update(
             return
         _record_correction(field, current_value, value)
         if field == "product":
-            _cascade_clear(_PRODUCT_CASCADE_FIELDS)
+            # CORRECTION explicite du produit (« en fait c'est oignon pas tomate ») : les valeurs PHYSIQUES compatibles (quantité, unité) survivent — c'est la même
+            # marchandise mal nommée ; le prix, la base de prix, les paliers, la variété… visent UN produit : ils sont purgés puis revalidés (jamais hérités).
+            is_correction = bool(extracted.get("is_correction"))
+            kept = _CORRECTION_KEPT_FIELDS if is_correction else ()
+            _cascade_clear(tuple(f for f in _PRODUCT_CASCADE_FIELDS if f not in kept))
             stable["product"] = None
-            stable["quantity"] = None
+            if not is_correction:
+                stable["quantity"] = None
+                stable["unit"] = None
             stable["price"] = None
-            stable["unit"] = None
             stable["stock_id"] = None
             product_slot_changed = True
             clear_vendor_ctx = True
@@ -934,6 +942,13 @@ async def memory_update(
             ) and not _values_equal(_established_quantity, _expr_amount):
                 payload["quantity"] = _established_quantity
                 payload["unit"] = _established_unit
+        # CORRECTION d'UN champ (« ah non c 350 le prix ») : l'enrichissement texte ne doit PAS inventer un 2e champ (350 lu aussi comme quantité). Les champs que le
+        # modèle n'a pas corrigés gardent leur valeur établie — sauf changement de produit, où le domaine revalide lui-même les champs liés au produit.
+        _model_entities = state.get("extracted_entities") or {}
+        if _model_entities.get("is_correction") and not slot_has_value(_model_entities.get("product")):
+            for _key, _established in (("quantity", _established_quantity), ("unit", _established_unit), ("price", _established_price)):
+                if slot_has_value(_established) and not slot_has_value(_model_entities.get(_key)):
+                    payload[_key] = _established
         _force_clarification = bool(payload.get("slot_enrichment_force_clarification"))
         payload["slot_enrichment_force_clarification"] = None
         # Même mésadresse, même correctif — `strategy.py:52` relit

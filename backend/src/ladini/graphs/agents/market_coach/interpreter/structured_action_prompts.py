@@ -37,7 +37,7 @@ from ladini.graphs.agents.market_coach.interpreter.structured_action_contract im
 # (SELECT_PRICING_TIER), jamais une déviation. v2 ajoute une clarification
 # explicite (achat identique ≠ nouvelle demande) + un exemple contrastif
 # dédié, sans transformer la règle en liste de synonymes.
-STRUCTURED_ACTION_PROMPT_VERSION = "structured_action_v4"
+STRUCTURED_ACTION_PROMPT_VERSION = "structured_action_v5"
 
 _SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -102,9 +102,11 @@ _SELECTION_RULES = (
     '    {"reference_type": "PREFERENCE", "criterion": "CHEAPEST"|"HIGHEST_AVAILABILITY"|"SUBJECTIVE"} '
     "(« le moins cher », « celui qui a le plus de stock » ; « le plus intéressant » = SUBJECTIVE) — ne calcule JAMAIS toi-même "
     "quel est le moins cher : le système le fait ;\n"
-    '    {"reference_type": "REFINEMENT", "objection": "PRICE|DISTANCE|PACKAGE|OTHER", "region": "<lieu>", "packaging": "<conditionnement>", "max_price": <nombre>, '
+    '    {"reference_type": "REFINEMENT", "remove": ["max_price"|"packaging"] (« le prix n\'importe plus » -> ["max_price"] : RETIRE la '
+    'contrainte, ne mets jamais un grand nombre), "objection": "PRICE|DISTANCE|PACKAGE|OTHER", "region": "<lieu>", "packaging": "<conditionnement>", "max_price": <nombre>, '
     '"criterion": "CHEAPEST"|"HIGHEST_AVAILABILITY"} si l\'utilisateur AJOUTE une contrainte au lieu de choisir '
-    "(« je préfère quelqu'un à Ouaga », « pas plus de 600 », « moins cher », « en sachet ») — ne renseigne que ce qui est dit ;\n"
+    "(« je préfère quelqu'un à Ouaga », « à Ouaga », « quelqu'un à Ouagadougou », « pas plus de 600 », « moins cher », « en sachet ») — un LIEU SEUL, "
+    "sans « celui de » ni nom, est un REFINEMENT region (plusieurs offres peuvent y correspondre), jamais un ATTRIBUTE ; ne renseigne que ce qui est dit ;\n"
     '    {"reference_type": "NONE_OF_THESE"} si aucune offre ne lui convient (« aucun », « rien ne me convient ») ;\n'
     '    ATTENTION : « pas Gilbert, Moussa » / « pas lui, prends Moussa » NOMME un remplaçant -> ATTRIBUTE {"producer_name": "Moussa"} '
     '(jamais OTHER) ; OTHER seulement quand AUCUN remplaçant n\'est nommé ;\n'

@@ -25,7 +25,10 @@ from ladini.domain.price_basis import (
     conflict_question,
     reconcile_price_basis,
 )
-from ladini.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
+from ladini.graphs.agents.market_coach.core.goals import (
+    BUYER_CART_GOALS,
+    DRAFT_BASED_CONFIRMATION_STATE_KEY,
+)
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     SUBFLOW_OWNED_KINDS,
     InteractionKind,
@@ -575,6 +578,28 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             )
 
     progress = _compute_progress(goal, payload)
+
+    # CORRECTION d'un récapitulatif actif (« en fait c'est oignon pas tomate ») : le brouillon versionné en est le PROPRIÉTAIRE. On ne réclame pas ici les champs
+    # que la correction a rendus incomplets (prix lié à l'ancien produit) — la porte de confirmation applique la correction au domaine (champs compatibles
+    # conservés, champs liés au produit revalidés, version +1) PUIS redemande le champ manquant. Sans ce passage, le brouillon actif restait sur l'ancien produit.
+    _draft_key = DRAFT_BASED_CONFIRMATION_STATE_KEY.get(goal_upper)
+    if (
+        (missing or errors)
+        and _draft_key
+        and state.get(_draft_key)
+        and (state.get("extracted_entities") or {}).get("is_correction")
+        and get_pending_interaction(state).kind == InteractionKind.CONFIRM_ACTION
+    ):
+        logger.info("business_edit_resolved | entity=%s | route=confirmation_gate", _draft_key)
+        return _finalize_validator_response(
+            state,
+            {
+                "status": "WAITING_CONFIRMATION",
+                "missing_fields": [],
+                "validation_errors": [],
+                "transaction_payload": payload,
+            },
+        )
 
     if missing or errors:
         first_missing = missing[0] if missing else None

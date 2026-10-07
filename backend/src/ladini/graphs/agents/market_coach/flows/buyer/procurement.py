@@ -300,23 +300,74 @@ def _refine_offers(state: Dict[str, Any], mc_runtime: Any, vendor_ctx: Dict[str,
         return _stay_on_menu(
             "Je ne connais que la région de chaque producteur, pas la distance. Dis-moi la région que tu préfères (Ouaga, Bobo…)."
         )
-    options = [option_from_vendor(v, i) for i, v in enumerate(current, start=1)]
-    kept = refine_options(ref, options)
+    # CONTRAINTES de recherche : poser / REMPLACER (« max 500 finalement ») / RETIRER (« le prix n'importe plus ») — recalculées depuis le POOL des résultats
+    # d'origine (jamais une relaxation silencieuse ni un plafond factice), puis la liste est RAFRAÎCHIE (l'ancien snapshot est périmé).
+    from ladini.graphs.agents.market_coach.domain.search_constraints import (
+        apply_constraints,
+        constraints_from_dict,
+        merge_constraints,
+    )
+
+    constraints_before = constraints_from_dict(vendor_ctx.get("search_constraints"))
+    pool = [v for v in (vendor_ctx.get("search_pool") or []) if isinstance(v, dict)]
+    # Plafond posé sur une liste SANS contrainte d'origine ni pool (réponse à « c'est trop cher ») : l'ancien filtre d'options (prix par offre) reste la référence.
+    legacy_ceiling = ref.max_price is not None and constraints_before.is_empty and not ref.remove
+    edits_constraints = (ref.max_price is not None and not legacy_ceiling) or bool(ref.packaging) or ref.volume is not None or bool(ref.remove)
+    base_list = current
+    if legacy_ceiling:
+        pool = pool or [dict(v) for v in current]  # garder les résultats d'origine : « le prix n'importe plus » pourra les rétablir
+        base_list = pool
+    constraints_after = constraints_before
+    note = ""
+    if edits_constraints:
+        if ref.remove and not pool:
+            return _stay_on_menu("Je ne peux pas élargir cette liste : relance ta recherche sans ce critère et je te montre tout.")
+        constraints_after = merge_constraints(
+            constraints_before,
+            max_price=ref.max_price,
+            package_type=ref.packaging,
+            package_size=ref.volume,
+            remove=list(ref.remove),
+        )
+        if constraints_after.price_unit is None and vendor_ctx.get("requested_unit"):
+            constraints_after = constraints_from_dict({**constraints_after.to_dict(), "price_unit": vendor_ctx.get("requested_unit")})
+        report = apply_constraints(pool or current, constraints_after)
+        base_list = report.kept
+        logger.info(
+            "business_edit_applied | entity=search_constraints | before=%s | after=%s | kept=%s",
+            constraints_before.to_dict(), constraints_after.to_dict(), len(base_list),
+        )
+        if not base_list:
+            return _stay_on_menu(
+                "Je n'ai rien trouvé avec ces critères — je garde ta liste actuelle. Tu peux élargir le prix, changer de conditionnement, ou je lance un appel d'offres."
+            )
+        if "max_price" in ref.remove:
+            note = "✅ Plafond de prix retiré.\n\n"
+        elif ref.max_price is not None:
+            note = f"✅ Plafond mis à {ref.max_price:g}.\n\n"
+    sub_ref = ref.model_copy(update={"max_price": None, "packaging": None, "volume": None, "remove": []}) if edits_constraints else ref
+    has_other_filter = any(v is not None for v in (sub_ref.region, sub_ref.criterion, sub_ref.producer_name)) or legacy_ceiling
+    options = [option_from_vendor(v, i) for i, v in enumerate(base_list, start=1)]
+    kept = refine_options(sub_ref, options) if has_other_filter else options
     if not kept:
         logger.info("interaction_mode=REFINEMENT | refine_offers | kept=0")
         return _stay_on_menu("Aucune offre ne correspond à ce critère parmi celles que j'ai trouvées. Je garde la liste actuelle — veux-tu un autre critère ?")
-    logger.info("interaction_mode=REFINEMENT | refine_offers | kept=%s of %s", len(kept), len(current))
-    narrowed = [current[o.index - 1] for o in kept]
+    logger.info("interaction_mode=REFINEMENT | refine_offers | kept=%s of %s", len(kept), len(base_list))
+    narrowed = [base_list[o.index - 1] for o in kept]
     patch, _menu = CartDomainService(mc_runtime).build_product_selection_menu(
         str(vendor_ctx.get("product") or ""),
         narrowed,
         extra_context={
             "requested_quantity": vendor_ctx.get("requested_quantity"),
             "requested_unit": vendor_ctx.get("requested_unit"),
+            "search_constraints": constraints_after.to_dict(),
+            "search_pool": pool,
         },
         phone=str(state.get("user_phone") or "") or None,
     )
     patch["vendor_selection_context"] = {**patch.get("vendor_selection_context", {}), "awaiting": None}
+    if note and patch.get("final_response"):
+        patch["final_response"] = note + str(patch["final_response"])
     return patch
 
 

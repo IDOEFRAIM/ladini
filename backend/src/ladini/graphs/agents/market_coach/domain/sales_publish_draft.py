@@ -286,13 +286,15 @@ class SalesPublishDraft:
         # aussi le prix/la quantité du nouveau produit) n'est jamais écrasé — seuls les champs
         # NON re-précisés ce tour-ci sont invalidés.
         if changed.get("product"):
+            # Un champ REDIT dans cette mise à jour (même s'il garde la même valeur) est confirmé par l'utilisateur pour le NOUVEAU produit : jamais purgé.
+            restated = {k for k, v in fields.items() if slot_has_value(v)}
             for stale_field, stale_current in (
                 ("commercial_offer", self.commercial_offer),
                 ("pricing_tiers", self.pricing_tiers),
                 ("price", self.price),
                 ("quantity", self.quantity),
             ):
-                if stale_field not in changed and stale_current is not None:
+                if stale_field not in changed and stale_field not in restated and stale_current is not None:
                     changed[stale_field] = None
         if not changed:
             return self
@@ -431,6 +433,28 @@ class SalesPublishDraft:
 @dataclass(frozen=True)
 class UpdateSalesPublishDraft:
     fields: Dict[str, Any]
+    #: CORRECTION explicite du produit du récapitulatif (« en fait c'est oignon pas tomate ») et non une NOUVELLE vente : les champs COMPATIBLES
+    #: (quantité, unité) sont conservés, les champs liés au produit (prix, offre certifiée, paliers) sont REVALIDÉS (purgés puis redemandés).
+    correction: bool = False
+
+
+#: Champs qui survivent à un changement de produit quand c'est une CORRECTION (valeurs physiques de ce que le producteur possède).
+_CORRECTION_COMPATIBLE_FIELDS = ("quantity", "unit")
+
+
+def carry_compatible_fields(draft: "SalesPublishDraft", fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Pour une correction de produit : ré-injecte `quantity`/`unit` du brouillon (si non redits) pour que `with_updates` ne les purge pas.
+
+    Jamais le prix, ni les paliers (« sachet 500 ml »), ni l'offre certifiée : ils visent UN produit — ils sont revalidés."""
+    new_product = fields.get("product")
+    if not new_product or str(new_product).strip().lower() == str(draft.product or "").strip().lower():
+        return fields
+    carried = dict(fields)
+    for key in _CORRECTION_COMPATIBLE_FIELDS:
+        current = getattr(draft, key, None)
+        if key not in carried and slot_has_value(current):
+            carried[key] = current
+    return carried
 
 
 @dataclass(frozen=True)
@@ -532,7 +556,8 @@ def apply_domain_action(
 
     if isinstance(action, UpdateSalesPublishDraft):
         try:
-            new_draft = draft.with_updates(**action.fields)
+            update_fields = carry_compatible_fields(draft, action.fields) if action.correction else action.fields
+            new_draft = draft.with_updates(**update_fields)
         except IllegalDraftTransition:
             return SalesPublishOutcome(kind=SalesPublishOutcomeKind.DRAFT_FINALIZED, draft=draft)
         if new_draft is draft:
@@ -619,7 +644,7 @@ def resolve_domain_action(
         return CancelSalesPublishDraft()
     fields = {k: v for k, v in (extracted_entities or {}).items() if k in _FIELD_NAMES}
     if fields:
-        return UpdateSalesPublishDraft(fields=fields)
+        return UpdateSalesPublishDraft(fields=fields, correction=bool((extracted_entities or {}).get("is_correction")))
     return NoSalesPublishAction(reason=f"unhandled_event:{event}" if event else None)
 
 

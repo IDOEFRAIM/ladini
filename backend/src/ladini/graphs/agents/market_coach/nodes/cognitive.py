@@ -578,6 +578,8 @@ def _active_confirmation_switch_candidate(
         and pending.kind == InteractionKind.CONFIRM_ACTION
     ):
         return None
+    if (state.get("extracted_entities") or {}).get("is_correction"):
+        return None  # correction explicite d'une valeur du récapitulatif : la même vente continue, le domaine revalide les champs liés au produit
     incoming_product = str(
         (state.get("extracted_entities") or {}).get("product") or ""
     ).strip()

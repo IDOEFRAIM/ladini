@@ -46,6 +46,21 @@ CASES: List[Dict[str, Any]] = [
      "expect": {"cart": [("Moussa", 5.0)]}},
     {"id": "C3_not_gilbert_moussa", "ctx": "tier_menu", "utt": "pas Gilbert, Moussa", "relation": "REJECTION+ALTERNATIVE",
      "expect": {"chosen": "Moussa"}},
+    # ── C bis. BUSINESS EDITS : corrections de la ligne du panier (le modèle interprète, le DOMAINE exécute) ───────────────
+    {"id": "C4_make_it_20", "ctx": "cart_has_item", "utt": "mets 20 plutôt", "relation": "CORRECTION",
+     "expect": {"cart": [("Moussa", 20.0)]}},
+    {"id": "C5_actually_8", "ctx": "cart_has_item", "utt": "finalement 8 litres", "relation": "CORRECTION",
+     "expect": {"cart": [("Moussa", 8.0)]}},
+    {"id": "C6_not_10_but_15", "ctx": "cart_has_item", "utt": "c pas 10 c 15", "relation": "CORRECTION",
+     "expect": {"cart": [("Moussa", 15.0)]}},
+    {"id": "C7_remove_line", "ctx": "cart_has_item", "utt": "enlève ça du panier", "relation": "CORRECTION",
+     "expect": {"cart": []}},
+    {"id": "C8_zero_is_not_a_quantity", "ctx": "cart_has_item", "utt": "mets 0", "relation": "CORRECTION",
+     "expect": {"cart": [("Moussa", 10.0)]}},
+    {"id": "C9_negative_is_refused", "ctx": "cart_has_item", "utt": "mets -5", "relation": "CORRECTION",
+     "expect": {"cart": [("Moussa", 10.0)]}},
+    {"id": "D4_price_no_longer_matters", "ctx": "producer_menu", "pre": ["c'est trop cher", "500"], "utt": "finalement le prix n'importe plus",
+     "relation": "REFINEMENT", "expect": {"vendors": 4, "cart": [], "chosen": None}},
     # ── D. rejet partiel ──────────────────────────────────────────────────────────────────────────────────────────────
     {"id": "D1_too_expensive", "ctx": "producer_menu", "utt": "c'est trop cher", "relation": "REFINEMENT",
      "expect": {"preserved": True, "no_redisplay": True, "any_of": ["prix", "combien", "budget", "plafond"]}},
@@ -112,6 +127,10 @@ def _refine(**kw: Any) -> Dict[str, Any]:
     return _ref_action(reference_type="REFINEMENT", **kw)
 
 
+def _edit(spec: Dict[str, Any]) -> Dict[str, Any]:
+    return {"new_task": {"disposition": "NEW_TASK", "intent": "BUYER_EDIT_CART", "confidence": 0.9, "entities": {"cart_edit": spec}}}
+
+
 def _qty(n: float, unit: str | None = None) -> Dict[str, Any]:
     return {"disposition": "ACTION", "action": "SET_QUANTITY", "quantity": n, "unit": unit}
 
@@ -144,6 +163,16 @@ SCRIPTED: Dict[str, Dict[str, Any]] = {
     "c'est certifié ?": _q("CERTIFICATION"),
     "c'est combien au total ?": {"new_task": {"disposition": "NEW_TASK", "intent": "BUYER_VIEW_CART", "confidence": 0.9, "entities": {}}},
     "c combien": {"new_task": {"disposition": "NEW_TASK", "intent": "BUYER_VIEW_CART", "confidence": 0.9, "entities": {}}},
+    # C. correction d'une LIGNE du panier : le modèle comprend (champ + valeur), le DOMAINE exécute
+    "je voulais dire 20 pas 10": _edit({"field": "QUANTITY", "value": 20}),
+    "non 5": _edit({"field": "QUANTITY", "value": 5}),
+    "mets 20 plutôt": _edit({"field": "QUANTITY", "value": 20}),
+    "finalement 8 litres": _edit({"field": "QUANTITY", "value": 8, "unit": "L"}),
+    "c pas 10 c 15": _edit({"field": "QUANTITY", "value": 15}),
+    "enlève ça du panier": _edit({"field": "REMOVE"}),
+    "mets 0": _edit({"field": "QUANTITY", "value": 0}),
+    "mets -5": _edit({"field": "QUANTITY", "value": -5}),
+    "finalement le prix n'importe plus": _refine(remove=["max_price"]),
     # G. changement de sujet
     "bon laisse cherche tomate": {"disposition": "DEVIATION", "new_task": {
         "disposition": "NEW_TASK", "intent": "BUYER_REQUEST", "confidence": 0.9, "entities": {"product": "tomate"}}},
@@ -160,7 +189,7 @@ SCRIPTED: Dict[str, Dict[str, Any]] = {
 }
 
 #: Cas qui DÉPENDENT d'une capacité de domaine absente (pas de correction de ligne de panier) : mesurés avec le vrai modèle, jamais scriptés.
-DOMAIN_LIMITS = {"C1_quantity_correction", "C2_short_correction"}
+DOMAIN_LIMITS: set = set()
 
 
 # ── vendeur (graphe PRODUCER) ────────────────────────────────────────────────────────────────────────────────────────────
@@ -172,8 +201,24 @@ SELLER_CASES: List[Dict[str, Any]] = [
     {"id": "S2_price_correction", "ctx": "seller_recap", "utt": "à 300 francs", "relation": "CORRECTION",
      "expect": {"slots": {"price": 300.0, "quantity": 300.0, "product": "tomate"}, "no_publish": True}},
     {"id": "S3_product_correction", "ctx": "seller_recap", "utt": "en fait c'est oignon pas tomate", "relation": "CORRECTION",
-     "expect": {"slots": {"product": "oignon", "quantity": 300.0, "price": 250.0}, "no_publish": True}},
+     "expect": {"slots": {"product": "oignon", "quantity": 300.0}, "no_publish": True}},
     {"id": "S4_not_now", "ctx": "seller_recap", "utt": "pas maintenant", "relation": "REJECTION", "expect": {"no_publish": True}},
     {"id": "S5_short_no_number", "ctx": "seller_recap", "utt": "non 250", "relation": "CORRECTION",
      "expect": {"slots": {"price": 250.0}, "no_publish": True}},
+    {"id": "S6_quantity_correction", "ctx": "seller_recap", "utt": "non 250 kg", "relation": "CORRECTION",
+     "expect": {"slots": {"quantity": 250.0, "product": "tomate"}, "no_publish": True}},
+    {"id": "S7_slash_price", "ctx": "seller_recap", "utt": "plutôt 280/kg", "relation": "CORRECTION",
+     "expect": {"slots": {"price": 280.0, "quantity": 300.0}, "no_publish": True}},
+    {"id": "S8_yes_but", "ctx": "seller_recap", "utt": "oui mais 280/kg", "relation": "CORRECTION",
+     "expect": {"slots": {"price": 280.0}, "no_publish": True}},
+    {"id": "S9_not_300_but_250", "ctx": "seller_recap", "utt": "c'est pas 300 c'est 250", "relation": "CORRECTION",
+     "expect": {"slots": {"quantity": 250.0}, "no_publish": True}},
+    {"id": "S10_wrong_product", "ctx": "seller_recap", "utt": "non pas des tomates, des mangues", "relation": "CORRECTION",
+     "expect": {"slots": {"product": "mangue", "quantity": 300.0}, "no_publish": True}},
+    {"id": "S11_price_typo", "ctx": "seller_recap", "utt": "ah non c 350 le prix", "relation": "CORRECTION",
+     "expect": {"slots": {"price": 350.0}, "no_publish": True}},
+    {"id": "S12_quantity_wrong", "ctx": "seller_recap", "utt": "jai dit 500 kg pas 300", "relation": "CORRECTION",
+     "expect": {"slots": {"quantity": 500.0}, "no_publish": True}},
+    {"id": "S13_ok_but_price", "ctx": "seller_recap", "utt": "ok mais mets 275", "relation": "CORRECTION",
+     "expect": {"slots": {"price": 275.0}, "no_publish": True}},
 ]

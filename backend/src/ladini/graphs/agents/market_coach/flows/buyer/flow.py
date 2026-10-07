@@ -120,12 +120,13 @@ async def buyer_context_resolver(
     stable_entities = state.get("stable_entities") or {}
 
     logger.info(
-        "buyer_context_resolver: goal=%s phase=%s intent=%s event=%s cart_items=%d",
+        "buyer_context_resolver: goal=%s phase=%s intent=%s event=%s cart_items=%d preorder_draft=%s",
         goal,
         phase,
         detected_intent or "",
         interpreted_event or "",
         len(active_cart),
+        bool(state.get("preorder_draft")),
     )
 
     # ── Finalize helper ──────────────────────────────────────────────
@@ -183,6 +184,7 @@ async def buyer_context_resolver(
             goal == "BUYER_PREORDER_CONFIRM"
             or detected_intent == "CONFIRMATION_EXPLICITE"
             or interpreted_event in {"CONFIRM", "SELECTION"}
+            or (interpreted_event == "UPDATE" and bool(payload.get("cart_edit") or (state.get("extracted_entities") or {}).get("cart_edit")))
             or bool(state.get("location_shared"))
         )
     ):

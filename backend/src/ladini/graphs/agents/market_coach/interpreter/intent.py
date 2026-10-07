@@ -508,6 +508,18 @@ INTENT_CONFIG = {
             "unit": "unité",
         },
     },
+    "BUYER_EDIT_CART": {
+        "tool_name": "edit_cart_line",
+        "required": [],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": (
+            "Correction d'une LIGNE du panier déjà ajoutée : changer sa quantité/son nombre de paquets, ou la retirer "
+            "(ex: \"je voulais dire 20 pas 10\", \"mets 10 sachets\", \"retire le lait\") — `cart_edit` décrit la correction"
+        ),
+        "label_map": {},
+    },
     "BUYER_VIEW_CART": {
         "tool_name": "view_cart",
         "required": [],
@@ -990,6 +1002,7 @@ _TUNNEL_ASSIGNMENTS = {
     # BUYER — tunnels transactionnels (handled_by_flow)
     "BUYER_ADD_TO_CART": "cart",
     "BUYER_VIEW_CART": "cart",
+    "BUYER_EDIT_CART": "cart",
     "BUYER_CREATE_PREORDER": "preorder",
     "BUYER_PREORDER_INIT": "preorder",
     "BUYER_PREORDER_CONFIRM": "preorder",
@@ -1057,6 +1070,7 @@ _TUNNEL_ASSIGNMENTS = {
 
 _BREAKOUT_INTENTS = (
     "BUYER_VIEW_CART",
+    "BUYER_EDIT_CART",
     "BUYER_LIST_ORDERS",
     "BUYER_CHECK_ORDER_STATUS",
     "BUYER_CANCEL_ORDER",
@@ -1136,6 +1150,7 @@ INTENT_ROLE = {
     # BUYER transactional tunnel (Panier → Précommande → Négociation)
     "BUYER_ADD_TO_CART": "BUYER",
     "BUYER_VIEW_CART": "BUYER",
+    "BUYER_EDIT_CART": "BUYER",
     "BUYER_CREATE_PREORDER": "BUYER",
     "BUYER_PREORDER_INIT": "BUYER",
     "BUYER_PREORDER_CONFIRM": "BUYER",
