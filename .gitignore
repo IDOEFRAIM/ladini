@@ -203,3 +203,7 @@ infra/providers/hetzner/*.tfvars
 
 # Copie encodee d un .env (secrets) : ne jamais versionner
 env_b64.txt
+
+# Rapports générés par le corpus terrain (jamais versionnés)
+backend/field_corpus_report.json
+backend/field_corpus_edit_report.json

@@ -253,6 +253,9 @@ class NewTaskInterpretation(BaseModel):
             data = {**data, "entities": {}}
         if isinstance(data, dict) and "candidate_goals" in data and data.get("candidate_goals") is None:
             data = {**data, "candidate_goals": []}
+        if isinstance(data, dict) and str(data.get("disposition") or "").upper() in {"CONFIRM", "REJECT"} and (data.get("entities") or {}).get("cart_edit"):
+            # « retire le lait » étiqueté CONFIRM mais décrit par un `cart_edit` : la STRUCTURE dit une édition, l'étiquette est fausse. Jamais une confirmation.
+            data = {**data, "disposition": NewTaskDisposition.NEW_TASK.value, "intent": "BUYER_EDIT_CART"}
         if isinstance(data, dict):
             # Lecteur TOLÉRANT : le vrai modèle écrit parfois le NOM DE L'INTENTION comme disposition (`"disposition": "BUYER_VIEW_CART"`) au lieu de
             # `NEW_TASK` + `intent`. L'intention est comprise : on la lit telle quelle (sinon repair, puis AMBIGUOUS/UNKNOWN — la phrase échouait).

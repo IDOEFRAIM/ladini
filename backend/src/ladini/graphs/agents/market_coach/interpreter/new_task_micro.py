@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional, Tuple
 from pydantic import ValidationError
 
 from ladini.core.idempotency import get_cached, increment, set_cached
+from ladini.domain.edit_validation import message_carries_value
 from ladini.domain.quantity_unit import (
     convert_quantity,
     extract_unit_only_from_text,
@@ -122,7 +123,7 @@ def _unknown_result(path: str) -> Dict[str, Any]:
 
 
 def _parse_and_validate(
-    raw_content: str, classifiable_intents: frozenset
+    raw_content: str, classifiable_intents: frozenset, text: str = ""
 ) -> Tuple[Optional[NewTaskInterpretation], str]:
     try:
         payload = json.loads(raw_content or "{}")
@@ -139,6 +140,15 @@ def _parse_and_validate(
         return None, (
             f"intent '{decision.intent}' hors catalogue — choisis une "
             "valeur EXACTE du catalogue fourni"
+        )
+    if decision.disposition in (NewTaskDisposition.CONFIRM, NewTaskDisposition.REJECT) and message_carries_value(text):
+        # Le modèle n'est pas l'autorité : un accord/refus PUR ne contient pas de valeur. « vas-y mais plutôt 20 » / « non 5 » CORRIGENT quelque chose ;
+        # exécuter l'ancienne confirmation serait une mutation fausse. 1 relance (repair) ; si le modèle persiste -> UNKNOWN (clarification), jamais d'exécution.
+        logger.info("business_edit_unsafe_blocked | reason=%s_carries_value", decision.disposition.value.lower())
+        return None, (
+            f"{decision.disposition.value} ne peut pas porter une valeur nouvelle : le message contient un nombre, donc il CORRIGE ou "
+            "modifie quelque chose — réponds NEW_TASK avec l'intention de modification (ex. BUYER_EDIT_CART + cart_edit, ou le même intent "
+            "avec is_correction), ou UNKNOWN si tu ne sais pas"
         )
     if decision.disposition == NewTaskDisposition.AMBIGUOUS:
         unknown = [g for g in decision.candidate_goals if g not in classifiable_intents]
@@ -159,6 +169,34 @@ def _validation_status_for(entities: Dict[str, Any]) -> Optional[str]:
     if entities.get("quantity") is None:
         return None
     return "VALID" if entities.get("unit") else "INVALID_MISSING_UNIT"
+
+
+_PURE_AGREEMENT_SYSTEM = (
+    "Un utilisateur répond à un récapitulatif en attente de validation. Dis si son message ne fait QU'ACCEPTER ou REFUSER en bloc "
+    "(« oui », « ok vas-y », « non », « laisse tomber »), ou s'il demande AUSSI un changement : retirer un article, modifier ou corriger "
+    "une valeur, en remplacer une. Réponds uniquement par le JSON {\"asks_for_change\": true|false}."
+)
+
+
+async def _asks_for_change(gateway: Any, text: str, base_metadata: Dict[str, Any], requested_model: Optional[str]) -> bool:
+    """Seconde opinion INDÉPENDANTE sur un CONFIRM/REJECT libre : le modèle n'est pas l'autorité d'une confirmation. Ne bloque que sur un « true » explicite ;
+    réponse illisible / erreur d'infrastructure -> on ne bloque pas (la décision principale vient d'aboutir, aucune raison de punir l'utilisateur)."""
+    from ladini.graphs.agents.market_coach.llm_gateway import LLMProfile
+
+    try:
+        completion = await gateway.complete(
+            profile=LLMProfile.INTERPRETER,
+            messages=[{"role": "system", "content": _PURE_AGREEMENT_SYSTEM}, {"role": "user", "content": f'Message : "{text}"'}],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=40,
+            agent_node="input_interpreter",
+            extra_metadata={**base_metadata, "cache_hit": False, "repair_retry": False, "purpose": "pure_agreement_check"},
+        )
+        data = json.loads(completion.choices[0].message.content or "{}")
+    except Exception:  # noqa: BLE001 - voir docstring : jamais punir l'utilisateur pour une panne de la vérification
+        return False
+    return isinstance(data, dict) and data.get("asks_for_change") is True
 
 
 async def run_new_task_microprompt(
@@ -261,7 +299,7 @@ async def run_new_task_microprompt(
         ],
         repair=False,
     )
-    decision, reason = _parse_and_validate(raw_content, classifiable_set)
+    decision, reason = _parse_and_validate(raw_content, classifiable_set, text)
 
     if decision is None:
         logger.info(
@@ -285,7 +323,7 @@ async def run_new_task_microprompt(
             ],
             repair=True,
         )
-        decision, reason = _parse_and_validate(raw_content, classifiable_set)
+        decision, reason = _parse_and_validate(raw_content, classifiable_set, text)
 
     if decision is None:
         logger.warning(
@@ -311,6 +349,13 @@ async def run_new_task_microprompt(
             requested_model,
             actual_model,
         )
+
+    if decision.disposition in (NewTaskDisposition.CONFIRM, NewTaskDisposition.REJECT) and (
+        prompt_context.cart_pending or prompt_context.draft_context
+    ):
+        if await _asks_for_change(gateway, text, base_metadata, requested_model):
+            logger.info("business_edit_unsafe_blocked | reason=%s_asks_for_change", decision.disposition.value.lower())
+            return NewTaskOutcome.RESULT, _unknown_result("new_task_confirm_asks_for_change")
 
     if cache_key:
         set_cached(cache_key, decision.model_dump_json(), ttl_seconds=_CACHE_TTL_SECONDS)

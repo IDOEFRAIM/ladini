@@ -78,12 +78,82 @@ Journaux : `business_edit_resolved | continuation_of=…`, `business_edit_applie
 | R3 | prix reporté sur le nouveau produit | `test_a_product_correction_keeps_the_physical_values…` |
 | R4 | drapeau `is_correction` non transmis au domaine | `test_the_correction_flag_reaches_the_domain_action…` |
 
-## 7. Limites déclarées
+## 7. Contrat de fiabilité avec le vrai modèle (stabilisation)
 
-* Corpus avec le VRAI modèle (53 cas, dont 7 corrections de panier, 8 corrections vendeur, 1 retrait de contrainte) : 46/53 puis 49/53
-  sur deux passes complètes ; les cas en échec changent d'une passe à l'autre (variance du modèle : « non 250 kg » lu comme prix,
-  « finalement 8 litres » → menu de précision sans mutation, « c'est trop cher » parfois lu comme plafond). Aucun échec n'a muté
-  l'état métier de façon erronée dans la dernière passe. Pas de seuil statistique garanti.
-* Aucun nouveau test Postgres : le chemin pré-commande réutilise `bootstrap_preorder_draft` (couvert par les tests CI existants) ;
-  en local la base est injoignable, la persistance du brouillon vendeur y est testée en mode dégradé.
-* Éditions de brouillons récurrents, de producteur ou de palier d'une ligne existante : non traitées (voir matrice).
+Principe : **le modèle peut être incertain, le domaine ne l'est jamais.** Langage incertain -> clarifier ; état périmé -> refuser ; édition valide -> l'appliquer une seule fois.
+
+### 7.1 Validation d'édition structurée (`domain/edit_validation.py`, pure)
+
+| Contrôle | Règle |
+|---|---|
+| Signal du texte | `cue_for_value(texte, nombre)` -> `MONEY` (« 280 francs », « 280/kg », « 600 le sachet »), `MEASURE` (« 250 kg », « 8 litres »), `BARE` ; construit sur `price_unit_next_to_amount` / `scan_number_candidates` / `normalize_unit` (aucune liste de phrases) |
+| Quantité vs prix | `quantity` + `MONEY` -> reclassé `price` ; `price` + `MEASURE` -> reclassé `quantity` ; conflit (les deux champs déjà posés) -> clarifier |
+| Unité invalide | quantité avec une unité monétaire -> clarifier |
+| Nombre nu | jamais tranché ici : la question en attente / le champ nommé décide. S'il y a ≥ 2 champs numériques possibles et aucun champ nommé -> clarifier |
+| « c'est pas 300 c'est 250 » | `extract_old_new_values` : l'ancienne valeur désigne le champ dans l'état courant (`resolve_edit_field_from_state`) ; deux champs égaux -> **ambigu, clarifier** ; le signal monétaire/mesure de l'ancien nombre départage |
+| Valeur absente | jamais d'édition (« c'est trop cher » ne pose aucun plafond) |
+
+Branchements : correction vendeur (`flows/producer/sales_confirmation.py`, avant `resolve_domain_action`), ligne de panier
+(`flows/buyer/cart.py`, une valeur monétaire n'est jamais une quantité de ligne).
+
+### 7.2 Accord ou refus ≠ correction
+
+* Un `CONFIRM`/`REJECT` porteur d'un nombre est invalide (`message_carries_value`) : relance de réparation puis `UNKNOWN`, jamais d'exécution.
+* Un `CONFIRM`/`REJECT` qui porte un `cart_edit` est lu comme l'édition que sa structure décrit.
+* Un `CONFIRM`/`REJECT` libre en attente de validation reçoit une seconde opinion indépendante (« demande-t-il aussi un changement ? ») ; veto
+  uniquement sur un « oui » explicite (illisible/panne -> pas de veto). Le veto donne `UNKNOWN` : rien n'est exécuté.
+
+### 7.3 Clarification sûre
+
+La question est affichée avec le récapitulatif inchangé ; le brouillon (version) et la confirmation en attente ne bougent pas.
+
+### 7.4 Évaluation multi-passes (`tests/field_corpus/test_business_edits.py`)
+
+Issue d'une passe : `DIRECT` (état final = attendu, ou inchangé quand « ne rien muter » est correct) · `SAFE_CLARIFICATION` (inchangé alors qu'un effet
+était attendu, ou menu de recherche abandonné sans donnée métier touchée) · `UNSAFE` (autre changement, ou outil d'exécution appelé).
+Agrégat par cas : `STABLE_PASS`, `FLAKY_PASS`, `SAFE_FAILURE`, `UNSAFE_FAILURE`. Critère de release : **0 `UNSAFE`**.
+
+```bash
+# CI / local, déterministe (modèle scripté, y compris FAUX pour les cas adversariaux)
+python -m pytest tests/field_corpus/test_business_edits.py tests/unit/test_edit_validation.py -q
+# vrai modèle, 3 passes, rapport JSON hors Git
+FIELD_CORPUS_REAL=1 FIELD_CORPUS_RUNS=3 REDIS_URL=redis://localhost:6379/15   python -m pytest tests/field_corpus/test_business_edits.py -k real_model -s -p no:cacheprovider
+```
+
+Mesures (29 cas × 3 passes, base #107 avant correctifs -> après) :
+
+| | base #107 | après |
+|---|---|---|
+| réussite directe | 71,9 % | 90,7 % |
+| clarification sûre | 13,5 % | 9,3 % |
+| mutation dangereuse | 14,6 % | **0 %** |
+| clarification inutile (effet attendu) | 15,6 % | 9,1 % |
+| cas STABLE / FLAKY / SAFE_FAILURE / UNSAFE | 17 / 6 / 2 / 5 | 22 / 7 / 0 / 0 |
+
+### 7.5 Matrice champ / opération
+
+| Contexte | Phrase | Champ | Opération |
+|---|---|---|---|
+| ligne de panier | `mets 20 litres` | quantity | SET |
+| ligne de panier | `enlève ça` | ligne | REMOVE |
+| vendeur | `non 250 kg` | quantity | SET |
+| vendeur | `à 350 francs` | price | SET |
+| vendeur | `c'est pas 300 c'est 250` | champ valant 300 dans l'état (quantity) | SET |
+| recherche | `le prix n'importe plus` | max_price | REMOVE |
+| recherche | `c'est trop cher` | max_price | valeur manquante -> demander |
+| confirmation | `oui mais mets 10` | quantity | SET + invalidation de la confirmation |
+
+### 7.6 Observabilité
+
+`business_edit_requested` (parse), `business_edit_validation` (reclassement / ancienne valeur résolue), `business_edit_safe_clarification`,
+`business_edit_unsafe_blocked`, `business_edit_applied`, `business_edit_conflict`. Métriques préparées par le harnais d'évaluation :
+`business_edit_direct_success_rate`, `business_edit_safe_clarification_rate`, `business_edit_unsafe_mutation_rate`, `unnecessary_clarification_rate`.
+
+## 8. Limites déclarées
+
+* Le vrai modèle reste variable : 7 cas critiques sont `FLAKY_PASS` (réussissent ou clarifient selon la passe), aucun `UNSAFE`. Résultat mesuré sur 3 passes
+  d'un seul fournisseur/modèle, pas une garantie statistique.
+* Un nombre nu avec plusieurs champs possibles (« non 280 » face à quantité ET prix) déclenche une clarification : volontaire (sûr).
+* Les brouillons vendeur sont versionnés (CAS) ; pas de test Postgres ajouté (aucune nouvelle mutation DB ; chemin pré-commande couvert par la CI existante).
+* Éditions de brouillons récurrents, de producteur ou de palier d'une ligne existante : non traitées (voir matrice §4).
+* Un `REJECT` structuré lu sur un menu de recherche peut abandonner le menu (« c'est trop cher » parfois) : classé échec sûr, aucune donnée métier touchée.

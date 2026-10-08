@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ladini.domain.edit_validation import EditVerdict, validate_structured_edit
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
@@ -11,6 +12,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
 )
 from ladini.graphs.agents.market_coach.domain.cart_edit import (
     CartEditSpec,
+    CartField,
     EditOutcome,
     EditStatus,
 )
@@ -545,6 +547,23 @@ async def _edit_cart_line(
             "final_response": "Qu'est-ce que tu veux modifier : la quantité d'un article, ou le retirer du panier ?",
             "ag_ui_component": None,
         }
+
+    if spec.field in (CartField.QUANTITY, CartField.PACKAGE_COUNT) and spec.value is not None:
+        # le modèle n'est pas l'autorité : « 280 francs le kg » ne devient jamais une quantité de ligne (le prix d'une ligne ne s'édite pas ici)
+        check = validate_structured_edit(
+            field="quantity" if spec.field == CartField.QUANTITY else "package_count",
+            value=spec.value,
+            unit=spec.unit,
+            text=state.get("normalized_text") or state.get("user_query"),
+        )
+        if check.verdict is EditVerdict.RECLASSIFIED or check.verdict is EditVerdict.CLARIFY:
+            logger.info("business_edit_unsafe_blocked | entity=cart_line | reason=%s", check.reason)
+            return {
+                "status": "WAITING_INPUT",
+                "response_strategy": "SUCCESS",
+                "final_response": "Je ne peux pas changer le prix d'un article ici. Dis-moi la *quantité* voulue (ex : « mets 20 litres »), ou « retire » pour l'enlever.",
+                "ag_ui_component": None,
+            }
 
     draft_dict = state.get("preorder_draft")
     if isinstance(draft_dict, dict) and draft_dict:

@@ -41,6 +41,15 @@ if str(_SRC) not in sys.path:
 # code de production — jamais une clé factice câblée dans `settings.py`/`get_llm.py`.
 os.environ.setdefault("GROQ_API_KEY", "test-suite-placeholder-key")
 
+# Hermétisme : `settings` lit aussi le `.env` de la machine (pydantic `env_file`), mais une variable d'environnement RÉELLE prime toujours sur lui.
+# Un `.env` de développeur pointe souvent vers un Redis/Valkey HÉBERGÉ (mot de passe non encodé -> `ValueError: Port could not be cast`
+# à la collecte de centaines de tests ; pire, des tests qui écriraient dans un service distant). La suite est hors ligne : on épingle l'URL
+# de cache/broker sur un port FERMÉ (127.0.0.1:1 : refus immédiat, les gardes « Redis indisponible » dégradent proprement — un Redis local persistant
+# ferait dépendre les tests des exécutions précédentes, ex. le cache d'interprétation), SAUF si l'environnement (CI, run explicite) les fournit déjà.
+# (REDIS_URL seulement : Celery lit lui-même CELERY_BROKER_URL/CELERY_RESULT_BACKEND dans l'environnement, les épingler fausserait ses propres tests ;
+# `settings.celery_broker/celery_backend` dérivent de REDIS_URL quand ils sont absents.)
+os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:1/0")
+
 
 def run(coro):
     """Exécute une coroutine dans une boucle fraîche (pas besoin de pytest-asyncio)."""
