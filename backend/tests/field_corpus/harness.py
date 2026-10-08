@@ -193,6 +193,7 @@ class SellerConv(FieldConv):
 SELLER_CONTEXTS: Dict[str, List[str]] = {
     "seller_recap": ["J'ai 300 kg de tomates à vendre à 250 FCFA/kg"],
     "seller_missing_quantity": ["J'ai des oignons à vendre à 250 FCFA/kg"],
+    "seller_recap_equal": ["J'ai 500 kg de tomates à vendre à 500 FCFA/kg"],
 }
 
 
@@ -217,7 +218,7 @@ def context_reached(ctx: str, st: Dict[str, Any]) -> bool:
         return chosen(st) == "Moussa" and not st.get("active_cart")
     if ctx == "cart_has_item":
         return bool(st.get("active_cart"))
-    if ctx == "seller_recap":
+    if ctx in ("seller_recap", "seller_recap_equal"):
         return pending == "CONFIRM_ACTION"
     if ctx == "seller_missing_quantity":
         return pending == "ENTER_FIELD" and "quantity" in (st.get("missing_fields") or [])

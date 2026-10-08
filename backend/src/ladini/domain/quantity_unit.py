@@ -780,7 +780,7 @@ _SCAN_WINDOW = 18
 # une unité collée À GAUCHE d'une lettre (ex: pas de match dans "packg").
 _SCAN_UNIT_RE = re.compile(
     r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])"
-    r"(k|kg|kgs|kilo|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|"
+    r"(k|kg|kgs|kilo|kilos|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|"
     r"sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités|"
     # (2026-09-30, Étape 6) : sous-multiples MASS/VOLUME — voir UNIT_SYNONYMS
     # plus haut pour pourquoi ils étaient absents (table locale isolée dans

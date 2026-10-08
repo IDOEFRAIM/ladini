@@ -23,16 +23,20 @@ PUBLISHED/FAILED/EXECUTION_UNKNOWN) est un nœud séparé,
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from ladini.core.telemetry import record_procurement_transaction_event
+from ladini.domain.edit_validation import normalize_edit_entities
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
     resolve_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.core.slots import resolve_canonical
 from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraft,
@@ -53,6 +57,12 @@ from ladini.services.database import sales_publish_draft_store
 from ladini.services.database.draft_store_support import cas_finalize
 
 logger = logging.getLogger("Ladini.MarketCoach.SalesConfirmation")
+
+
+def _fields_named_in(text: Any) -> Set[str]:
+    """Champs numériques (`price`/`quantity`) NOMMÉS dans le message (« le prix », « les kilos »), via la table d'alias des slots — jamais une liste locale."""
+    folded = unicodedata.normalize("NFKD", str(text or "").lower()).encode("ascii", "ignore").decode("ascii")
+    return {resolve_canonical(tok) for tok in re.findall(r"[a-z_]+", folded)} & {"price", "quantity"}
 
 
 def _target_of(pending_interaction: Any) -> Optional[Dict[str, Any]]:
@@ -111,12 +121,35 @@ async def resolve_sales_confirmation(
         if isinstance(_payload_offer, dict) and _payload_offer != draft.commercial_offer:
             extracted_entities = {**extracted_entities, "commercial_offer": _payload_offer}
 
+    # Le modèle n'est PAS l'autorité : une correction numérique est vérifiée contre le texte (quantité ≠ prix) et l'état courant (« pas 300, 250 »)
+    # AVANT toute mutation ; incohérence non réparable -> question, brouillon inchangé.
+    clarification: Optional[str] = None
+    if draft is not None and interpreted_event not in {"CONFIRM", "CANCEL"} and extracted_entities:
+        normalized = normalize_edit_entities(
+            extracted_entities,
+            text=state.get("normalized_text") or state.get("user_query"),
+            facts={"quantity": draft.quantity, "price": draft.price},
+            named_fields=_fields_named_in(state.get("normalized_text") or state.get("user_query")),
+        )
+        for _event in normalized.events:
+            logger.info(_event)
+        extracted_entities = normalized.entities
+        clarification = normalized.clarify
+
     action = resolve_domain_action(
         interpreted_event=interpreted_event,
         extracted_entities=extracted_entities,
         pending_target=pending_target,
     )
-    outcome = apply_domain_action(draft, action)
+    if clarification is not None:
+        logger.info("business_edit_safe_clarification | entity=sales_publish_draft | draft_id=%s", draft.draft_id if draft else None)
+        from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
+            SalesPublishOutcome,
+        )
+
+        outcome = SalesPublishOutcome(kind=_Kind.DRAFT_UNCHANGED, draft=draft)
+    else:
+        outcome = apply_domain_action(draft, action)
 
     if draft is not None and _is_mutation(draft, outcome.draft):
         finalized_candidate = outcome.draft
@@ -148,8 +181,8 @@ async def resolve_sales_confirmation(
                     outcome.draft.version if outcome.draft else None,
                 )
 
-    deviation_note: Optional[str] = None
-    if outcome.kind == _Kind.DRAFT_UNCHANGED and outcome.draft:
+    deviation_note: Optional[str] = clarification
+    if clarification is None and outcome.kind == _Kind.DRAFT_UNCHANGED and outcome.draft:
         summary = outcome.draft.render_summary()
         user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
         if summary:
@@ -159,6 +192,12 @@ async def resolve_sales_confirmation(
 
     plan = build_response_plan(outcome, deviation_note=deviation_note)
     patch = apply_response_plan(plan, state)
+    if clarification is not None:
+        # la question doit être VUE : stratégie SUCCESS + texte explicite (le rendu « confirmation » reconstruirait le récapitulatif seul) ; la confirmation
+        # en attente et le brouillon restent intacts.
+        patch["response_strategy"] = "SUCCESS"
+        _summary = outcome.draft.render_summary() if outcome.draft else ""
+        patch["final_response"] = "\n\n".join(part for part in (clarification, _summary, "Confirmez-vous ?" if _summary else "") if part)
 
     exit_target = _target_of(patch.get("pending_interaction"))
     exit_violation = check_confirmation_target_invariant(exit_target, outcome.draft)
