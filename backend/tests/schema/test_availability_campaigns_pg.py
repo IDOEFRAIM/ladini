@@ -500,7 +500,7 @@ def test_weekly_campaign_reschedules_and_is_not_resent_before_its_next_date(env)
     tick(env)
     assert env.one("select count(*) from intelligence.notification_outbox where template_key=%s", TEMPLATE) == 1
     # la semaine suivante : nouvelle exécution = nouveau run_key = nouveau message (et pas de doublon dans l'ancien)
-    env.cur.execute("update intelligence.availability_campaigns set next_run_at = now() at time zone 'utc' - interval '1 minute'")
+    env.cur.execute("update intelligence.availability_campaigns set next_run_at = now() at time zone 'utc' - interval '2 hours'")
     tick(env)
     assert env.one("select count(*) from intelligence.notification_outbox where template_key=%s", TEMPLATE) == 2
     assert env.one("select count(distinct run_key) from intelligence.availability_campaign_recipients") == 2

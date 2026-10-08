@@ -113,9 +113,9 @@ class WhatsAppChannel:
             if campaign and not str(getattr(settings, "TWILIO_PROACTIVE_TEMPLATE_CONTENT_SID", "") or "").strip() and not window_open:
                 return SendResult.skip("template_required")
             try:
-                return await asyncio.to_thread(
-                    self._send_sync_twilio, recipient_phone, body, not campaign
-                )
+                # Argument de repli ajouté SEULEMENT pour les campagnes : le chemin historique garde sa signature.
+                twilio_args = (recipient_phone, body, False) if campaign else (recipient_phone, body)
+                return await asyncio.to_thread(self._send_sync_twilio, *twilio_args)
             except Exception as exc:  # pragma: no cover - dépend du réseau
                 logger.warning(
                     "Envoi WhatsApp (Twilio) échoué vers %s : %s", recipient_phone, exc
