@@ -26,6 +26,7 @@ ALLOWED_METADATA_KEYS = frozenset(
         "disambiguation_trigger_id",
         "available_mapping_kind",
         "last_active_cart",
+        "last_turn",
     }
 )
 _INTERNAL_METADATA_KEYS = frozenset()
@@ -139,7 +140,33 @@ def clean_cart_snapshot(cart: Any) -> List[Dict[str, Any]]:
     return cleaned
 
 
+_MAX_LAST_TURN_RESPONSE_CHARS = 3500
+_MAX_LAST_TURN_INTERACTIVE_BYTES = 4000
+
+
+def clean_last_turn(value: Any) -> Dict[str, Any]:
+    """Résultat du DERNIER tour terminé, persisté avec l'état dans la MÊME écriture (`agri_workspaces`) : permet de REJOUER la réponse d'un message
+    livré deux fois (retry de tâche, redélivrance webhook, redémarrage) sans relancer le graphe sur un état déjà avancé. Identité = `message_sid`
+    (id fournisseur), jamais le texte. Borné ; `{}` si inexploitable."""
+    if not isinstance(value, dict):
+        return {}
+    sid = value.get("message_sid")
+    text = value.get("final_response")
+    if not isinstance(sid, str) or not sid or not isinstance(text, str):
+        return {}
+    out: Dict[str, Any] = {"message_sid": sid[:200], "final_response": text[:_MAX_LAST_TURN_RESPONSE_CHARS]}
+    interactive = value.get("interactive")
+    if isinstance(interactive, dict) and interactive:
+        try:
+            if len(json.dumps(interactive, default=str).encode("utf-8")) <= _MAX_LAST_TURN_INTERACTIVE_BYTES:
+                out["interactive"] = interactive
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 _METADATA_NORMALIZERS = {
+    "last_turn": clean_last_turn,
     "form_data": clean_form_data,
     "available_mapping": clean_mapping,
     "expected_candidates": clean_candidates,

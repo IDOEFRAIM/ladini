@@ -51,6 +51,33 @@ os.environ.setdefault("GROQ_API_KEY", "test-suite-placeholder-key")
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:1/0")
 
 
+def _fail_closed_remote_infrastructure() -> None:
+    """La suite est HORS LIGNE : si l'URL effective d'une base ou d'un cache (variable d'environnement, sinon `.env` local) pointe vers un hôte NON local,
+    elle est remplacée par une adresse fermée. Un `.env` de développeur contient souvent la vraie base / le vrai Redis hébergés : un test ne doit jamais pouvoir
+    y écrire. Les URLs locales (CI : service PostgreSQL sur localhost) et celles fournies explicitement pour un hôte local passent inchangées."""
+    from urllib.parse import urlsplit
+
+    try:
+        from dotenv import dotenv_values
+
+        dotted = dotenv_values(Path(__file__).resolve().parents[1] / ".env")
+    except Exception:  # pragma: no cover - python-dotenv absent / .env absent
+        dotted = {}
+    blocked = {"DATABASE_URL": "postgresql://blocked:blocked@127.0.0.1:1/blocked", "DO_DATABASE_URL": "postgresql://blocked:blocked@127.0.0.1:1/blocked",
+               "REDIS_URL": "redis://127.0.0.1:1/0"}
+    for var, closed in blocked.items():
+        value = os.environ.get(var) or dotted.get(var) or ""
+        try:
+            host = (urlsplit(str(value).strip().strip("\"'")).hostname or "").lower()
+        except ValueError:  # URL illisible (mot de passe non encodé…) : on la considère DISTANTE
+            host = "unparseable"
+        if value and host not in {"", "localhost", "127.0.0.1", "::1"}:
+            os.environ[var] = closed
+
+
+_fail_closed_remote_infrastructure()
+
+
 def run(coro):
     """Exécute une coroutine dans une boucle fraîche (pas besoin de pytest-asyncio)."""
     return asyncio.run(coro)

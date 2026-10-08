@@ -324,6 +324,11 @@ def _init_prometheus() -> None:
             "Messages entrants droppés par le dédoublonnage webhook (déjà en cours/traités).",
             ["channel"],
         ),
+        "inbound_replays": _counter(
+            "ladini_inbound_replays_total",
+            "Messages redélivrés dont la réponse d'origine a été REJOUÉE depuis la base (aucun nouveau traitement, aucun nouvel effet métier).",
+            [],
+        ),
         "workspace_reconciliation_failures": _counter(
             "ladini_workspace_reconciliation_failures_total",
             "Échecs (best-effort) de la relecture du checkpoint après un tour en échec.",
@@ -926,6 +931,15 @@ def count_duplicate_inbound_message(channel: str) -> None:
         pass
 
 
+def count_inbound_replay() -> None:
+    try:
+        metric = _metric("inbound_replays")
+        if metric is not None:
+            metric.labels().inc()
+    except Exception:
+        pass
+
+
 def count_workspace_reconciliation_failure() -> None:
     try:
         metric = _metric("workspace_reconciliation_failures")
@@ -970,6 +984,7 @@ __all__ = [
     "count_webhook",
     "count_inbound_enqueue_failure",
     "count_duplicate_inbound_message",
+    "count_inbound_replay",
     "count_workspace_reconciliation_failure",
     "count_transaction_retry",
     "prometheus_asgi_response",

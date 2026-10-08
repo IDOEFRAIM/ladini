@@ -263,6 +263,7 @@ def process_agent_task(
             "(dédoublonnage, déjà traité avec succès)",
             message_sid,
         )
+        logger.info("inbound_duplicate_detected | layer=task_done | reason=already_completed")
         turn_telemetry.end_turn()
         return [{"status": "duplicate_skipped", "reason": "already_completed"}]
 
@@ -272,6 +273,7 @@ def process_agent_task(
             "(dédoublonnage, déjà en cours sur un autre worker/tentative)",
             message_sid,
         )
+        logger.info("inbound_duplicate_detected | layer=task_claim | reason=already_processing")
         turn_telemetry.end_turn()
         return [{"status": "duplicate_skipped", "reason": "already_processing"}]
 
