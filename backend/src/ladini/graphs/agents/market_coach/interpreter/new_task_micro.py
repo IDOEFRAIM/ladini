@@ -123,7 +123,7 @@ def _unknown_result(path: str) -> Dict[str, Any]:
 
 
 def _parse_and_validate(
-    raw_content: str, classifiable_intents: frozenset, text: str = ""
+    raw_content: str, classifiable_intents: frozenset, text: str = "", *, pending_recap: bool = False
 ) -> Tuple[Optional[NewTaskInterpretation], str]:
     try:
         payload = json.loads(raw_content or "{}")
@@ -141,7 +141,7 @@ def _parse_and_validate(
             f"intent '{decision.intent}' hors catalogue — choisis une "
             "valeur EXACTE du catalogue fourni"
         )
-    if decision.disposition in (NewTaskDisposition.CONFIRM, NewTaskDisposition.REJECT) and message_carries_value(text):
+    if pending_recap and decision.disposition in (NewTaskDisposition.CONFIRM, NewTaskDisposition.REJECT) and message_carries_value(text):
         # Le modèle n'est pas l'autorité : un accord/refus PUR ne contient pas de valeur. « vas-y mais plutôt 20 » / « non 5 » CORRIGENT quelque chose ;
         # exécuter l'ancienne confirmation serait une mutation fausse. 1 relance (repair) ; si le modèle persiste -> UNKNOWN (clarification), jamais d'exécution.
         logger.info("business_edit_unsafe_blocked | reason=%s_carries_value", decision.disposition.value.lower())
@@ -299,7 +299,8 @@ async def run_new_task_microprompt(
         ],
         repair=False,
     )
-    decision, reason = _parse_and_validate(raw_content, classifiable_set, text)
+    _pending_recap = bool(prompt_context.cart_pending or prompt_context.draft_context)
+    decision, reason = _parse_and_validate(raw_content, classifiable_set, text, pending_recap=_pending_recap)
 
     if decision is None:
         logger.info(
@@ -323,7 +324,7 @@ async def run_new_task_microprompt(
             ],
             repair=True,
         )
-        decision, reason = _parse_and_validate(raw_content, classifiable_set, text)
+        decision, reason = _parse_and_validate(raw_content, classifiable_set, text, pending_recap=_pending_recap)
 
     if decision is None:
         logger.warning(

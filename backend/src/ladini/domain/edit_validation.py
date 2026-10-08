@@ -242,7 +242,8 @@ def normalize_edit_entities(
             only = float(out[proposed[0]])
         except (TypeError, ValueError):
             only = None
-        if only is not None and cue_for_value(text, only)[0] is ValueCue.BARE and not out.get("unit") and not out.get("price_unit"):
+        said_in_text = only is not None and any(_same(c.value, only) for c in scan_number_candidates(str(text or "")))
+        if said_in_text and cue_for_value(text, only)[0] is ValueCue.BARE and not out.get("unit") and not out.get("price_unit"):
             events.append("business_edit_safe_clarification | reason=bare_number_two_candidate_fields")
             return NormalizedEntities(dict(entities), clarify=_clarify_question(proposed[0]), events=tuple(events))
 

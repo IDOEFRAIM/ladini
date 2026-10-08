@@ -144,12 +144,12 @@ def test_a_pure_agreement_carries_no_value():
 
 
 def test_confirm_with_a_value_is_rejected_so_the_old_confirmation_never_executes():
-    decision, reason = _parse_and_validate(_raw(disposition="CONFIRM"), _INTENTS, "vas-y mais plutôt 20")
+    decision, reason = _parse_and_validate(_raw(disposition="CONFIRM"), _INTENTS, "vas-y mais plutôt 20", pending_recap=True)
     assert decision is None and "CORRIGE" in reason
 
 
 def test_reject_with_a_value_is_also_not_a_refusal():
-    decision, _ = _parse_and_validate(_raw(disposition="REJECT"), _INTENTS, "non 5")
+    decision, _ = _parse_and_validate(_raw(disposition="REJECT"), _INTENTS, "non 5", pending_recap=True)
     assert decision is None
 
 
@@ -163,3 +163,14 @@ def test_a_confirm_that_carries_a_cart_edit_is_read_as_the_edit_the_structure_sa
         _raw(disposition="CONFIRM", entities={"cart_edit": {"field": "REMOVE", "product": "lait"}}), _INTENTS, "retire le lait"
     )
     assert decision is not None and decision.disposition.value == "NEW_TASK" and decision.intent == "BUYER_EDIT_CART"
+
+
+def test_an_acceptance_that_restates_a_value_is_fine_outside_a_cart_or_draft_recap():
+    """« je prends les 250 kg » accepte une proposition (écran récurrent) : le nombre répète ce qui est accepté, il ne corrige rien."""
+    decision, _ = _parse_and_validate(_raw(disposition="CONFIRM"), _INTENTS, "je prends les 250 kg")
+    assert decision is not None and decision.disposition.value == "CONFIRM"
+
+
+def test_a_number_that_is_not_in_the_text_never_triggers_the_bare_number_clarification():
+    out = normalize_edit_entities({"price": 275.0}, text="", facts=FACTS)
+    assert out.clarify is None and out.entities == {"price": 275.0}
