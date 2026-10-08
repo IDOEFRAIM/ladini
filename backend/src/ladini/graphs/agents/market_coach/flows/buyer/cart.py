@@ -32,6 +32,7 @@ from ladini.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
     ProductLookupUnavailable,
 )
+from ladini.graphs.agents.market_coach.services.mcp.gateway import CampaignGateway
 from ladini.graphs.agents.market_coach.utils import (
     MarketRuntime,
     llm_deviation_reply,
@@ -52,6 +53,30 @@ from .preorder import create_preorder
 # =====================================================================
 # CART MANAGEMENT NODE
 # =====================================================================
+
+
+async def _campaign_attribution_note(
+    mc_runtime: MarketRuntime, state: Dict[str, Any], phone: str, product_name: Any, quantity: Any, unit: Any
+) -> Optional[str]:
+    """Couche d'ATTRIBUTION : si cette demande répond à une campagne de disponibilités reçue, la tracer (intérêt,
+    jamais une commande) et retourner une note SI l'offre vivante diffère de l'offre présentée. Best-effort : une
+    panne ici ne doit jamais gêner le parcours d'achat, qui continue sur les données vivantes."""
+    if not phone or not product_name:
+        return None
+    try:
+        res = await CampaignGateway(mc_runtime).record_campaign_interest(
+            phone=phone,
+            product_name=str(product_name),
+            quantity=quantity if isinstance(quantity, (int, float)) else None,
+            unit=str(unit) if unit else None,
+            message_ref=str(state.get("message_sid") or "") or None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("campaign attribution indisponible", exc_info=True)
+        return None
+    if isinstance(res, dict) and res.get("attributed") and res.get("note"):
+        return str(res["note"])
+    return None
 
 
 def _fresh_unit_this_turn(state: Dict[str, Any]) -> Any:
@@ -638,6 +663,8 @@ async def cart_management(
     stable_entities = state.get("stable_entities") or {}
     cart_service = CartDomainService(mc_runtime)
 
+    _campaign_note: Dict[str, Optional[str]] = {"note": None}
+
     def _with_base(extra: Dict[str, Any]) -> Dict[str, Any]:
         base: Dict[str, Any] = {"active_cart": cart}
         if goal and "current_goal" not in extra:
@@ -649,6 +676,11 @@ async def cart_management(
         if "ag_ui_component" not in extra:
             base["ag_ui_component"] = None
         base.update(extra)
+        _note = _campaign_note["note"]
+        if _note and isinstance(base.get("final_response"), str) and base["final_response"].strip() \
+                and base.get("status") != "ERROR":
+            base["final_response"] = f"{_note}\n\n{base['final_response']}"
+            _campaign_note["note"] = None
 
         # Persist the last known cart snapshot in working_memory to survive
         # cross-goal transitions (ex: précommande). This is cheap (replace_list)
@@ -1403,6 +1435,11 @@ async def cart_management(
         )
     vendors = confident_vendors
     has_multiple = len(vendors) > 1
+
+    if vendors:
+        _campaign_note["note"] = await _campaign_attribution_note(
+            mc_runtime, state, phone, product_name, quantity, payload.get("unit")
+        )
 
     # FLOW COMPRESSION : les contraintes dites dès le 1er message (prix max par unité, conditionnement) filtrent DÈS la première
     # recherche — rien n'est relâché en silence ; sans résultat, on le dit et on propose d'élargir.

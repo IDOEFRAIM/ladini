@@ -107,16 +107,40 @@ class WhatsAppChannel:
         if not recipient_phone:
             return SendResult.failure("missing_recipient_phone")
 
+        campaign = bool((payload or {}).get("campaign_recipient_id"))
+        window_open = bool((payload or {}).get("service_window_open"))
         if self._provider() == "twilio":
+            if campaign and not str(getattr(settings, "TWILIO_PROACTIVE_TEMPLATE_CONTENT_SID", "") or "").strip() and not window_open:
+                return SendResult.skip("template_required")
             try:
                 return await asyncio.to_thread(
-                    self._send_sync_twilio, recipient_phone, body
+                    self._send_sync_twilio, recipient_phone, body, not campaign
                 )
             except Exception as exc:  # pragma: no cover - dépend du réseau
                 logger.warning(
                     "Envoi WhatsApp (Twilio) échoué vers %s : %s", recipient_phone, exc
                 )
                 return SendResult.failure(str(exc))
+
+        if campaign:
+            # Message PROACTIF de campagne : modèle approuvé si configuré ; sinon texte libre UNIQUEMENT dans la
+            # fenêtre de service de 24 h ; sinon refus explicite. Jamais de repli sur du libre hors fenêtre.
+            template_name = str(getattr(settings, "WHATSAPP_CAMPAIGN_TEMPLATE_NAME", "") or "").strip()
+            if template_name:
+                try:
+                    from ladini.services.whatsapp import cloud_api_client as wa_t
+
+                    ref = await wa_t.send_template(
+                        recipient_phone, template_name,
+                        str(getattr(settings, "WHATSAPP_CAMPAIGN_TEMPLATE_LANGUAGE", "fr") or "fr"),
+                        [template_chunks(body)[0]],
+                    )
+                    return SendResult.success(provider_ref=ref) if ref else SendResult.failure("send_failed")
+                except Exception as exc:  # pragma: no cover - dépend du réseau
+                    logger.warning("Envoi modèle WhatsApp échoué vers %s : %s", recipient_phone[-4:], exc)
+                    return SendResult.failure(str(exc))
+            if not window_open:
+                return SendResult.skip("template_required")
 
         try:
             from ladini.services.whatsapp import cloud_api_client as wa
@@ -131,7 +155,7 @@ class WhatsAppChannel:
             )
             return SendResult.failure(str(exc))
 
-    def _send_sync_twilio(self, phone: str, body: str) -> SendResult:
+    def _send_sync_twilio(self, phone: str, body: str, allow_freeform_fallback: bool = True) -> SendResult:
         from twilio.http.http_client import TwilioHttpClient
         from twilio.rest import Client
 
@@ -167,6 +191,9 @@ class WhatsAppChannel:
                 if last_sid is not None:
                     # Un morceau est déjà parti : renvoyer en libre dupliquerait le début du message.
                     logger.warning("TEMPLATE_PARTIAL_SEND | to=%s | %s", phone[-4:], exc)
+                    return SendResult.failure(str(exc))
+                if not allow_freeform_fallback:
+                    # Campagne : jamais de repli sur du texte libre (refusé hors fenêtre de 24 h, et interdit ici).
                     return SendResult.failure(str(exc))
                 logger.warning("TEMPLATE_SEND_FAILED_FALLBACK_FREEFORM | to=%s | %s", phone[-4:], exc)
 

@@ -349,6 +349,16 @@ async def _handle_whatsapp_webhook(
             statuses = value.get("statuses") or []
             for st in statuses:
                 st_type = str(st.get("status") or "").lower()
+                if st_type in {"delivered", "read", "failed"}:
+                    # Campagnes de disponibilités : statut monotone par référence fournisseur (best-effort).
+                    from ladini.services.availability_campaigns.status_sink import (
+                        apply_provider_status,
+                    )
+
+                    _errs = st.get("errors") or [{}]
+                    await apply_provider_status(
+                        st.get("id"), st_type, error=str((_errs[0] or {}).get("code") or "") or None
+                    )
                 if st_type == "failed":
                     _log_failed_status(st)
                 elif st_type in _STATUS_EVENTS_TO_IGNORE:

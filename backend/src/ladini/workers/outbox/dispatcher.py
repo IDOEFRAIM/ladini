@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ladini.workers.outbox import templates
+from ladini.workers.outbox import campaign_hooks, templates
 from ladini.workers.outbox.channels import build_channel_registry
 from ladini.workers.repositories import outbox_repo
 from ladini.workers.runtime import worker_session
@@ -76,7 +76,24 @@ class OutboxDispatcher:
 
         # ── Phase 2 : envoi + mise à jour (une txn courte par message) ─────
         for job in jobs:
+            campaign = campaign_hooks.is_campaign_job(job)
+            if campaign:
+                # Message de campagne : recontrôle (annulation, désinscription, doublon) AVANT tout appel fournisseur.
+                try:
+                    skip_reason = await campaign_hooks.before_send(job)
+                except Exception as exc:  # noqa: BLE001 - fail-closed : on n'envoie pas, backoff normal
+                    logger.exception("campaign before_send en échec")
+                    async with worker_session() as session:
+                        await outbox_repo.mark_failed(session, job["id"], error=f"precheck_failed:{type(exc).__name__}")
+                    report.failed += 1
+                    continue
+                if skip_reason:
+                    await campaign_hooks.skip(job, skip_reason)
+                    continue
             result = await self._deliver(job)
+            if campaign and getattr(result, "skipped", False):
+                await campaign_hooks.skip(job, result.error or "skipped")
+                continue
             async with worker_session() as session:
                 if result.ok:
                     await outbox_repo.mark_sent(session, job["id"])
@@ -87,6 +104,8 @@ class OutboxDispatcher:
                     )
                     report.failed += 1
                     report.errors.append(f"{job['id']}: {result.error}")
+                if campaign:
+                    await campaign_hooks.after_send(session, job, result)
             await asyncio.sleep(_INTER_SEND_PAUSE_S)
 
         logger.info("OutboxDispatcher | %s", report.as_dict())

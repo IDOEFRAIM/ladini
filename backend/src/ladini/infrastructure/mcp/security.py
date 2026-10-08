@@ -127,6 +127,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "get_prohibited_terms": PermissionScope.DB_READ_ONLY,
     "record_moderation_strike": PermissionScope.DB_DATA_WRITE,
     "record_demand_signal": PermissionScope.DB_DATA_WRITE,
+    "record_campaign_interest": PermissionScope.DB_DATA_WRITE,
     # Escrow (Paydunya) — explicite plutôt que de laisser le guess automatique
     # décider, vu la sensibilité (argent bloqué / débloqué).
     "initiate_escrow_payment": PermissionScope.DB_DATA_WRITE,

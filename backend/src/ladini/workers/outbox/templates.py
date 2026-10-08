@@ -10,8 +10,23 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.workers.outbox.campaign_templates import (
+    render_availability_campaign as _render_availability_campaign,
+)
+from ladini.workers.outbox.campaign_templates import (
+    render_availability_interest_producer as _render_availability_interest_producer,
+)
+from ladini.workers.outbox.campaign_templates import render_body as _render_body
 
 AUCTION_INVITE_PRODUCER = "AUCTION_INVITE_PRODUCER"
+# Campagne de disponibilités : le corps est rendu à la MISE EN FILE (`services/availability_campaigns/message.py`,
+# fonction pure) à partir des offres figées ; `payload["body"]` porte le texte final. Volontairement ABSENT de
+# `INTERACTIVE_TEMPLATE_OWNERS` : la réponse est rattachée à la campagne par `campaign_service.mark_replied`.
+AVAILABILITY_CAMPAIGN_BUYER = "AVAILABILITY_CAMPAIGN_BUYER"
+# Question de consentement (la réponse « oui » est traitée par `compliance_gate`, pas par le graphe).
+CONSENT_REQUEST_BUYER = "CONSENT_REQUEST_BUYER"
+# Notification producteur : un acheteur a manifesté un intérêt (jamais une commande).
+AVAILABILITY_INTEREST_PRODUCER = "AVAILABILITY_INTEREST_PRODUCER"
 NEW_PRODUCT_ALERT_BUYER = "NEW_PRODUCT_ALERT_BUYER"
 # (Phase 4, approvisionnement récurrent) : UN digest par (acheteur, date) — jamais une notification
 # par besoin/producteur (voir `workers/automation/recurring_supply_digest_service.py`). Le corps est
@@ -321,6 +336,9 @@ def _render_recurring_supply_digest_buyer(p: Dict[str, Any]) -> str:
 
 
 _RENDERERS = {
+    AVAILABILITY_CAMPAIGN_BUYER: _render_availability_campaign,
+    CONSENT_REQUEST_BUYER: _render_body,
+    AVAILABILITY_INTEREST_PRODUCER: _render_availability_interest_producer,
     AUCTION_INVITE_PRODUCER: _render_auction_invite,
     RECURRING_SUPPLY_DIGEST_BUYER: _render_recurring_supply_digest_buyer,
     RECURRING_SUPPLY_ORDER_DELIVERED_BUYER: _render_recurring_supply_order_delivered_buyer,
@@ -348,4 +366,4 @@ def render(template_key: str, payload: Dict[str, Any]) -> str:
             (payload or {}).get("fallback")
             or "Vous avez une nouvelle notification Ladini."
         )
-    return renderer(payload or {})
+    return str(renderer(payload or {}))

@@ -292,6 +292,17 @@ def process_agent_task(
             resolved_type = "buyer" if role.upper() == "BUYER" else "producer"
             forced = True
 
+        # Conformité (arrêt / consentement aux campagnes) : traitement déterministe AVANT le graphe, sans LLM.
+        from ladini.services.availability_campaigns.compliance_gate import (
+            handle_inbound,
+        )
+
+        gated = await handle_inbound(
+            phone_number, user_query, message_sid=message_sid, interactive_id=interactive_id
+        )
+        if gated is not None:
+            return gated
+
         return await _orchestrator.handle(
             phone_number,
             user_query,

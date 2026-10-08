@@ -15,6 +15,9 @@ from ladini.api.routes.analytics_admin_market_balance import (
 from ladini.api.routes.analytics_admin_producers import (
     router as analytics_admin_producers_router,
 )
+from ladini.api.routes.availability_campaigns_admin import (
+    router as availability_campaigns_admin_router,
+)
 from ladini.api.routes.commercial_admin import router as commercial_admin_router
 from ladini.api.routes.market import router as market_router
 from ladini.api.routes.paydunya_webhook import router as paydunya_router
@@ -198,6 +201,7 @@ app.include_router(analytics_admin_producers_router)  # /internal/analytics/prod
 app.include_router(analytics_admin_market_balance_router)  # /internal/analytics/market-balance/* (token interne, lecture seule)
 app.include_router(commercial_admin_router)  # /internal/commercial/* (token interne — relances manuelles COMMERCIAL)
 app.include_router(recurring_admin_router)  # /internal/recurring-admin/* (token interne — OPERATIONS recurring : besoins + réglages)
+app.include_router(availability_campaigns_admin_router)  # /internal/availability-campaigns/* (token interne — campagnes proactives de disponibilités)
 
 
 # ── Métadonnées de release (hardening DevOps 2026-09-10) ─────────────

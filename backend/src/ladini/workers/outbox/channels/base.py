@@ -11,6 +11,12 @@ class SendResult:
     ok: bool
     provider_ref: Optional[str] = None
     error: Optional[str] = None
+    #: refus de CONFORMITÉ (ex. `template_required`) : ni échec fournisseur ni nouvelle tentative.
+    skipped: bool = False
+
+    @classmethod
+    def skip(cls, reason: str) -> "SendResult":
+        return cls(ok=False, error=reason, skipped=True)
 
     @classmethod
     def success(cls, provider_ref: Optional[str] = None) -> "SendResult":
