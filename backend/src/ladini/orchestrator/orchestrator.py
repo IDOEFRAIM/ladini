@@ -145,6 +145,39 @@ def _snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
     return minimal
 
 
+def _message_ref(message_sid: str | None) -> str:
+    """Référence COURTE et non réversible d'un id de message pour les journaux (corrélation sans exposer l'identifiant fournisseur)."""
+    import hashlib
+
+    return hashlib.sha256(str(message_sid or "").encode("utf-8")).hexdigest()[:10]
+
+
+def _replayed_turn(ws: Workspace, message_sid: str | None, workspace_id: str) -> Dict[str, Any] | None:
+    """Résultat DÉJÀ produit pour CE message (même `message_sid`), relu depuis la ligne `agri_workspaces` — écrite dans la MÊME transaction que l'état
+    du tour. Une redélivrance (retry de tâche après échec d'ENVOI, doublon webhook après expiration des clés Redis, redémarrage) rejoue donc la réponse
+    d'origine au lieu de relancer le graphe sur un état déjà avancé (« oui » re-lu comme message NOUVEAU : mauvaise réponse, ou pire). La base fait
+    autorité ; Redis n'est qu'un accélérateur fail-open."""
+    if not message_sid:
+        return None
+    last = (ws.metadata or {}).get("last_turn")
+    if not isinstance(last, dict) or last.get("message_sid") != message_sid:
+        return None
+    logger.info("inbound_replay_processed | message_ref=%s | workspace=%s", _message_ref(message_sid), workspace_id)
+    try:
+        from ladini.core import telemetry
+
+        telemetry.count_inbound_replay()
+    except Exception:  # pragma: no cover - la métrique ne bloque jamais un tour
+        pass
+    return {
+        "final_response": last.get("final_response", _FALLBACK_RESPONSE),
+        "agent": ws.active_agent,
+        "workspace_id": workspace_id,
+        "interactive": last.get("interactive"),
+        "replayed": True,
+    }
+
+
 class Orchestrator:
     """Seul orchestrateur. Instancié une fois, réutilisable."""
 
@@ -178,6 +211,9 @@ class Orchestrator:
         # sans code dupliqué par canal.
         async with conversation_turn_lock(workspace_id, timeout_seconds=_AGENT_TIMEOUT_SECONDS):
             ws = await self.resolver.resolve(workspace_id, workspace_type)
+            replay = _replayed_turn(ws, message_sid, workspace_id)
+            if replay is not None:
+                return replay
             guard = _WorkspaceRunGuard(ws, self._checkpointer, max_steps=_MAX_AGENT_STEPS)
             guard.attach()
             # (Phase 2 hardening, commit 11) : ouvre la capture `TurnTrace` avec l'état TEL
@@ -281,8 +317,7 @@ class Orchestrator:
                     else None
                 )
                 self._sync_workspace(ws, final, langgraph_blob)
-                await self._flush_workspace(ws, reason="completed")
-                return {
+                result = {
                     "final_response": final.get("final_response", _FALLBACK_RESPONSE),
                     "agent": ws.active_agent,
                     "workspace_id": workspace_id,
@@ -290,6 +325,17 @@ class Orchestrator:
                     # sur une décision qui gagnerait à être rendue en boutons/liste ?
                     "interactive": self._interactive_hint(final),
                 }
+                if message_sid and str(final.get("unknown_reason") or "").upper() != "TECHNICAL_FAILURE":
+                    # (un échec TECHNIQUE — LLM indisponible — n'est jamais mémorisé : la redélivrance doit RETRAITER le message, pas rejouer « indisponible »)
+                    # Le résultat du tour est persisté AVEC l'état (une seule écriture) : si l'ENVOI échoue ou si le worker meurt juste après, la
+                    # redélivrance du même message rejoue cette réponse (`_replayed_turn`) au lieu de re-traiter un état déjà avancé.
+                    ws.metadata["last_turn"] = {
+                        "message_sid": message_sid,
+                        "final_response": result["final_response"],
+                        "interactive": result["interactive"],
+                    }
+                await self._flush_workspace(ws, reason="completed")
+                return result
             finally:
                 guard.detach()
 
