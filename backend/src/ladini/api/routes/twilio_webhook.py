@@ -281,6 +281,11 @@ async def _handle_twilio_webhook(
         (form.get("MessageStatus") or form.get("SmsStatus") or "").strip().lower()
     )
     if status_value in _DELIVERY_STATUSES:
+        from ladini.services.availability_campaigns.status_sink import (
+            apply_provider_status,
+        )
+
+        await apply_provider_status(MessageSid, status_value, error=(form.get("ErrorCode") or None))
         logger.info(
             "TWILIO_STATUS_CALLBACK ignoré | sid=%s | status=%s",
             MessageSid,

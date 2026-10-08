@@ -553,6 +553,26 @@ class ModerationGateway(_BaseGateway):
 # ── Agent Actions ──────────────────────────────────────────────────
 
 
+class CampaignGateway(_BaseGateway):
+    async def record_campaign_interest(
+        self,
+        phone: str,
+        product_name: str,
+        quantity: Optional[float] = None,
+        unit: Optional[str] = None,
+        message_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Attribue la demande à la dernière campagne de disponibilités reçue (idempotent, jamais une commande)."""
+        return await self._call(
+            "record_campaign_interest",
+            phone=phone.strip(),
+            product_name=product_name,
+            quantity=quantity,
+            unit=unit,
+            message_ref=message_ref,
+        )
+
+
 class AgentActionGateway(_BaseGateway):
     async def create_action(
         self, agent_name: str, action_type: str, payload: Any

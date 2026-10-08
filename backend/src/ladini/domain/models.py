@@ -73,6 +73,12 @@ from ladini.domain.identity.models import (
     TrustScore,
     User,
 )
+from ladini.domain.intelligence.campaign_models import (
+    AvailabilityCampaign,
+    AvailabilityCampaignRecipient,
+    AvailabilityInterest,
+    CommunicationConsent,
+)
 from ladini.domain.intelligence.models import (
     AgentAction,
     AuditLog,
@@ -132,6 +138,10 @@ __all__ = [
     "ClimaticRegion",
     "Zone",
     "PlatformSetting",
+    "AvailabilityCampaign",
+    "AvailabilityCampaignRecipient",
+    "AvailabilityInterest",
+    "CommunicationConsent",
     "WorkZone",
     "Category",
     "SubCategory",

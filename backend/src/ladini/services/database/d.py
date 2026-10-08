@@ -17,6 +17,7 @@ from ladini.services.database.auth import AuthMixin
 from ladini.services.database.base_service import db_session_ctx, transactional
 from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.buyer_verification import BuyerVerificationMixin
+from ladini.services.database.campaign import CampaignMixin
 from ladini.services.database.category import PublicProductMixin
 from ladini.services.database.escrow import EscrowMixin
 from ladini.services.database.marketplace import MarketplaceMixin
@@ -39,6 +40,7 @@ class AgriDatabaseService(
     AuctionMixin,
     RecurringSupplyMixin,
     ModerationMixin,
+    CampaignMixin,
     EscrowMixin,
 ):
     _logger = logging.getLogger("Ladini.DatabaseService")

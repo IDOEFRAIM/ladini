@@ -23,6 +23,12 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
         "schedule": 30.0,  # toutes les 30 s
         "options": {"expires": 25},
     },
+    # Campagnes de disponibilités : réclame les campagnes dues et met leurs destinataires en file (lots bornés).
+    "availability-campaign-run": {
+        "task": "workers.availability_campaign_run",
+        "schedule": float(settings.AVAILABILITY_CAMPAIGN_TICK_SECONDS),
+        "options": {"expires": max(30.0, float(settings.AVAILABILITY_CAMPAIGN_TICK_SECONDS) - 5.0)},
+    },
     # Analytics Phase C : drain event_outbox -> business_events. Même cadence
     # que l'outbox notification (30s) — pas de raison métier d'être plus lent,
     # et le batch (100) absorbe largement le volume attendu au démarrage.

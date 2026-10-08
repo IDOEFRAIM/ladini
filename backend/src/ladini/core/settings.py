@@ -373,6 +373,18 @@ class Settings(BaseSettings):
     # Vide = envoi libre (comportement historique). Twilio uniquement (`MESSAGING_PROVIDER=twilio`).
     TWILIO_PROACTIVE_TEMPLATE_CONTENT_SID: str = ""
 
+    # --- Campagnes de disponibilités (diffusion proactive, voir docs/PROACTIVE_AVAILABILITY_CAMPAIGNS.md) ---
+    # Modèle WhatsApp (Meta Cloud) APPROUVÉ pour les campagnes : corps à UNE variable `{{1}}` (texte aplati).
+    # Vide = aucun modèle : hors fenêtre de service de 24 h, l'envoi est REFUSÉ (`template_required`), jamais tenté en libre.
+    WHATSAPP_CAMPAIGN_TEMPLATE_NAME: str = ""
+    WHATSAPP_CAMPAIGN_TEMPLATE_LANGUAGE: str = "fr"
+    # Fraîcheur : une offre dont `Product.updated_at` est plus ancien n'est pas présentée (aucune colonne « confirmée le »).
+    AVAILABILITY_OFFER_MAX_AGE_HOURS: int = 96
+    # Taille d'un lot de destinataires passés en file (PREPARED -> QUEUED) par transaction.
+    AVAILABILITY_CAMPAIGN_BATCH_SIZE: int = 50
+    # Cadence du cron Beat qui réclame les campagnes dues (secondes).
+    AVAILABILITY_CAMPAIGN_TICK_SECONDS: float = 60.0
+
     # --- WhatsApp Cloud API (Meta directe — provider par défaut) ---
     # Récupérés dans Meta for Developers → votre app → WhatsApp → API Setup.
     WHATSAPP_CLOUD_API_TOKEN: str = ""  # Access token permanent (System User)

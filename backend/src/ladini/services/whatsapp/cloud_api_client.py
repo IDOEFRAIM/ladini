@@ -121,6 +121,27 @@ async def send_text(to_phone: str, body: str) -> List[str]:
     return message_ids
 
 
+async def send_template(
+    to_phone: str, template_name: str, language: str, body_params: List[str]
+) -> Optional[str]:
+    """Envoie un modèle APPROUVÉ (seul message proactif autorisé hors fenêtre de service de 24 h).
+
+    `body_params` = variables du corps (`{{1}}`, `{{2}}`…), sans retour à la ligne. Retourne le `message_id`
+    (wamid) accepté par Meta, ou None si Meta n'en a pas renvoyé.
+    """
+    clean_to = to_phone.replace("whatsapp:", "").strip().lstrip("+")
+    template: Dict[str, Any] = {"name": template_name, "language": {"code": language}}
+    if body_params:
+        template["components"] = [
+            {"type": "body", "parameters": [{"type": "text", "text": p} for p in body_params]}
+        ]
+    data = await _post(
+        {"messaging_product": "whatsapp", "to": clean_to, "type": "template", "template": template}
+    )
+    msgs = data.get("messages") or []
+    return str(msgs[0].get("id") or "") or None if msgs else None
+
+
 async def send_interactive_buttons(
     to_phone: str,
     body: str,
